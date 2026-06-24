@@ -1,0 +1,30 @@
+[package]
+name = "calybris-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Open-source deterministic proof-carrying decision core behind Calybris Engine"
+repository = "https://github.com/emirhuseynrmx/calybris-core"
+homepage = "https://emirhuseyin.tech/engine"
+keywords = ["decision-engine", "proof-carrying", "integer-kernel", "budget", "wal"]
+categories = ["algorithms", "finance"]
+
+[dependencies]
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"
+
+[[example]]
+name = "simple_kernel"
+path = "examples/simple_kernel.rs"
+
+[[example]]
+name = "verify_wal"
+path = "examples/verify_wal.rs"
+
+[[bench]]
+name = "kernel_bench"
+harness = false
