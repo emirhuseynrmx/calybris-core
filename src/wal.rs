@@ -1,16 +1,21 @@
 //! Hash-chained Write-Ahead Log — tamper-evident, crash-recoverable.
 //!
-//! Each entry includes the SHA-256 hash of the previous entry.
-//! Modify any record and the chain breaks.
-//! The chain is validated on startup before accepting new decisions.
+//! Each entry's hash chains to the previous, forming a tamper-evident log.
+//! Optionally keyed with HMAC-SHA256: without a key the chain detects
+//! accidental corruption; with a key an attacker cannot recompute
+//! consistent hashes without possessing the secret.
 //!
+//! The chain is validated on startup before accepting new decisions.
 //! Generic over the decision type: any `Serialize + Clone` works.
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// A single WAL entry with hash chain link.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,14 +71,35 @@ impl From<serde_json::Error> for WalError {
     }
 }
 
-/// Compute SHA-256 hash of data.
-fn hash_entry<T: Serialize>(previous_hash: &str, data: &T) -> String {
-    let payload = serde_json::to_string(data).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(previous_hash.as_bytes());
-    hasher.update(payload.as_bytes());
-    let digest = hasher.finalize();
-    digest.iter().map(|b| format!("{:02x}", b)).collect()
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn compute_hash(previous_hash: &str, data_json: &str, key: Option<&[u8]>) -> String {
+    match key {
+        Some(k) => {
+            let mut mac =
+                HmacSha256::new_from_slice(k).expect("HMAC-SHA256 accepts any key length");
+            mac.update(previous_hash.as_bytes());
+            mac.update(data_json.as_bytes());
+            hex_encode(&mac.finalize().into_bytes())
+        }
+        None => {
+            let mut hasher = Sha256::new();
+            hasher.update(previous_hash.as_bytes());
+            hasher.update(data_json.as_bytes());
+            hex_encode(&hasher.finalize())
+        }
+    }
+}
+
+fn hash_entry<T: Serialize>(
+    previous_hash: &str,
+    data: &T,
+    key: Option<&[u8]>,
+) -> Result<String, WalError> {
+    let payload = serde_json::to_string(data)?;
+    Ok(compute_hash(previous_hash, &payload, key))
 }
 
 /// Hash-chained WAL writer.
@@ -81,14 +107,26 @@ pub struct WalWriter<T> {
     file: File,
     sequence: u64,
     last_hash: String,
+    hmac_key: Option<Vec<u8>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T: Serialize + Clone> WalWriter<T> {
     /// Open or create a WAL file. Validates existing chain on open.
     pub fn open(path: &Path) -> Result<Self, WalError> {
+        Self::open_inner(path, None)
+    }
+
+    /// Open or create a WAL file with HMAC-SHA256 keying.
+    /// Every entry's hash is computed with the key — an attacker who
+    /// modifies the file cannot recompute valid hashes without it.
+    pub fn open_keyed(path: &Path, key: &[u8]) -> Result<Self, WalError> {
+        Self::open_inner(path, Some(key.to_vec()))
+    }
+
+    fn open_inner(path: &Path, hmac_key: Option<Vec<u8>>) -> Result<Self, WalError> {
         let (sequence, last_hash) = if path.exists() {
-            Self::validate_chain(path)?
+            validate_chain_inner(path, hmac_key.as_deref())?
         } else {
             (0, "genesis".to_string())
         };
@@ -99,6 +137,7 @@ impl<T: Serialize + Clone> WalWriter<T> {
             file,
             sequence,
             last_hash,
+            hmac_key,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -106,7 +145,7 @@ impl<T: Serialize + Clone> WalWriter<T> {
     /// Append a decision to the WAL. Returns the entry with proof.
     pub fn append(&mut self, data: T) -> Result<WalEntry<T>, WalError> {
         self.sequence += 1;
-        let entry_hash = hash_entry(&self.last_hash, &data);
+        let entry_hash = hash_entry(&self.last_hash, &data, self.hmac_key.as_deref())?;
 
         let entry = WalEntry {
             sequence: self.sequence,
@@ -139,71 +178,61 @@ impl<T: Serialize + Clone> WalWriter<T> {
         &self.last_hash
     }
 
-    /// Validate the hash chain in an existing WAL file.
-    /// Returns (last_sequence, last_hash) on success.
+    /// Validate the hash chain in an existing WAL file (unkeyed).
     pub fn validate_chain(path: &Path) -> Result<(u64, String), WalError> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        validate_chain_inner(path, None)
+    }
+}
 
-        let mut expected_sequence = 1_u64;
-        let mut expected_prev_hash = "genesis".to_string();
-        let mut last_hash = "genesis".to_string();
-        let mut last_sequence = 0_u64;
+/// Validate the hash chain, optionally with an HMAC key.
+/// Uses serde_json's preserve_order feature so re-serializing the data
+/// field produces the same JSON bytes as the original write.
+fn validate_chain_inner(path: &Path, key: Option<&[u8]>) -> Result<(u64, String), WalError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
 
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
+    let mut expected_sequence = 1_u64;
+    let mut expected_prev_hash = "genesis".to_string();
+    let mut last_hash = "genesis".to_string();
+    let mut last_sequence = 0_u64;
 
-            // Parse as generic JSON to extract chain fields
-            let raw: serde_json::Value = serde_json::from_str(&line)?;
-            let sequence = raw["sequence"].as_u64().unwrap_or(0);
-            let previous_hash = raw["previous_hash"].as_str().unwrap_or("").to_string();
-            let entry_hash = raw["entry_hash"].as_str().unwrap_or("").to_string();
-
-            if sequence != expected_sequence {
-                return Err(WalError::DuplicateSequence(sequence));
-            }
-
-            if previous_hash != expected_prev_hash {
-                return Err(WalError::ChainBroken {
-                    sequence,
-                    expected: expected_prev_hash,
-                    found: previous_hash,
-                });
-            }
-
-            // Verify hash: extract the raw "data" JSON substring from the line
-            // to avoid serde_json::Value key reordering
-            let data_start = line.find("\"data\":").map(|i| i + 7);
-            let data_json = data_start.map(|start| {
-                // Find the matching closing brace/bracket
-                let sub = &line[start..line.len().saturating_sub(1)]; // strip trailing }
-                sub.to_string()
-            });
-            let data_str = data_json.unwrap_or_default();
-            let mut hasher = sha2::Sha256::new();
-            sha2::Digest::update(&mut hasher, previous_hash.as_bytes());
-            sha2::Digest::update(&mut hasher, data_str.as_bytes());
-            let digest = sha2::Digest::finalize(hasher);
-            let computed: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-            if computed != entry_hash {
-                return Err(WalError::ChainBroken {
-                    sequence,
-                    expected: computed,
-                    found: entry_hash,
-                });
-            }
-
-            last_hash = entry_hash;
-            last_sequence = sequence;
-            expected_sequence += 1;
-            expected_prev_hash = last_hash.clone();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
         }
 
-        Ok((last_sequence, last_hash))
+        let entry: WalEntry<serde_json::Value> = serde_json::from_str(&line)?;
+
+        if entry.sequence != expected_sequence {
+            return Err(WalError::DuplicateSequence(entry.sequence));
+        }
+
+        if entry.previous_hash != expected_prev_hash {
+            return Err(WalError::ChainBroken {
+                sequence: entry.sequence,
+                expected: expected_prev_hash,
+                found: entry.previous_hash,
+            });
+        }
+
+        let data_str = serde_json::to_string(&entry.data)?;
+        let computed = compute_hash(&entry.previous_hash, &data_str, key);
+        if computed != entry.entry_hash {
+            return Err(WalError::ChainBroken {
+                sequence: entry.sequence,
+                expected: computed,
+                found: entry.entry_hash,
+            });
+        }
+
+        last_hash = entry.entry_hash;
+        last_sequence = entry.sequence;
+        expected_sequence += 1;
+        expected_prev_hash = last_hash.clone();
     }
+
+    Ok((last_sequence, last_hash))
 }
 
 /// Read a WAL file without chain verification.
@@ -224,21 +253,30 @@ pub fn read_wal<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<WalEntr
     Ok(entries)
 }
 
-/// Verify the hash chain integrity of a WAL file.
-/// Returns (entry_count, last_hash) on success, or an error describing the break.
+/// Verify the hash chain integrity of a WAL file (unkeyed).
 pub fn verify_wal(path: &Path) -> Result<(u64, String), WalError> {
-    // Reuse the same validation logic as WalWriter::open
-    WalWriter::<serde_json::Value>::validate_chain(path)
+    validate_chain_inner(path, None)
 }
 
-/// Read a WAL file AND verify its chain integrity.
-/// Returns entries only if the entire chain is valid.
+/// Verify the hash chain integrity of a WAL file with HMAC key.
+pub fn verify_wal_keyed(path: &Path, key: &[u8]) -> Result<(u64, String), WalError> {
+    validate_chain_inner(path, Some(key))
+}
+
+/// Read a WAL file AND verify its chain integrity (unkeyed).
 pub fn read_verified_wal<T: for<'de> Deserialize<'de>>(
     path: &Path,
 ) -> Result<Vec<WalEntry<T>>, WalError> {
-    // Verify first
-    WalWriter::<serde_json::Value>::validate_chain(path)?;
-    // Then read
+    validate_chain_inner(path, None)?;
+    read_wal(path)
+}
+
+/// Read a WAL file AND verify its chain integrity with HMAC key.
+pub fn read_verified_wal_keyed<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    key: &[u8],
+) -> Result<Vec<WalEntry<T>>, WalError> {
+    validate_chain_inner(path, Some(key))?;
     read_wal(path)
 }
 
@@ -309,7 +347,6 @@ mod tests {
             .unwrap();
         }
 
-        // Reopen — should validate chain and continue
         let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
         assert_eq!(wal.sequence(), 2);
         wal.append(TestDecision {
@@ -341,12 +378,10 @@ mod tests {
             .unwrap();
         }
 
-        // Tamper with the file
         let content = std::fs::read_to_string(&path).unwrap();
         let tampered = content.replacen("\"cost\":2", "\"cost\":999", 1);
         std::fs::write(&path, tampered).unwrap();
 
-        // Reopen should fail
         let result = WalWriter::<TestDecision>::open(&path);
         assert!(result.is_err());
 
@@ -381,16 +416,20 @@ mod tests {
                 model: "x".into(),
                 cost: 5,
             },
-        );
+            None,
+        )
+        .unwrap();
         let h2 = hash_entry(
             "prev",
             &TestDecision {
                 model: "x".into(),
                 cost: 5,
             },
-        );
+            None,
+        )
+        .unwrap();
         assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 64); // SHA-256 hex
+        assert_eq!(h1.len(), 64);
     }
 
     #[test]
@@ -401,14 +440,141 @@ mod tests {
                 model: "x".into(),
                 cost: 5,
             },
-        );
+            None,
+        )
+        .unwrap();
         let h2 = hash_entry(
             "prev",
             &TestDecision {
                 model: "y".into(),
                 cost: 5,
             },
-        );
+            None,
+        )
+        .unwrap();
         assert_ne!(h1, h2);
+    }
+
+    // ── HMAC tests ──
+
+    #[test]
+    fn hmac_keyed_chain_validates() {
+        let path = temp_path("hmac-basic");
+        let _ = std::fs::remove_file(&path);
+        let key = b"calybris-secret-key-2026";
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
+            wal.append(TestDecision {
+                model: "a".into(),
+                cost: 10,
+            })
+            .unwrap();
+            wal.append(TestDecision {
+                model: "b".into(),
+                cost: 20,
+            })
+            .unwrap();
+            wal.sync().unwrap();
+        }
+
+        // Reopen with same key succeeds
+        let wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
+        assert_eq!(wal.sequence(), 2);
+
+        // verify_wal_keyed also works
+        let (count, _) = verify_wal_keyed(&path, key).unwrap();
+        assert_eq!(count, 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hmac_wrong_key_rejects() {
+        let path = temp_path("hmac-wrongkey");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open_keyed(&path, b"correct-key").unwrap();
+            wal.append(TestDecision {
+                model: "a".into(),
+                cost: 1,
+            })
+            .unwrap();
+        }
+
+        // Wrong key → chain broken
+        let result = WalWriter::<TestDecision>::open_keyed(&path, b"wrong-key");
+        assert!(result.is_err());
+
+        // No key → also fails (HMAC hash != plain SHA-256 hash)
+        let result = WalWriter::<TestDecision>::open(&path);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hmac_tamper_detected() {
+        let path = temp_path("hmac-tamper");
+        let _ = std::fs::remove_file(&path);
+        let key = b"audit-key";
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
+            wal.append(TestDecision {
+                model: "a".into(),
+                cost: 1,
+            })
+            .unwrap();
+            wal.append(TestDecision {
+                model: "b".into(),
+                cost: 2,
+            })
+            .unwrap();
+        }
+
+        // Tamper data
+        let content = std::fs::read_to_string(&path).unwrap();
+        let tampered = content.replacen("\"cost\":2", "\"cost\":999", 1);
+        std::fs::write(&path, tampered).unwrap();
+
+        // Even with the correct key, tamper is detected
+        let result = verify_wal_keyed(&path, key);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hmac_different_key_different_hash() {
+        let h1 = compute_hash("prev", "{\"x\":1}", Some(b"key-a"));
+        let h2 = compute_hash("prev", "{\"x\":1}", Some(b"key-b"));
+        let h3 = compute_hash("prev", "{\"x\":1}", None);
+        assert_ne!(h1, h2);
+        assert_ne!(h1, h3);
+        assert_ne!(h2, h3);
+    }
+
+    #[test]
+    fn read_verified_keyed_works() {
+        let path = temp_path("hmac-read-verified");
+        let _ = std::fs::remove_file(&path);
+        let key = b"read-key";
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
+            wal.append(TestDecision {
+                model: "x".into(),
+                cost: 42,
+            })
+            .unwrap();
+        }
+
+        let entries = read_verified_wal_keyed::<TestDecision>(&path, key).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].data.model, "x");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -555,9 +555,12 @@ mod tests {
                 rejected.capability += 1;
                 continue;
             }
+            if model.provider_id >= 64 {
+                rejected.provider += 1;
+                continue;
+            }
             if input.allowed_provider_mask != ALL_PROVIDERS
-                && (model.provider_id >= 64
-                    || input.allowed_provider_mask & (1_u64 << model.provider_id) == 0)
+                && input.allowed_provider_mask & (1_u64 << model.provider_id) == 0
             {
                 rejected.provider += 1;
                 continue;

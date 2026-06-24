@@ -39,13 +39,13 @@ Per-tenant budget management. All values in i64 microcents (1 cent = 1,000,000 m
 
 ### `wal.rs` — Hash-Chained Write-Ahead Log
 
-Generic, tamper-evident decision log. Each entry includes the SHA-256 hash of the previous entry.
+Generic, tamper-evident decision log. Each entry's hash chains to the previous.
 
 - Generic over any `Serialize + Deserialize` type
+- **HMAC-SHA256 keyed mode**: attacker cannot recompute valid hashes without the key
+- Unkeyed mode (plain SHA-256) detects accidental corruption
 - Chain validated on open — refuses to continue on broken chain
-- Tamper detection: modify any record, chain breaks
 - fsync support for crash durability
-- For adversarial tamper evidence, persist or sign the final head hash outside the WAL file
 
 ## Benchmarks
 
@@ -56,7 +56,7 @@ Generic, tamper-evident decision log. Each entry includes the SHA-256 hash of th
 | HTTP p99 (full engine) | 42ms |
 | Real data (full engine) | 1.1M decisions, 0 runtime failures |
 
-Public core includes 30 default-running tests, including property tests, plus 1 ignored release-only latency guard. The full proprietary engine has 336 tests (40% adversarial) against the complete stack.
+Public core includes 35 default-running tests (including property tests and HMAC verification), plus 1 ignored release-only latency guard. The full proprietary engine has 336 tests (40% adversarial) against the complete stack.
 
 Full methodology: [emirhuseyin.tech/engine/methodology.html](https://emirhuseyin.tech/engine/methodology.html)
 
@@ -71,7 +71,7 @@ let decision = snapshot.prescribe(input);
 println!("{:?} → model {}", decision.action, decision.selected_model_id);
 ```
 
-**Hash-chained WAL:**
+**Hash-chained WAL (unkeyed):**
 ```rust
 use calybris_core::wal::WalWriter;
 
@@ -79,6 +79,17 @@ let mut wal = WalWriter::open(&path)?;
 let entry = wal.append(my_decision)?;
 wal.sync()?;
 // entry.entry_hash chains to previous — tamper-evident
+```
+
+**HMAC-keyed WAL (adversarial tamper evidence):**
+```rust
+use calybris_core::wal::WalWriter;
+
+let key = b"my-secret-audit-key";
+let mut wal = WalWriter::open_keyed(&path, key)?;
+wal.append(my_decision)?;
+wal.sync()?;
+// Without the key, attacker cannot forge valid hashes
 ```
 
 **Budget reservation:**
@@ -134,7 +145,7 @@ cargo test
 
 - **kernel.rs** — Tam sayı karar kernel'i, 8.6M/s, sıfır bellek tahsisi
 - **budget.rs** — CAS atomik bütçe motoru, i64 mikrosent, korunum kanıtlı
-- **wal.rs** — SHA-256 hash-zincirli WAL, kurcalamaya dayanıklı, jenerik
+- **wal.rs** — HMAC-SHA256 destekli hash-zincirli WAL, kurcalamaya dayanıklı, jenerik
 
 ### Dahil Olmayan (Tescilli)
 
