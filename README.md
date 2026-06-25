@@ -44,8 +44,9 @@ Generic, tamper-evident decision log. Each entry's hash chains to the previous.
 - Generic over any `Serialize + Deserialize` type
 - **HMAC-SHA256 keyed mode**: attacker cannot recompute valid hashes without the key
 - Unkeyed mode (plain SHA-256) detects accidental corruption
+- Constant-time hash comparison (`subtle`) to prevent timing side-channels
 - Chain validated on open — refuses to continue on broken chain
-- fsync support for crash durability
+- `append()` flushes to OS but does not fsync — call `sync()` explicitly for crash durability
 
 ## Benchmarks
 

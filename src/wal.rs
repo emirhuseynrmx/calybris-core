@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -218,7 +219,13 @@ fn validate_chain_inner(path: &Path, key: Option<&[u8]>) -> Result<(u64, String)
 
         let data_str = serde_json::to_string(&entry.data)?;
         let computed = compute_hash(&entry.previous_hash, &data_str, key);
-        if computed != entry.entry_hash {
+        // Constant-time comparison to prevent timing side-channel on keyed WAL
+        if computed
+            .as_bytes()
+            .ct_eq(entry.entry_hash.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
             return Err(WalError::ChainBroken {
                 sequence: entry.sequence,
                 expected: computed,
