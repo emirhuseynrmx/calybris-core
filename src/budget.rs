@@ -416,20 +416,24 @@ impl BudgetEngine {
         drop(reservations);
 
         let delta: i64 = actual_microcents - reservation.reserved_microcents;
-        if delta > 0 {
-            // Overrun: atomically debit additional amount via CAS
-            if let Err(remaining) = debit_if_available(&budget, delta) {
-                // Can't afford overrun — re-insert reservation but do NOT refund.
-                // The original reserved amount is still deducted from the budget;
-                // refunding it here would violate conservation (create money).
-                let mut reservations = self.reservations.lock().unwrap();
-                reservations.insert(reservation_id, reservation);
-                return BudgetSettlement::Overrun {
-                    remaining_microcents: remaining,
-                };
+        match delta.cmp(&0) {
+            std::cmp::Ordering::Greater => {
+                // Overrun: atomically debit additional amount via CAS
+                if let Err(remaining) = debit_if_available(&budget, delta) {
+                    // Can't afford overrun — re-insert reservation but do NOT refund.
+                    // The original reserved amount is still deducted from the budget;
+                    // refunding it here would violate conservation (create money).
+                    let mut reservations = self.reservations.lock().unwrap();
+                    reservations.insert(reservation_id, reservation);
+                    return BudgetSettlement::Overrun {
+                        remaining_microcents: remaining,
+                    };
+                }
             }
-        } else if delta < 0 {
-            budget.fetch_add(-delta, Ordering::AcqRel);
+            std::cmp::Ordering::Less => {
+                budget.fetch_add(-delta, Ordering::AcqRel);
+            }
+            std::cmp::Ordering::Equal => {}
         }
 
         {

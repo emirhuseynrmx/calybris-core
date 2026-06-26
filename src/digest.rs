@@ -3,6 +3,8 @@
 //! Digests use a versioned byte layout (not JSON) so fingerprints are stable
 //! across machines and serde field order.
 
+use std::fmt::Write;
+
 use crate::kernel::{KernelDecision, KernelInput, KernelModel, PolicySnapshot};
 use sha2::{Digest, Sha256};
 
@@ -16,8 +18,16 @@ pub const DECISION_DIGEST_TAG: &[u8] = b"calydcn1\0";
 pub const LEDGER_DIGEST_TAG: &[u8] = b"calyldg1\0";
 
 #[inline]
+pub fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+#[inline]
 pub fn digest_to_hex(digest: &[u8; 32]) -> String {
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    bytes_to_hex(digest)
 }
 
 #[inline]

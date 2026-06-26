@@ -8,7 +8,7 @@
 //! The chain is validated on startup before accepting new decisions.
 //! Generic over the decision type: any `Serialize` type works.
 
-use crate::digest::{digest_to_hex, policy_digest};
+use crate::digest::{bytes_to_hex, digest_to_hex, policy_digest};
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{audit_bundle, verify_decision, VerifyResult};
 use hmac::{Hmac, Mac};
@@ -109,11 +109,6 @@ where
     wal.append_audited(snapshot, input, decision, metadata)
 }
 
-#[inline]
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
 fn compute_hash(
     previous_hash: &str,
     data_json: &str,
@@ -129,13 +124,13 @@ fn compute_hash(
             })?;
             mac.update(previous_hash.as_bytes());
             mac.update(data_json.as_bytes());
-            Ok(hex_encode(&mac.finalize().into_bytes()))
+            Ok(bytes_to_hex(&mac.finalize().into_bytes()))
         }
         None => {
             let mut hasher = Sha256::new();
             hasher.update(previous_hash.as_bytes());
             hasher.update(data_json.as_bytes());
-            Ok(hex_encode(&hasher.finalize()))
+            Ok(bytes_to_hex(&hasher.finalize()))
         }
     }
 }
