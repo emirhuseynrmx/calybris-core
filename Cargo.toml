@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 rust-version = "1.83"
 license = "Apache-2.0"
@@ -41,6 +41,14 @@ path = "examples/simple_kernel.rs"
 [[example]]
 name = "verify_wal"
 path = "examples/verify_wal.rs"
+
+[[example]]
+name = "llm_routing"
+path = "examples/llm_routing.rs"
+
+[[example]]
+name = "hft_pretrade_guard"
+path = "examples/hft_pretrade_guard.rs"
 
 [[example]]
 name = "route_decision"

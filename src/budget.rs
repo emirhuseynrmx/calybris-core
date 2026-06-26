@@ -6,7 +6,16 @@
 //! CAS-based balance updates; metadata maps are mutex-protected.
 //! Lock ordering is always: reservations first, then tenant_budgets — no deadlock.
 //!
-//! Conservation invariant: `remaining + reserved + committed = initial`
+//! Conservation invariant (per tenant, at any instant):
+//!
+//! ```text
+//! remaining + reserved + committed_lifetime == initial
+//! ```
+//!
+//! - `remaining` — spendable balance right now
+//! - `reserved` — sum of active (uncommitted) holds
+//! - `committed_lifetime` — cumulative spend since tenant creation (monotonic, never decreases)
+//! - `initial` — total budget ever granted (`ensure_tenant` + [`top_up_tenant`](BudgetEngine::top_up_tenant))
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -24,6 +33,18 @@ pub enum BudgetReservation {
     },
     MissingTenant,
     MissingReservation,
+}
+
+/// Result of topping up a tenant budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TopUpResult {
+    ToppedUp {
+        added_microcents: i64,
+        new_initial_microcents: i64,
+        remaining_microcents: i64,
+    },
+    MissingTenant,
+    InvalidAmount,
 }
 
 /// Budget settlement result.
@@ -97,6 +118,7 @@ pub struct TenantLedger {
     pub initial_microcents: i64,
     pub remaining_microcents: i64,
     pub reserved_microcents: i64,
+    /// Cumulative lifetime spend for this tenant (monotonic; not "currently committed").
     pub committed_microcents: i64,
 }
 
@@ -150,7 +172,10 @@ impl BudgetEngine {
 
     /// Initialize a tenant with a budget in microcents.
     ///
-    /// Idempotent — calling with a tenant that already exists does nothing.
+    /// Idempotent — calling with an existing tenant does nothing (no top-up).
+    /// Use [`top_up_tenant`](Self::top_up_tenant) to add funds later.
+    /// `initial_microcents` is fixed at creation for audit binding; top-ups extend it.
+    ///
     /// Panics in debug mode if `budget_microcents` is negative.
     pub fn ensure_tenant(&self, tenant_id: &str, budget_microcents: i64) {
         debug_assert!(
@@ -171,7 +196,41 @@ impl BudgetEngine {
         }
     }
 
-    /// Initial budget granted to a tenant in microcents.
+    /// Add funds to an existing tenant (extends `initial` and `remaining` equally).
+    ///
+    /// Does not reset `committed_microcents` (lifetime spend is preserved).
+    /// Returns [`TopUpResult::MissingTenant`] if the tenant was never created.
+    pub fn top_up_tenant(&self, tenant_id: &str, amount_microcents: i64) -> TopUpResult {
+        if amount_microcents <= 0 {
+            return TopUpResult::InvalidAmount;
+        }
+        let key: Arc<str> = Arc::from(tenant_id);
+        let budget = {
+            let budgets = self.tenant_budgets.lock().unwrap();
+            match budgets.get(&key) {
+                Some(b) => Arc::clone(b),
+                None => return TopUpResult::MissingTenant,
+            }
+        };
+        let remaining = budget.fetch_add(amount_microcents, Ordering::AcqRel) + amount_microcents;
+        let new_initial = {
+            let mut initials = self.initial_microcents.lock().unwrap();
+            match initials.get_mut(&key) {
+                Some(entry) => {
+                    *entry += amount_microcents;
+                    *entry
+                }
+                None => return TopUpResult::MissingTenant,
+            }
+        };
+        TopUpResult::ToppedUp {
+            added_microcents: amount_microcents,
+            new_initial_microcents: new_initial,
+            remaining_microcents: remaining,
+        }
+    }
+
+    /// Total budget ever granted to a tenant (`ensure_tenant` + top-ups).
     #[must_use]
     pub fn initial_microcents(&self, tenant_id: &str) -> Option<i64> {
         let initials = self.initial_microcents.lock().unwrap();
@@ -179,7 +238,9 @@ impl BudgetEngine {
         initials.get(&key).copied()
     }
 
-    /// Total committed (spent) microcents for a tenant.
+    /// Cumulative lifetime spend for a tenant (monotonic; increases on each successful [`commit`](Self::commit)).
+    ///
+    /// This is **not** "currently in-flight committed amount" — active holds live in [`reserved_microcents`](Self::reserved_microcents).
     #[must_use]
     pub fn committed_microcents(&self, tenant_id: &str) -> Option<i64> {
         let committed = self.committed_microcents.lock().unwrap();
@@ -233,7 +294,9 @@ impl BudgetEngine {
         }
     }
 
-    /// Verify `remaining + reserved + committed == initial` for every tenant.
+    /// Verify `remaining + reserved + committed_lifetime == initial` for every tenant.
+    ///
+    /// Takes a full ledger snapshot — intended for audit/reconciliation, not per-tick hot paths.
     #[must_use]
     pub fn verify_conservation(&self) -> ConservationStatus {
         for ledger in &self.snapshot().tenants {
@@ -323,10 +386,13 @@ impl BudgetEngine {
 
     /// Commit a reservation with actual cost. Surplus is refunded.
     ///
-    /// If `actual_microcents > reserved`, the engine attempts to debit the
-    /// difference (overrun). If the tenant can't afford the overrun, the
-    /// reservation is re-inserted and `Overrun` is returned — the original
-    /// reserved amount stays deducted (no refund on failed overrun).
+    /// On successful commit, `committed_microcents` increases by `actual_microcents` (lifetime cumulative).
+    ///
+    /// **Overrun path:** if `actual_microcents > reserved`, the engine debits the difference.
+    /// If the tenant cannot afford the overrun, `Overrun` is returned, the reservation is
+    /// re-inserted, and the original reserved amount **stays deducted** (no refund).
+    /// This is intentional — refunding on failed overrun would violate conservation (create money).
+    /// Call [`release`](Self::release) to return the hold to spendable balance.
     pub fn commit(&self, reservation_id: u64, actual_microcents: i64) -> BudgetSettlement {
         if actual_microcents < 0 {
             return BudgetSettlement::InvalidAmount;
@@ -489,6 +555,17 @@ mod tests {
         engine.release(id2.unwrap());
         assert_eq!(engine.remaining_microcents("t1"), Some(75_000_000));
         assert_eq!(engine.committed_microcents("t1"), Some(25_000_000));
+        assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+    }
+
+    #[test]
+    fn top_up_extends_initial_and_remaining() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 100_000_000);
+        let result = engine.top_up_tenant("desk", 50_000_000);
+        assert!(matches!(result, TopUpResult::ToppedUp { .. }));
+        assert_eq!(engine.initial_microcents("desk"), Some(150_000_000));
+        assert_eq!(engine.remaining_microcents("desk"), Some(150_000_000));
         assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
     }
 

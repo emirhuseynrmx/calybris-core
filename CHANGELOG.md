@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-06-26
+
+### Added
+- `top_up_tenant()` — add funds without resetting lifetime `committed_microcents`
+- `TopUpResult` enum
+- Examples: `llm_routing`, `hft_pretrade_guard` (canonical use-case demos)
+- CI: Rust 1.83.0 + stable matrix, `--no-default-features` test, `cargo doc`, all examples
+
+### Changed
+- README repositioned: proof-carrying decision core (LLM routing + pre-trade guard)
+- Documented `committed_microcents` as lifetime cumulative spend
+- Documented overrun fail-closed behavior and `ensure_tenant` vs `top_up_tenant`
+- `WalWriter<T>` bound relaxed to `T: Serialize` (no unnecessary `Clone`)
+
 ## [0.3.2] - 2026-06-26
 
 ### Fixed

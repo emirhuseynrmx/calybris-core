@@ -1,4 +1,4 @@
-/// Demo: Auditable LLM routing decision with WAL proof
+/// Legacy LLM routing demo. Prefer `llm_routing` (`cargo run --example llm_routing`).
 ///
 /// ```bash
 /// cargo run --example route_decision

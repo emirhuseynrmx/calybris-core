@@ -6,7 +6,7 @@
 //! consistent hashes without possessing the secret.
 //!
 //! The chain is validated on startup before accepting new decisions.
-//! Generic over the decision type: any `Serialize + Clone` works.
+//! Generic over the decision type: any `Serialize` type works.
 
 use crate::digest::{digest_to_hex, policy_digest};
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
@@ -74,7 +74,7 @@ pub struct WalReplayVerdict {
 
 impl<M> WalWriter<AuditedRecord<M>>
 where
-    M: Serialize + Clone,
+    M: Serialize,
 {
     /// Append a fully audited decision record (bundle + input + decision + metadata).
     pub fn append_audited(
@@ -104,7 +104,7 @@ pub fn append_audited<M>(
     metadata: M,
 ) -> Result<WalEntry<AuditedRecord<M>>, WalError>
 where
-    M: Serialize + Clone,
+    M: Serialize,
 {
     wal.append_audited(snapshot, input, decision, metadata)
 }
@@ -166,7 +166,7 @@ pub struct WalWriter<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Serialize + Clone> WalWriter<T> {
+impl<T: Serialize> WalWriter<T> {
     /// Open or create a WAL file. Validates existing chain on open.
     pub fn open(path: &Path) -> Result<Self, WalError> {
         Self::open_inner(path, None)

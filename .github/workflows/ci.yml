@@ -12,13 +12,18 @@ env:
 
 jobs:
   test:
-    name: Build & Test
+    name: Build & Test (${{ matrix.rust }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [1.83.0, stable]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        run: rustup default stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -27,7 +32,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
+          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Format check
         run: cargo fmt --check
@@ -38,23 +43,40 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Test (default features)
+        run: cargo test --all-features
+
+      - name: Test (no default features)
+        run: cargo test --no-default-features
+
       - name: Install cargo-llvm-cov
+        if: matrix.rust == 'stable'
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Test with coverage
+        if: matrix.rust == 'stable'
         run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
+        if: matrix.rust == 'stable'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           fail_ci_if_error: false
 
+      - name: Doc
+        if: matrix.rust == 'stable'
+        run: cargo doc --no-deps
+
       - name: Examples
+        if: matrix.rust == 'stable'
         run: |
           cargo run --example quickstart
-          cargo run --example simple_kernel
-          cargo run --example verify_wal
+          cargo run --example llm_routing
+          cargo run --example hft_pretrade_guard
+          cargo run --example route_decision
           cargo run --example replay_audit
           cargo run --example finance_hft
+          cargo run --example simple_kernel
+          cargo run --example verify_wal

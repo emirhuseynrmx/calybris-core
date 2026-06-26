@@ -1,9 +1,11 @@
-//! Fixed-point financial layer for HFT-grade budget accounting.
+//! Fixed-point financial proofs for pre-trade budget and exposure guards.
 //!
-//! All amounts are `i64` microcents (1 USD cent = 1_000_000 microcents).
-//! No `f64`. Conservation is provable via [`BudgetEngine::verify_conservation`].
+//! Domain-neutral: no exchange adapter, no alpha, no order book. Provides
+//! ledger digest, conservation proof, and [`FinancialCertificate`] binding.
 //!
-//! Typical HFT path: [`BudgetEngine::try_reserve`] → execute → [`BudgetEngine::commit`].
+//! All amounts are `i64` microcents (1 USD cent = 1_000_000 microcents). No `f64`.
+//!
+//! Typical pre-trade path: [`BudgetEngine::try_reserve`] → fill → [`BudgetEngine::commit`].
 //! Hot-path reserve/commit uses CAS on `AtomicI64` — no mutex during debit.
 
 use crate::budget::{BudgetEngine, BudgetSnapshot, ConservationStatus, TenantLedger};
