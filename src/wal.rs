@@ -1,4 +1,4 @@
-//! Hash-chained Write-Ahead Log — tamper-evident, crash-recoverable.
+//! Hash-chained Write-Ahead Log — tamper-evident, crash-detecting.
 //!
 //! Each entry's hash chains to the previous, forming a tamper-evident log.
 //! Optionally keyed with HMAC-SHA256: without a key the chain detects
@@ -409,10 +409,12 @@ where
         let decision_digest_match = bundle.decision_digest_hex
             == digest_to_hex(&crate::digest::decision_digest(&entry.data.decision));
 
-        if !replay_valid || !policy_digest_match {
+        if !replay_valid || !policy_digest_match || !input_digest_match || !decision_digest_match {
             return Err(WalError::AuditFailed {
                 sequence: entry.sequence,
-                reason: format!("replay_valid={replay_valid} policy_match={policy_digest_match}"),
+                reason: format!(
+                    "replay_valid={replay_valid} policy_match={policy_digest_match} input_match={input_digest_match} decision_match={decision_digest_match}"
+                ),
             });
         }
 
@@ -772,6 +774,63 @@ mod tests {
         let verdicts = replay_audited_wal(&path, &snapshot).unwrap();
         assert_eq!(verdicts.len(), 1);
         assert!(verdicts[0].replay_valid);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn audited_replay_fails_on_input_digest_mismatch() {
+        use crate::kernel::*;
+
+        let path = temp_path("audited-input-tamper");
+        let _ = std::fs::remove_file(&path);
+
+        let models = vec![KernelModel {
+            model_id: 1,
+            provider_id: 0,
+            quality_bps: 9000,
+            risk_ceiling_bps: 9500,
+            enabled: 1,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }];
+        let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models).unwrap();
+        let input = KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        let decision = snapshot.prescribe(input);
+
+        {
+            let mut wal = WalWriter::open(&path).unwrap();
+            wal.append_audited(&snapshot, input, decision, ()).unwrap();
+            wal.sync().unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let tampered = content.replacen(
+            &digest_to_hex(&crate::digest::input_digest(&input)),
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            1,
+        );
+        std::fs::write(&path, tampered).unwrap();
+
+        let result = replay_audited_wal(&path, &snapshot);
+        assert!(result.is_err());
 
         let _ = std::fs::remove_file(&path);
     }

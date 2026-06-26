@@ -186,7 +186,8 @@ fn print_and_log(
         expected_utility: d.expected_utility_microunits,
         policy_epoch: d.policy_epoch,
     };
-    let _ = wal.append(record);
+    wal.append(record)
+        .expect("WAL append must succeed for audit trail integrity");
 }
 
 fn name_of<'a>(id: u32, names: &'a [(&'a str, u32)]) -> &'a str {

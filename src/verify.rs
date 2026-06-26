@@ -22,6 +22,31 @@ pub enum VerifyResult {
     },
 }
 
+/// Error decoding a hex-encoded digest from an [`AuditBundle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestDecodeError {
+    /// A non-hex character was found.
+    InvalidHexCharacter { digit: u8, index: usize },
+    /// Hex string has odd length.
+    OddLength,
+    /// Decoded length is not 32 bytes (expected 64 hex chars).
+    InvalidStringLength,
+}
+
+impl std::fmt::Display for DigestDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidHexCharacter { digit, index } => {
+                write!(f, "invalid hex digit 0x{digit:02x} at index {index}")
+            }
+            Self::OddLength => write!(f, "odd hex string length"),
+            Self::InvalidStringLength => write!(f, "expected 64 hex characters"),
+        }
+    }
+}
+
+impl std::error::Error for DigestDecodeError {}
+
 /// Binds a decision to its policy and input via canonical SHA-256 digests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -38,17 +63,17 @@ pub struct AuditBundle {
 
 impl AuditBundle {
     /// Raw 32-byte policy digest.
-    pub fn policy_digest(&self) -> Result<[u8; 32], hex::FromHexError> {
+    pub fn policy_digest(&self) -> Result<[u8; 32], DigestDecodeError> {
         decode_hex32(&self.policy_digest_hex)
     }
 
     /// Raw 32-byte input digest.
-    pub fn input_digest(&self) -> Result<[u8; 32], hex::FromHexError> {
+    pub fn input_digest(&self) -> Result<[u8; 32], DigestDecodeError> {
         decode_hex32(&self.input_digest_hex)
     }
 
     /// Raw 32-byte decision digest.
-    pub fn decision_digest(&self) -> Result<[u8; 32], hex::FromHexError> {
+    pub fn decision_digest(&self) -> Result<[u8; 32], DigestDecodeError> {
         decode_hex32(&self.decision_digest_hex)
     }
 }
@@ -181,61 +206,31 @@ pub fn counterfactual_utility(
     }
 }
 
-fn decode_hex32(hex: &str) -> Result<[u8; 32], hex::FromHexError> {
-    let bytes = hex::decode(hex)?;
-    if bytes.len() != 32 {
-        return Err(hex::FromHexError::InvalidStringLength);
+fn decode_hex32(hex: &str) -> Result<[u8; 32], DigestDecodeError> {
+    if hex.len() % 2 != 0 {
+        return Err(DigestDecodeError::OddLength);
     }
-    let mut out = [0_u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = from_hex_digit(bytes[i], i)?;
+        let lo = from_hex_digit(bytes[i + 1], i + 1)?;
+        out.push((hi << 4) | lo);
+    }
+    if out.len() != 32 {
+        return Err(DigestDecodeError::InvalidStringLength);
+    }
+    let mut digest = [0_u8; 32];
+    digest.copy_from_slice(&out);
+    Ok(digest)
 }
 
-mod hex {
-    use std::fmt;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum FromHexError {
-        InvalidHexCharacter { digit: u8, index: usize },
-        OddLength,
-        InvalidStringLength,
-    }
-
-    impl fmt::Display for FromHexError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                Self::InvalidHexCharacter { digit, index } => {
-                    write!(f, "invalid hex digit 0x{digit:02x} at index {index}")
-                }
-                Self::OddLength => write!(f, "odd hex string length"),
-                Self::InvalidStringLength => write!(f, "expected 64 hex characters"),
-            }
-        }
-    }
-
-    impl std::error::Error for FromHexError {}
-
-    pub fn decode(hex: &str) -> Result<Vec<u8>, FromHexError> {
-        if hex.len() % 2 != 0 {
-            return Err(FromHexError::OddLength);
-        }
-        let mut out = Vec::with_capacity(hex.len() / 2);
-        let bytes = hex.as_bytes();
-        for i in (0..bytes.len()).step_by(2) {
-            let hi = from_hex_digit(bytes[i], i)?;
-            let lo = from_hex_digit(bytes[i + 1], i + 1)?;
-            out.push((hi << 4) | lo);
-        }
-        Ok(out)
-    }
-
-    fn from_hex_digit(byte: u8, index: usize) -> Result<u8, FromHexError> {
-        match byte {
-            b'0'..=b'9' => Ok(byte - b'0'),
-            b'a'..=b'f' => Ok(byte - b'a' + 10),
-            b'A'..=b'F' => Ok(byte - b'A' + 10),
-            _ => Err(FromHexError::InvalidHexCharacter { digit: byte, index }),
-        }
+fn from_hex_digit(byte: u8, index: usize) -> Result<u8, DigestDecodeError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(DigestDecodeError::InvalidHexCharacter { digit: byte, index }),
     }
 }
 
@@ -342,6 +337,17 @@ mod tests {
             snapshot_fingerprint(&snap),
             digest_to_hex(&policy_digest(&snap))
         );
+    }
+
+    #[test]
+    fn audit_bundle_decodes_digests() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        let bundle = audit_bundle(&snap, input, &decision);
+        assert_eq!(bundle.policy_digest().unwrap().len(), 32);
+        assert_eq!(bundle.input_digest().unwrap().len(), 32);
+        assert_eq!(bundle.decision_digest().unwrap().len(), 32);
     }
 
     #[test]

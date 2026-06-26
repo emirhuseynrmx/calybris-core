@@ -120,6 +120,23 @@ pub enum ConservationStatus {
     },
 }
 
+impl std::fmt::Display for ConservationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Balanced => write!(f, "conservation balanced"),
+            Self::Violation {
+                tenant_id,
+                delta_microcents,
+            } => write!(
+                f,
+                "conservation violated for tenant {tenant_id}: delta={delta_microcents} microcents"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConservationStatus {}
+
 impl BudgetEngine {
     pub fn new() -> Self {
         Self {

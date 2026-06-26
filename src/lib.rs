@@ -14,7 +14,7 @@
 //! use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
 //! use calybris_core::finance::certify_ledger;
 //! use calybris_core::budget::BudgetEngine;
-//! #[cfg(feature = "serde")]
+//! #[cfg(feature = "wal")]
 //! use calybris_core::wal::WalWriter;
 //! ```
 
@@ -31,5 +31,5 @@ pub mod kernel;
 /// Decision verification, replay, and correctness certificates.
 pub mod verify;
 /// HMAC-SHA256 hash-chained write-ahead log.
-#[cfg(feature = "serde")]
+#[cfg(feature = "wal")]
 pub mod wal;

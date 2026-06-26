@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-06-26
+
+### Fixed
+- Public `DigestDecodeError` replaces private `hex::FromHexError` on `AuditBundle` decode APIs
+- `replay_audited_wal_keyed` returns `Err` on input or decision digest mismatch (fail-closed audit)
+- `route_decision` example no longer swallows WAL append errors
+
+### Changed
+- WAL module docs: "crash-detecting" instead of "crash-recoverable"
+- Feature split: `default = ["wal"]`, `wal = ["serde", "hmac", "subtle"]` — kernel-only via `--no-default-features`
+- README Quick Start is fully runnable (`examples/quickstart.rs`)
+
 ## [0.3.1] - 2026-06-26
 
 ### Added

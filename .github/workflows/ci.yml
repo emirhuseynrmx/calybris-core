@@ -53,6 +53,7 @@ jobs:
 
       - name: Examples
         run: |
+          cargo run --example quickstart
           cargo run --example simple_kernel
           cargo run --example verify_wal
           cargo run --example replay_audit

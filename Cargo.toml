@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.83"
 license = "Apache-2.0"
@@ -14,13 +14,14 @@ categories = ["algorithms", "finance"]
 exclude = ["assets/", ".github/"]
 
 [features]
-default = ["serde"]
+default = ["wal"]
 serde = ["dep:serde", "dep:serde_json"]
+wal = ["serde", "dep:hmac", "dep:subtle"]
 
 [dependencies]
 sha2 = "0.10"
-hmac = "0.12"
-subtle = "2.6"
+hmac = { version = "0.12", optional = true }
+subtle = { version = "2.6", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["preserve_order"], optional = true }
 thiserror = "2"
@@ -28,6 +29,10 @@ thiserror = "2"
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[[example]]
+name = "quickstart"
+path = "examples/quickstart.rs"
 
 [[example]]
 name = "simple_kernel"

@@ -27,31 +27,79 @@ Built from five components:
 4. **`wal`** — Hash-chained write-ahead log with `append_audited` and offline `replay_audited_wal`.
 5. **`budget`** — CAS atomic budget engine. Conservation invariant: `remaining + reserved + committed = initial`.
 
-`#![forbid(unsafe_code)]` · 48 unit tests · 2 doc tests · 6 direct dependencies · Apache-2.0
+`#![forbid(unsafe_code)]` · 50 unit tests · 2 doc tests · Apache-2.0
 
 ## Quick Start
 
 ```bash
 cargo add calybris-core
+cargo run --example quickstart
 ```
 
 ```rust
+use calybris_core::budget::BudgetEngine;
+use calybris_core::finance::prove_conservation;
 use calybris_core::kernel::*;
 use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
-use calybris_core::finance::prove_conservation;
-use calybris_core::budget::BudgetEngine;
 
-let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models)?;
-let input = KernelInput { /* ... */ };
+let models = vec![
+    KernelModel {
+        model_id: 1,
+        provider_id: 0,
+        quality_bps: 9000,
+        risk_ceiling_bps: 9500,
+        enabled: 1,
+        p95_latency_ms: 200,
+        capabilities: 0,
+        region_mask: ALL_REGIONS,
+        input_cost_microunits_per_million_tokens: 250,
+        output_cost_microunits_per_million_tokens: 1000,
+    },
+    KernelModel {
+        model_id: 2,
+        provider_id: 1,
+        quality_bps: 7000,
+        risk_ceiling_bps: 9500,
+        enabled: 1,
+        p95_latency_ms: 90,
+        capabilities: 0,
+        region_mask: ALL_REGIONS,
+        input_cost_microunits_per_million_tokens: 25,
+        output_cost_microunits_per_million_tokens: 125,
+    },
+];
+
+let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models)?;
+
+let input = KernelInput {
+    request_sequence: 1,
+    requested_model_id: 1,
+    input_tokens: 1000,
+    output_tokens: 500,
+    business_value_microunits: 100_000,
+    budget_limit_microunits: 50_000_000,
+    risk_bps: 1000,
+    confidence_bps: 9000,
+    minimum_quality_bps: 5000,
+    max_p95_latency_ms: 1000,
+    required_capabilities: 0,
+    allowed_provider_mask: ALL_PROVIDERS,
+    required_region_mask: 0,
+};
+
 let decision = snapshot.prescribe(input);
-
 assert_eq!(verify_decision(&snapshot, input, &decision), VerifyResult::Valid);
-let bundle = audit_bundle(&snapshot, input, &decision);
-assert!(bundle.replay_valid);
+assert!(audit_bundle(&snapshot, input, &decision).replay_valid);
 
 let budget = BudgetEngine::new();
 budget.ensure_tenant("desk-1", 100_000_000);
 prove_conservation(&budget)?;
+```
+
+Kernel + budget only (no WAL):
+
+```bash
+cargo add calybris-core --no-default-features
 ```
 
 ## Audit Pipeline
@@ -108,7 +156,7 @@ wal.append_audited(&snapshot, input, decision, metadata)?;
 let verdicts = replay_audited_wal(&path, &snapshot)?;
 ```
 
-Requires the `serde` feature (on by default).
+Requires the `wal` feature (on by default; includes `serde`, `hmac`, `subtle`).
 
 ### `budget.rs`
 
@@ -117,6 +165,7 @@ CAS `try_reserve` / `commit` / `release`, `snapshot()`, `verify_conservation()`,
 ## Examples
 
 ```bash
+cargo run --example quickstart
 cargo run --example simple_kernel
 cargo run --example route_decision
 cargo run --example replay_audit      # full audit pipeline
@@ -139,7 +188,7 @@ cargo bench
 ## Tests
 
 ```
-cargo test           # 48 unit + 2 doc tests
+cargo test           # 50 unit + 2 doc tests
 cargo test --release # includes latency guard (1 ignored in debug)
 ```
 
