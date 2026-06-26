@@ -1,6 +1,8 @@
+use std::hint::black_box;
+
 use calybris_core::budget::BudgetEngine;
 use calybris_core::finance::MICROCENTS_PER_CENT;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use std::sync::Arc;
 
 fn bench_reserve(c: &mut Criterion) {

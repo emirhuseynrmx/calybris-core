@@ -1,5 +1,7 @@
+use std::hint::black_box;
+
 use calybris_core::kernel::*;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 fn make_snapshot(model_count: u32) -> PolicySnapshot {
     let models: Vec<KernelModel> = (0..model_count)

@@ -11,7 +11,7 @@
 use crate::digest::{bytes_to_hex, digest_to_hex, policy_digest};
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{audit_bundle, verify_decision, VerifyResult};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
