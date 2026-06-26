@@ -404,17 +404,15 @@ where
         let replay = verify_decision(snapshot, entry.data.input, &entry.data.decision);
         let replay_valid = replay == VerifyResult::Valid;
         let policy_digest_match = bundle.policy_digest_hex == expected_policy;
-        let input_digest_match =
-            bundle.input_digest_hex == digest_to_hex(&crate::digest::input_digest(&entry.data.input));
+        let input_digest_match = bundle.input_digest_hex
+            == digest_to_hex(&crate::digest::input_digest(&entry.data.input));
         let decision_digest_match = bundle.decision_digest_hex
             == digest_to_hex(&crate::digest::decision_digest(&entry.data.decision));
 
         if !replay_valid || !policy_digest_match {
             return Err(WalError::AuditFailed {
                 sequence: entry.sequence,
-                reason: format!(
-                    "replay_valid={replay_valid} policy_match={policy_digest_match}"
-                ),
+                reason: format!("replay_valid={replay_valid} policy_match={policy_digest_match}"),
             });
         }
 

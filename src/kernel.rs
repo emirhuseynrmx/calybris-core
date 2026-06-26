@@ -265,10 +265,7 @@ pub enum PolicyError {
     #[error("duplicate model_id {model_id}")]
     DuplicateModelId { model_id: u32 },
     #[error("model_id {model_id} has provider_id {provider_id} > MAX_PROVIDER_ID")]
-    InvalidProviderId {
-        model_id: u32,
-        provider_id: u16,
-    },
+    InvalidProviderId { model_id: u32, provider_id: u16 },
     #[error("no enabled models in catalog")]
     NoEnabledModels,
 }
@@ -768,7 +765,9 @@ mod tests {
             return snapshot.reject(input, KernelReason::RiskHardLimit, 0, 0).0;
         }
         if input.confidence_bps < snapshot.minimum_confidence_bps {
-            return snapshot.reject(input, KernelReason::ConfidenceHardLimit, 0, 0).0;
+            return snapshot
+                .reject(input, KernelReason::ConfidenceHardLimit, 0, 0)
+                .0;
         }
 
         let mut best: Option<Candidate> = None;

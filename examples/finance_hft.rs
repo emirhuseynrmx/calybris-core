@@ -38,5 +38,8 @@ fn main() {
     println!("Conservation:   {}", cert.conservation_balanced);
     println!("Ledger digest:  {}...", &digest[..16]);
     println!("Tenants:        {}", cert.tenant_count);
-    println!("Remaining:      {:?} microcents", engine.remaining_microcents("hft-desk-1"));
+    println!(
+        "Remaining:      {:?} microcents",
+        engine.remaining_microcents("hft-desk-1")
+    );
 }

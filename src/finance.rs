@@ -63,9 +63,7 @@ pub fn certify_ledger(engine: &BudgetEngine) -> FinancialCertificate {
 /// Returns `Err` with the violating tenant if the invariant is broken.
 pub fn prove_conservation(engine: &BudgetEngine) -> Result<String, ConservationStatus> {
     match engine.verify_conservation() {
-        ConservationStatus::Balanced => {
-            Ok(digest_to_hex(&ledger_digest(&engine.snapshot())))
-        }
+        ConservationStatus::Balanced => Ok(digest_to_hex(&ledger_digest(&engine.snapshot()))),
         violation @ ConservationStatus::Violation { .. } => Err(violation),
     }
 }

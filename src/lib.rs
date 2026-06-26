@@ -20,10 +20,10 @@
 
 #![forbid(unsafe_code)]
 
-/// Canonical SHA-256 digests for audit binding.
-pub mod digest;
 /// Per-tenant atomic budget engine with CAS reservation.
 pub mod budget;
+/// Canonical SHA-256 digests for audit binding.
+pub mod digest;
 /// Fixed-point financial layer: ledger digest and conservation proofs.
 pub mod finance;
 /// Allocation-free prescriptive decision kernel.

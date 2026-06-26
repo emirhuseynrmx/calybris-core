@@ -35,11 +35,7 @@ fn update_model(hasher: &mut Sha256, model: &KernelModel) {
     hasher.update(model.p95_latency_ms.to_le_bytes());
     hasher.update(model.capabilities.to_le_bytes());
     hasher.update(model.region_mask.to_le_bytes());
-    hasher.update(
-        model
-            .input_cost_microunits_per_million_tokens
-            .to_le_bytes(),
-    );
+    hasher.update(model.input_cost_microunits_per_million_tokens.to_le_bytes());
     hasher.update(
         model
             .output_cost_microunits_per_million_tokens

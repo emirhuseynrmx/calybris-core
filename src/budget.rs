@@ -114,7 +114,10 @@ pub enum ConservationStatus {
     /// `remaining + reserved + committed == initial` for every tenant.
     Balanced,
     /// Invariant violated — includes per-tenant deltas in microcents.
-    Violation { tenant_id: String, delta_microcents: i64 },
+    Violation {
+        tenant_id: String,
+        delta_microcents: i64,
+    },
 }
 
 impl BudgetEngine {

@@ -338,7 +338,10 @@ mod tests {
     #[test]
     fn fingerprint_matches_policy_digest() {
         let snap = test_snapshot();
-        assert_eq!(snapshot_fingerprint(&snap), digest_to_hex(&policy_digest(&snap)));
+        assert_eq!(
+            snapshot_fingerprint(&snap),
+            digest_to_hex(&policy_digest(&snap))
+        );
     }
 
     #[test]
