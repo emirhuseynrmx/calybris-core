@@ -14,10 +14,6 @@
 //! ```
 
 #![forbid(unsafe_code)]
-#![cfg_attr(not(feature = "std"), no_std)]
-
-#[cfg(not(feature = "std"))]
-extern crate alloc;
 
 /// Per-tenant atomic budget engine with CAS reservation.
 pub mod budget;

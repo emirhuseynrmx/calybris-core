@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.83"
 license = "Apache-2.0"
@@ -9,13 +9,9 @@ repository = "https://github.com/emirhuseynrmx/calybris-core"
 homepage = "https://emirhuseyin.tech/engine"
 documentation = "https://docs.rs/calybris-core"
 readme = "README.md"
-keywords = ["decision-engine", "proof-carrying", "integer-kernel", "budget", "wal"]
+keywords = ["decision-engine", "proof-carrying", "write-ahead-log", "budget-engine", "deterministic"]
 categories = ["algorithms", "finance"]
 exclude = ["assets/", ".github/"]
-
-[features]
-default = ["std"]
-std = []
 
 [dependencies]
 sha2 = "0.10"

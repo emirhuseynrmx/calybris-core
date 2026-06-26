@@ -99,12 +99,6 @@ cargo test --release # includes latency guard
 
 Includes proptest property-based verification, 100-thread concurrency stress, HMAC chain validation, and WAL fuzz roundtrips.
 
-## Feature Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `std` | yes | Enables `std` types. Disable for `no_std` + `alloc`. |
-
 ## What This Crate Is Not
 
 This is the open-source decision core. It doesn't include:
