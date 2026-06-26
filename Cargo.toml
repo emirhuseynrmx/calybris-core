@@ -7,8 +7,11 @@ license = "Apache-2.0"
 description = "Deterministic proof-carrying decision kernel, HMAC-SHA256 hash-chained WAL, and CAS atomic budget engine"
 repository = "https://github.com/emirhuseynrmx/calybris-core"
 homepage = "https://emirhuseyin.tech/engine"
+documentation = "https://docs.rs/calybris-core"
+readme = "README.md"
 keywords = ["decision-engine", "proof-carrying", "integer-kernel", "budget", "wal"]
 categories = ["algorithms", "finance"]
+exclude = ["assets/", ".github/"]
 
 [features]
 default = ["std"]
