@@ -46,7 +46,7 @@ pub enum BudgetSettlement {
 }
 
 struct ReservationRecord {
-    tenant_id: String,
+    tenant_id: Arc<str>,
     reserved_microcents: i64,
 }
 
@@ -77,7 +77,7 @@ fn debit_if_available(budget: &AtomicI64, amount: i64) -> Result<i64, i64> {
 /// Metadata maps are mutex-protected with consistent lock ordering
 /// (reservations → budgets) to prevent deadlock.
 pub struct BudgetEngine {
-    tenant_budgets: Mutex<HashMap<String, Arc<AtomicI64>>>,
+    tenant_budgets: Mutex<HashMap<Arc<str>, Arc<AtomicI64>>>,
     reservations: Mutex<HashMap<u64, ReservationRecord>>,
     next_id: AtomicU64,
 }
@@ -94,15 +94,17 @@ impl BudgetEngine {
     /// Initialize a tenant with a budget in microcents.
     pub fn ensure_tenant(&self, tenant_id: &str, budget_microcents: i64) {
         let mut budgets = self.tenant_budgets.lock().unwrap();
+        let key: Arc<str> = Arc::from(tenant_id);
         budgets
-            .entry(tenant_id.to_string())
+            .entry(key)
             .or_insert_with(|| Arc::new(AtomicI64::new(budget_microcents)));
     }
 
     /// Remaining budget for a tenant in microcents.
     pub fn remaining_microcents(&self, tenant_id: &str) -> Option<i64> {
         let budgets = self.tenant_budgets.lock().unwrap();
-        budgets.get(tenant_id).map(|b| b.load(Ordering::Acquire))
+        let key: Arc<str> = Arc::from(tenant_id);
+        budgets.get(&key).map(|b| b.load(Ordering::Acquire))
     }
 
     /// Reserve budget atomically using CAS. Returns reservation ID on success.
@@ -121,16 +123,15 @@ impl BudgetEngine {
             );
         }
 
-        // Clone Arc out — drop lock before CAS
+        let key: Arc<str> = Arc::from(tenant_id);
         let budget = {
             let budgets = self.tenant_budgets.lock().unwrap();
-            match budgets.get(tenant_id) {
+            match budgets.get(&key) {
                 Some(b) => Arc::clone(b),
                 None => return (BudgetReservation::MissingTenant, None),
             }
         };
 
-        // CAS loop — no lock held
         match debit_if_available(&budget, cost_microcents) {
             Err(current) => (
                 BudgetReservation::Insufficient {
@@ -145,7 +146,7 @@ impl BudgetEngine {
                 reservations.insert(
                     id,
                     ReservationRecord {
-                        tenant_id: tenant_id.to_string(),
+                        tenant_id: Arc::clone(&key),
                         reserved_microcents: cost_microcents,
                     },
                 );
@@ -182,7 +183,7 @@ impl BudgetEngine {
         };
         drop(reservations);
 
-        let delta = actual_microcents - reservation.reserved_microcents;
+        let delta: i64 = actual_microcents - reservation.reserved_microcents;
         if delta > 0 {
             // Overrun: atomically debit additional amount via CAS
             if let Err(remaining) = debit_if_available(&budget, delta) {

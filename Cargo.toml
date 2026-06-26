@@ -10,12 +10,17 @@ homepage = "https://emirhuseyin.tech/engine"
 keywords = ["decision-engine", "proof-carrying", "integer-kernel", "budget", "wal"]
 categories = ["algorithms", "finance"]
 
+[features]
+default = ["std"]
+std = []
+
 [dependencies]
 sha2 = "0.10"
 hmac = "0.12"
 subtle = "2.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
 
 [dev-dependencies]
 proptest = "1"

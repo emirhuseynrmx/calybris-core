@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 //! # Calybris Core
 //!
 //! Deterministic proof-carrying decision kernel, HMAC-SHA256 hash-chained
@@ -14,9 +13,15 @@
 //! use calybris_core::budget::BudgetEngine;
 //! ```
 
-/// Allocation-free prescriptive decision kernel.
-pub mod budget;
+#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
 /// Per-tenant atomic budget engine with CAS reservation.
+pub mod budget;
+/// Allocation-free prescriptive decision kernel.
 pub mod kernel;
 /// HMAC-SHA256 hash-chained write-ahead log.
 pub mod wal;

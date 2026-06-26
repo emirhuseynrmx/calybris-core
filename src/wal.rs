@@ -28,48 +28,20 @@ pub struct WalEntry<T> {
 }
 
 /// WAL error types.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WalError {
-    Io(std::io::Error),
-    Json(serde_json::Error),
+    #[error("WAL I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("WAL JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("WAL chain broken at sequence {sequence}: expected {expected}, found {found}")]
     ChainBroken {
         sequence: u64,
         expected: String,
         found: String,
     },
+    #[error("WAL duplicate sequence: {0}")]
     DuplicateSequence(u64),
-}
-
-impl std::fmt::Display for WalError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "WAL I/O error: {e}"),
-            Self::Json(e) => write!(f, "WAL JSON error: {e}"),
-            Self::ChainBroken {
-                sequence,
-                expected,
-                found,
-            } => write!(
-                f,
-                "WAL chain broken at sequence {sequence}: expected {expected}, found {found}"
-            ),
-            Self::DuplicateSequence(s) => write!(f, "WAL duplicate sequence: {s}"),
-        }
-    }
-}
-
-impl std::error::Error for WalError {}
-
-impl From<std::io::Error> for WalError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<serde_json::Error> for WalError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::Json(e)
-    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -602,5 +574,39 @@ mod tests {
         assert_eq!(entries[0].data.model, "x");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // Fuzz-like proptest: random data, random sequence lengths
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_data_survives_roundtrip(
+            model in "[a-z]{1,20}",
+            cost in any::<i64>(),
+            count in 1_usize..50,
+        ) {
+            let path = temp_path(&format!("fuzz-{}-{}", cost, count));
+            let _ = std::fs::remove_file(&path);
+
+            {
+                let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+                for i in 0..count {
+                    wal.append(TestDecision {
+                        model: format!("{model}{i}"),
+                        cost: cost.wrapping_add(i as i64),
+                    }).unwrap();
+                }
+            }
+
+            // Reopen validates chain
+            let wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            prop_assert_eq!(wal.sequence() as usize, count);
+
+            let entries = read_verified_wal::<TestDecision>(&path).unwrap();
+            prop_assert_eq!(entries.len(), count);
+
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
