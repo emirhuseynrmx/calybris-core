@@ -30,6 +30,7 @@ pub const MAX_PROVIDER_ID: u16 = 63;
 /// A candidate model in the decision catalog.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct KernelModel {
     /// Unique identifier for this model.
     pub model_id: u32,
@@ -56,6 +57,7 @@ pub struct KernelModel {
 /// A decision request to be evaluated against the policy.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct KernelInput {
     /// Monotonic sequence number for this request.
     pub request_sequence: u64,
@@ -88,6 +90,7 @@ pub struct KernelInput {
 /// The action the kernel decided to take.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum KernelAction {
     /// The requested model was selected (it maximized utility).
     ExecuteRequested = 1,
@@ -97,9 +100,20 @@ pub enum KernelAction {
     Reject = 3,
 }
 
+impl std::fmt::Display for KernelAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExecuteRequested => write!(f, "execute_requested"),
+            Self::Substitute => write!(f, "substitute"),
+            Self::Reject => write!(f, "reject"),
+        }
+    }
+}
+
 /// Why the kernel made this decision.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum KernelReason {
     /// The requested model had the highest utility.
     RequestedModelMaximizesUtility = 1,
@@ -129,9 +143,30 @@ pub enum KernelReason {
     RiskCeilingConstraint = 110,
 }
 
+impl std::fmt::Display for KernelReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestedModelMaximizesUtility => write!(f, "requested_model_maximizes_utility"),
+            Self::AlternativeMaximizesUtility => write!(f, "alternative_maximizes_utility"),
+            Self::RiskHardLimit => write!(f, "risk_hard_limit"),
+            Self::ConfidenceHardLimit => write!(f, "confidence_hard_limit"),
+            Self::NoEnabledModel => write!(f, "no_enabled_model"),
+            Self::QualityConstraint => write!(f, "quality_constraint"),
+            Self::LatencyConstraint => write!(f, "latency_constraint"),
+            Self::CapabilityConstraint => write!(f, "capability_constraint"),
+            Self::ProviderConstraint => write!(f, "provider_constraint"),
+            Self::RegionConstraint => write!(f, "region_constraint"),
+            Self::BudgetConstraint => write!(f, "budget_constraint"),
+            Self::NonPositiveUtility => write!(f, "non_positive_utility"),
+            Self::RiskCeilingConstraint => write!(f, "risk_ceiling_constraint"),
+        }
+    }
+}
+
 /// The result of evaluating a [`KernelInput`] against a [`PolicySnapshot`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct KernelDecision {
     /// Echoed from the input.
     pub request_sequence: u64,

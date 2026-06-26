@@ -19,5 +19,8 @@
 pub mod budget;
 /// Allocation-free prescriptive decision kernel.
 pub mod kernel;
+/// Decision verification, replay, and correctness certificates.
+pub mod verify;
 /// HMAC-SHA256 hash-chained write-ahead log.
+#[cfg(feature = "serde")]
 pub mod wal;

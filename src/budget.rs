@@ -256,6 +256,18 @@ impl BudgetEngine {
             returned_microcents: returned,
         }
     }
+
+    /// Number of registered tenants.
+    #[must_use]
+    pub fn tenant_count(&self) -> usize {
+        self.tenant_budgets.lock().unwrap().len()
+    }
+
+    /// Number of active (uncommitted, unreleased) reservations.
+    #[must_use]
+    pub fn active_reservations(&self) -> usize {
+        self.reservations.lock().unwrap().len()
+    }
 }
 
 impl Default for BudgetEngine {

@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.83"
 license = "Apache-2.0"
@@ -13,12 +13,16 @@ keywords = ["decision-engine", "proof-carrying", "write-ahead-log", "budget-engi
 categories = ["algorithms", "finance"]
 exclude = ["assets/", ".github/"]
 
+[features]
+default = ["serde"]
+serde = ["dep:serde", "dep:serde_json"]
+
 [dependencies]
 sha2 = "0.10"
 hmac = "0.12"
 subtle = "2.6"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", features = ["preserve_order"], optional = true }
 thiserror = "2"
 
 [dev-dependencies]

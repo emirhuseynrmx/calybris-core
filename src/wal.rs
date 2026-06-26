@@ -188,8 +188,13 @@ impl<T: Serialize + Clone> WalWriter<T> {
         Ok(())
     }
 
-    /// Current sequence number.
+    /// Current sequence number (equals the number of entries written).
     pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Alias for [`sequence`](Self::sequence) — total entries written.
+    pub fn entry_count(&self) -> u64 {
         self.sequence
     }
 
