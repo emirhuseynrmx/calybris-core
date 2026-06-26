@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/banner.png" alt="Calybris Core — Proof-Carrying Decision Engine" width="100%" />
+  <img src="assets/banner.png" alt="Calybris Core" width="100%" />
 </div>
 
 <br/>
@@ -7,165 +7,119 @@
 # Calybris Core
 
 [![CI](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/calybris-core)](https://crates.io/crates/calybris-core)
+[![docs.rs](https://img.shields.io/docsrs/calybris-core)](https://docs.rs/calybris-core)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-zero%20unsafe-orange)]()
+[![MSRV](https://img.shields.io/badge/MSRV-1.83-orange)]()
 
-**Open-source deterministic proof-carrying decision core behind [Calybris Engine](https://emirhuseyin.tech/engine).**
+Three building blocks for auditable decision systems:
 
-This crate contains the core decision infrastructure. The full engine (adaptive routing, policy evolution, GOVERIS product) is proprietary.
+1. **`kernel`** — Integer-only decision kernel. Evaluates candidates against 11 constraints, picks the highest-utility option. No floating-point, no allocation in the hot path. ~115ns per decision.
+2. **`wal`** — Hash-chained write-ahead log. Each entry links to the previous via SHA-256 (or HMAC-SHA256 with a key). Generic over any `Serialize` type.
+3. **`budget`** — CAS atomic budget engine. Per-tenant reservations with a conservation invariant: `remaining + reserved + committed = initial`.
+
+`#![forbid(unsafe_code)]` · 37 tests · 5 dependencies · Apache-2.0
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/emirhuseynrmx/calybris-core.git
-cd calybris-core
-cargo test
-cargo run --example simple_kernel
-cargo run --example verify_wal
+cargo add calybris-core
+```
+
+```rust
+use calybris_core::kernel::*;
+
+let models = vec![/* your model catalog */];
+let snapshot = PolicySnapshot::new(1, 1, 9600, 5500, 3500, 0, models);
+let decision = snapshot.prescribe(input);
+// decision.action: ExecuteRequested | Substitute | Reject
+// decision.selected_model_id: which model was chosen
+// decision.expected_utility_microunits: why
 ```
 
 ## Modules
 
-### `kernel.rs` — Integer Decision Kernel
+### `kernel.rs`
 
-Allocation-free prescriptive decision kernel. No floating-point in the hot path.
+The kernel scores every candidate model with:
 
-- 8.6M decisions/sec on a single core
-- 11 constraint gates (risk, confidence, quality, budget, latency, capability, provider, region)
-- Utility-maximizing selection with counterfactual tracking
-- Zero heap allocation per decision
-
-### `budget.rs` — Atomic Budget Engine
-
-Per-tenant budget management. All values in i64 microcents (1 cent = 1,000,000 microcents).
-
-- CAS atomic reservation: Reserve → Commit → Release
-- Conservation invariant: `remaining + reserved + committed = initial`
-- CAS-based balance updates; metadata maps are mutex-protected
-
-### `wal.rs` — Hash-Chained Write-Ahead Log
-
-Generic, tamper-evident decision log. Each entry's hash chains to the previous.
-
-- Generic over any `Serialize + Deserialize` type
-- **HMAC-SHA256 keyed mode**: attacker cannot recompute valid hashes without the key
-- Unkeyed mode (plain SHA-256) detects accidental corruption
-- Constant-time hash comparison (`subtle`) to prevent timing side-channels
-- Chain validated on open — refuses to continue on broken chain
-- `append()` flushes to OS but does not fsync — call `sync()` explicitly for crash durability
-
-## Benchmarks
-
-Run with `cargo bench` (Criterion):
-
-| Metric | Value |
-|--------|-------|
-| Kernel throughput (22 models) | **8.6M decisions/sec** |
-| Per decision | 115 ns |
-| Reject path (risk gate) | < 10 ns |
-| Model scaling (4→64 models) | Linear |
-| HTTP gateway (full engine) | 6,084 req/sec |
-
-Benchmarks use Criterion with HTML reports. Results are from a local test environment — hardware, concurrency, and compiler flags affect numbers. Build with `--release` and `lto = true` for best results.
-
-**MSRV:** Rust 1.83+
-
-Public core includes 36 tests (35 default + 1 ignored release guard), including proptest property-based verification, 100-thread concurrency stress, and HMAC chain validation.
-
-Full methodology: [emirhuseyin.tech/engine/methodology.html](https://emirhuseyin.tech/engine/methodology.html)
-
-## Examples
-
-**Simple kernel decision:**
-```rust
-use calybris_core::kernel::*;
-
-let snapshot = PolicySnapshot::new(1, 1, 9600, 5500, 3500, 0, models);
-let decision = snapshot.prescribe(input);
-println!("{:?} → model {}", decision.action, decision.selected_model_id);
+```
+utility = quality_adjusted_value - risk_penalty - cost - latency_penalty
 ```
 
-**Hash-chained WAL (unkeyed):**
-```rust
-use calybris_core::wal::WalWriter;
+All values are basis points (1/10,000) or microunits (1/1,000,000). The fast path uses `u64` with overflow guards; when inputs don't fit, it falls back to `u128`. Proptest verifies both paths agree on every random input.
 
+Constraints checked per decision: risk ceiling, confidence floor, quality minimum, budget limit, latency cap, capability match, provider mask, region mask, cost, utility sign, optimality.
+
+### `wal.rs`
+
+```rust
+// Unkeyed — detects accidental corruption
 let mut wal = WalWriter::open(&path)?;
-let entry = wal.append(my_decision)?;
-wal.sync()?;
-// entry.entry_hash chains to previous — tamper-evident
+let entry = wal.append(my_data)?;
+
+// Keyed — attacker can't forge valid hashes
+let mut wal = WalWriter::open_keyed(&path, b"secret")?;
 ```
 
-**HMAC-keyed WAL (adversarial tamper evidence):**
+Chain is validated on open. Constant-time comparison (`subtle`) on keyed WALs. `append()` writes to the OS buffer; call `flush_and_sync()` when you need crash durability.
+
+### `budget.rs`
+
 ```rust
-use calybris_core::wal::WalWriter;
-
-let key = b"my-secret-audit-key";
-let mut wal = WalWriter::open_keyed(&path, key)?;
-wal.append(my_decision)?;
-wal.sync()?;
-// Without the key, attacker cannot forge valid hashes
-```
-
-**Budget reservation:**
-```rust
-use calybris_core::budget::BudgetEngine;
-
 let engine = BudgetEngine::new();
-engine.ensure_tenant("team-a", 100_000_000); // 100 cents in microcents
+engine.ensure_tenant("team-a", 100_000_000);
 let (res, id) = engine.try_reserve("team-a", 25_000_000);
 engine.commit(id.unwrap(), 20_000_000); // surplus refunded
 ```
 
-## What's NOT included (proprietary)
+`Arc<AtomicI64>` per tenant, cloned out before the CAS loop — no mutex held during contention. Lock ordering: reservations → budgets.
+
+## Benchmarks
+
+```
+cargo bench
+```
+
+| Benchmark | Time | Notes |
+|-----------|------|-------|
+| prescribe (22 models) | 115 ns | ~8.6M/sec |
+| prescribe (4 models) | 36 ns | |
+| prescribe (64 models) | 522 ns | Linear scaling |
+| reject (risk gate) | 15 ns | Early exit |
+
+Results from Criterion on one machine. Your numbers will differ.
+
+## Tests
+
+```
+cargo test           # 37 tests (36 + 1 doc)
+cargo test --release # includes latency guard
+```
+
+Includes proptest property-based verification, 100-thread concurrency stress, HMAC chain validation, and WAL fuzz roundtrips.
+
+## Feature Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `std` | yes | Enables `std` types. Disable for `no_std` + `alloc`. |
+
+## What This Crate Is Not
+
+This is the open-source decision core. It doesn't include:
 
 - Adaptive routing (Thompson Sampling)
 - Policy evolution (counterfactual replay)
-- GBM prompt model (compiled to Rust)
-- Quality tracker + warm-start floors
-- Enterprise correctness certificate + optimality proof package
-- GOVERIS HTTP gateway + audit reports
+- HTTP gateway or API server
+- Prompt classification models
 
-Available through [GOVERIS](https://emirhuseyin.tech/goveris/).
+Those are part of the proprietary engine. See [emirhuseyin.tech/engine](https://emirhuseyin.tech/engine) for the full architecture.
 
-## Links
+## Contributing
 
-- [Calybris Engine](https://emirhuseyin.tech/engine) — full technical overview
-- [GOVERIS Product](https://emirhuseyin.tech/goveris/) — AI cost governance
-- [Benchmark Methodology](https://emirhuseyin.tech/engine/methodology.html)
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues labeled [`good first issue`](https://github.com/emirhuseynrmx/calybris-core/labels/good%20first%20issue) are a good starting point.
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-
-## Contact
-
-emirhuseyininci@gmail.com
-
----
-
-# 🇹🇷 Türkçe
-
-## Calybris Core Nedir?
-
-[Calybris Engine](https://emirhuseyin.tech/engine)'in açık kaynak karar çekirdeği.
-
-```bash
-git clone https://github.com/emirhuseynrmx/calybris-core.git
-cd calybris-core
-cargo test
-```
-
-### Modüller
-
-- **kernel.rs** — Tam sayı karar kernel'i, 8.6M/s, sıfır bellek tahsisi
-- **budget.rs** — CAS atomik bütçe motoru, i64 mikrosent, korunum kanıtlı
-- **wal.rs** — HMAC-SHA256 destekli hash-zincirli WAL, kurcalamaya dayanıklı, jenerik
-
-### Dahil Olmayan (Tescilli)
-
-- Adaptif yönlendirme (Thompson Sampling)
-- Politika evrimi (counterfactual replay)
-- GBM prompt modeli
-- GOVERIS HTTP gateway + denetim raporları
-
-Bu bileşenler [GOVERIS](https://emirhuseyin.tech/goveris/) üzerinden sunulmaktadır.
