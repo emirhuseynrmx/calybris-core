@@ -35,7 +35,7 @@ MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --locked --lib --a
 MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --locked --test audit_pipeline
 ```
 
-See [MIRI.md](MIRI.md) for CI-equivalent `--skip` filters.
+See [MIRI.md](MIRI.md) for CI-equivalent `--skip` filters and **why** those tests are skipped (WAL I/O → `audit_pipeline`; concurrency → Loom; proptests → 10k job).
 
 ## 3. Module map
 

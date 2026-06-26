@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.9] - 2026-06-26
 
+### Changed
+- `docs/MIRI.md`: "Why some tests are skipped" — explicit Miri vs Loom vs proptest division
+
 ### Fixed
 - `THREAT_MODEL` / `SECURITY.md`: Loom/Miri residual risk wording aligned with CI reality
 - `restore_from_snapshot` exclusive-recovery contract + rejects ghost reservations, negatives, unbalanced snapshots
