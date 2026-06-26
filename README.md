@@ -12,20 +12,21 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.83-orange)]()
 
-A small Rust decision engine for auditable, deterministic policy decisions.
+A small Rust decision engine for auditable, deterministic policy decisions — with HFT-grade fixed-point financial accounting.
 
-Calybris Core evaluates candidates under hard constraints, selects the highest-utility valid option, records decisions through tamper-evident primitives, and lets you independently verify that every decision matches the policy that produced it.
+Calybris Core evaluates candidates under hard constraints, selects the highest-utility valid option, records decisions through tamper-evident primitives, and proves every decision and ledger state with canonical SHA-256 digests.
 
-The first packaged use case is **LLM/model routing**: choosing between models under budget, latency, risk, quality, provider, and region constraints. The core pattern is domain-neutral — any system that chooses between candidates under constraints can use the same primitives.
+The first packaged use case is **LLM/model routing**. The core pattern is domain-neutral — any system that chooses between candidates under constraints can use the same primitives.
 
-Built from four components:
+Built from five components:
 
 1. **`kernel`** — Integer-only decision kernel. 11 constraint gates, ~115ns per decision. No floating-point, no allocation in the hot path.
-2. **`verify`** — Deterministic replay check, policy fingerprinting, and correctness certificates.
-3. **`wal`** — Hash-chained write-ahead log. SHA-256 or HMAC-SHA256. Generic over any `Serialize` type.
-4. **`budget`** — CAS atomic budget engine. Conservation invariant: `remaining + reserved + committed = initial`.
+2. **`verify`** — Level-2 proof: policy + input + decision digests, full replay, correctness certificates.
+3. **`finance`** — Fixed-point ledger (`i64` microcents), conservation proofs, tamper-evident ledger digest.
+4. **`wal`** — Hash-chained write-ahead log with `append_audited` and offline `replay_audited_wal`.
+5. **`budget`** — CAS atomic budget engine. Conservation invariant: `remaining + reserved + committed = initial`.
 
-`#![forbid(unsafe_code)]` · 40 unit tests · 2 doc tests · 6 direct dependencies · Apache-2.0
+`#![forbid(unsafe_code)]` · 48 unit tests · 2 doc tests · 6 direct dependencies · Apache-2.0
 
 ## Quick Start
 
@@ -35,93 +36,91 @@ cargo add calybris-core
 
 ```rust
 use calybris_core::kernel::*;
-use calybris_core::verify::{certify_decision, verify_decision, VerifyResult};
+use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
+use calybris_core::finance::prove_conservation;
+use calybris_core::budget::BudgetEngine;
 
-let models = vec![/* your model catalog */];
-let snapshot = PolicySnapshot::new(1, 1, 9600, 5500, 3500, 0, models);
+let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models)?;
 let input = KernelInput { /* ... */ };
-
 let decision = snapshot.prescribe(input);
-// decision.action: ExecuteRequested | Substitute | Reject
-// decision.selected_model_id: which model was chosen
-// decision.expected_utility_microunits: why
 
 assert_eq!(verify_decision(&snapshot, input, &decision), VerifyResult::Valid);
-let cert = certify_decision(&snapshot, input, &decision);
-assert!(cert.replay_valid);
+let bundle = audit_bundle(&snapshot, input, &decision);
+assert!(bundle.replay_valid);
+
+let budget = BudgetEngine::new();
+budget.ensure_tenant("desk-1", 100_000_000);
+prove_conservation(&budget)?;
 ```
 
-Disable Serde (kernel + budget only, no WAL):
+## Audit Pipeline
 
-```bash
-cargo add calybris-core --no-default-features
 ```
+prescribe(input) → audit_bundle → WAL append_audited → replay_audited_wal
+                         ↓
+              policy_digest + input_digest + decision_digest
+```
+
+Every digest uses a versioned byte layout (`calypol1`, `calyinp1`, `calydcn1`) — not JSON — for cross-platform determinism.
+
+## Financial Layer (HFT)
+
+All money is `i64` **microcents** (1 cent = 1,000,000 microcents). No `f64`.
+
+```rust
+use calybris_core::budget::BudgetEngine;
+use calybris_core::finance::{certify_ledger, prove_conservation, MICROCENTS_PER_CENT};
+
+let engine = BudgetEngine::new();
+engine.ensure_tenant("hft-desk", 1_000_000 * MICROCENTS_PER_CENT);
+let (_, id) = engine.try_reserve("hft-desk", 10_000);  // CAS hot path
+engine.commit(id.unwrap(), 9_500);
+
+assert!(certify_ledger(&engine).conservation_balanced);
+prove_conservation(&engine)?;  // remaining + reserved + committed == initial
+```
+
+`cargo bench --bench budget_bench` measures reserve/commit latency.
 
 ## Modules
 
 ### `kernel.rs`
 
-The kernel scores every candidate model with:
-
 ```
 utility = quality_adjusted_value - risk_penalty - cost - latency_penalty
 ```
 
-All values are basis points (1/10,000) or microunits (1/1,000,000). The fast path uses `u64` with overflow guards; when inputs don't fit, it falls back to `u128`. Proptest verifies both paths agree on every random input.
-
-Constraints checked per decision: risk ceiling, confidence floor, quality minimum, budget limit, latency cap, capability match, provider mask, region mask, cost, utility sign, optimality.
-
-Public types implement `Display` and optional `Serialize`/`Deserialize` (behind the `serde` feature, enabled by default).
+`prescribe_batch`, `prescribe_with_trace`, `PolicySnapshot::validate()`, `try_new()`.
 
 ### `verify.rs`
 
-Independently confirm that a recorded decision is consistent with the policy snapshot that should have produced it:
+`audit_bundle`, `verify_decision` (full `KernelDecision` equality), `certify_decision`, `counterfactual_utility`.
 
-```rust
-use calybris_core::verify::{certify_decision, snapshot_fingerprint, verify_decision};
+### `finance.rs`
 
-let replay = verify_decision(&snapshot, input, &decision);
-let fingerprint = snapshot_fingerprint(&snapshot); // SHA-256 policy binding
-let cert = certify_decision(&snapshot, input, &decision);
-```
-
-`verify_decision` replays `snapshot.prescribe(input)` and compares the outcome. `certify_decision` binds the decision to a policy fingerprint and includes the replay result — useful for audit trails and WAL records.
+`ledger_digest`, `FinancialCertificate`, `prove_conservation` — binds budget state to SHA-256.
 
 ### `wal.rs`
 
-Requires the `serde` feature (on by default).
-
 ```rust
-// Unkeyed — detects accidental corruption
-let mut wal = WalWriter::open(&path)?;
-let entry = wal.append(my_data)?;
-
-// Keyed — attacker can't forge valid hashes
-let mut wal = WalWriter::open_keyed(&path, b"secret")?;
+wal.append_audited(&snapshot, input, decision, metadata)?;
+let verdicts = replay_audited_wal(&path, &snapshot)?;
 ```
 
-Chain is validated on open. Constant-time comparison (`subtle`) on keyed WALs. `append()` writes to the OS buffer; call `flush_and_sync()` when you need crash durability.
+Requires the `serde` feature (on by default).
 
 ### `budget.rs`
 
-```rust
-let engine = BudgetEngine::new();
-engine.ensure_tenant("team-a", 100_000_000);
-let (res, id) = engine.try_reserve("team-a", 25_000_000);
-engine.commit(id.unwrap(), 20_000_000); // surplus refunded
-
-engine.tenant_count();        // registered tenants
-engine.active_reservations(); // uncommitted holds
-```
-
-`Arc<AtomicI64>` per tenant, cloned out before the CAS loop — no mutex held during contention. Lock ordering: reservations → budgets.
+CAS `try_reserve` / `commit` / `release`, `snapshot()`, `verify_conservation()`, per-tenant `initial/committed/reserved` tracking.
 
 ## Examples
 
 ```bash
-cargo run --example simple_kernel   # minimal prescribe() demo
-cargo run --example route_decision  # LLM routing + WAL audit trail
-cargo run --example verify_wal      # hash-chain validation
+cargo run --example simple_kernel
+cargo run --example route_decision
+cargo run --example replay_audit      # full audit pipeline
+cargo run --example finance_hft       # 50k reserve/commit + conservation proof
+cargo run --example verify_wal
 ```
 
 ## Benchmarks
@@ -133,35 +132,29 @@ cargo bench
 | Benchmark | Time | Notes |
 |-----------|------|-------|
 | prescribe (22 models) | 115 ns | ~8.6M/sec |
-| prescribe (4 models) | 36 ns | |
-| prescribe (64 models) | 522 ns | Linear scaling |
-| reject (risk gate) | 15 ns | Early exit |
-
-Results from Criterion on one machine. Your numbers will differ.
+| budget try_reserve | ~tens of ns | CAS, no mutex on debit |
+| budget reserve+commit | ~tens of ns | HFT accounting path |
 
 ## Tests
 
 ```
-cargo test           # 40 unit + 2 doc tests
+cargo test           # 48 unit + 2 doc tests
 cargo test --release # includes latency guard (1 ignored in debug)
 ```
 
-Includes proptest property-based verification, 100-thread concurrency stress, HMAC chain validation, decision replay checks, and WAL fuzz roundtrips.
+Proptest, 100-thread concurrency stress, HMAC WAL fuzz, audited WAL replay, conservation proofs.
 
 ## What This Crate Is Not
 
-This is the open-source decision core. It doesn't include:
-
 - Adaptive routing (Thompson Sampling)
-- Policy evolution (counterfactual replay)
+- Policy evolution (automated catalog updates)
 - HTTP gateway or API server
-- Prompt classification models
 
-Those are part of the proprietary engine. See [emirhuseyin.tech/engine](https://emirhuseyin.tech/engine) for the full architecture.
+See [emirhuseyin.tech/engine](https://emirhuseyin.tech/engine) for the full proprietary engine.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Issues labeled [`good first issue`](https://github.com/emirhuseynrmx/calybris-core/labels/good%20first%20issue) are a good starting point.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

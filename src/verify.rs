@@ -1,12 +1,9 @@
-//! Decision verification and replay.
+//! Decision verification, replay, and correctness certificates.
 //!
-//! Provides tools to independently verify that a [`KernelDecision`] was
-//! correctly produced from a given [`PolicySnapshot`] and [`KernelInput`].
-//!
-//! This is the open-core implementation of Level 1 proof (correctness check).
+//! Level 2 proof: policy digest + input digest + full decision digest + replay.
 
-use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
-use sha2::{Digest, Sha256};
+use crate::digest::{decision_digest, digest_to_hex, input_digest, policy_digest};
+use crate::kernel::{KernelDecision, KernelInput, KernelReason, PolicySnapshot};
 
 /// Result of verifying a decision against its inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,126 +12,230 @@ pub enum VerifyResult {
     Valid,
     /// The decision does not match what the policy would produce.
     Mismatch {
-        expected_action: crate::kernel::KernelAction,
-        expected_model: u32,
-        actual_action: crate::kernel::KernelAction,
-        actual_model: u32,
+        expected: KernelDecision,
+        actual: KernelDecision,
     },
+    /// Decision digest does not match the canonical digest of the decision fields.
+    DigestMismatch {
+        expected_hex: String,
+        actual_hex: String,
+    },
+}
+
+/// Binds a decision to its policy and input via canonical SHA-256 digests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AuditBundle {
+    /// Hex-encoded canonical policy digest.
+    pub policy_digest_hex: String,
+    /// Hex-encoded canonical input digest.
+    pub input_digest_hex: String,
+    /// Hex-encoded canonical decision digest.
+    pub decision_digest_hex: String,
+    /// Whether `snapshot.prescribe(input)` equals `decision` on all fields.
+    pub replay_valid: bool,
+}
+
+impl AuditBundle {
+    /// Raw 32-byte policy digest.
+    pub fn policy_digest(&self) -> Result<[u8; 32], hex::FromHexError> {
+        decode_hex32(&self.policy_digest_hex)
+    }
+
+    /// Raw 32-byte input digest.
+    pub fn input_digest(&self) -> Result<[u8; 32], hex::FromHexError> {
+        decode_hex32(&self.input_digest_hex)
+    }
+
+    /// Raw 32-byte decision digest.
+    pub fn decision_digest(&self) -> Result<[u8; 32], hex::FromHexError> {
+        decode_hex32(&self.decision_digest_hex)
+    }
+}
+
+/// Build an [`AuditBundle`] for a decision.
+pub fn audit_bundle(
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: &KernelDecision,
+) -> AuditBundle {
+    let policy = policy_digest(snapshot);
+    let input_d = input_digest(&input);
+    let decision_d = decision_digest(decision);
+    let replayed = snapshot.prescribe(input);
+    AuditBundle {
+        policy_digest_hex: digest_to_hex(&policy),
+        input_digest_hex: digest_to_hex(&input_d),
+        decision_digest_hex: digest_to_hex(&decision_d),
+        replay_valid: replayed == *decision,
+    }
 }
 
 /// Verify that `decision` is the correct output of `snapshot.prescribe(input)`.
 ///
-/// This is a deterministic replay check: given the same policy and input,
-/// the kernel must produce the same decision. If it doesn't, the decision
-/// was either tampered with or produced by a different policy version.
-///
-/// ```rust,no_run
-/// use calybris_core::verify::verify_decision;
-/// // let result = verify_decision(&snapshot, input, &decision);
-/// // assert_eq!(result, VerifyResult::Valid);
-/// ```
+/// Checks full structural equality and canonical decision digest binding.
 pub fn verify_decision(
     snapshot: &PolicySnapshot,
     input: KernelInput,
     decision: &KernelDecision,
 ) -> VerifyResult {
     let replayed = snapshot.prescribe(input);
-    if replayed.action == decision.action
-        && replayed.selected_model_id == decision.selected_model_id
-        && replayed.reason == decision.reason
-        && replayed.estimated_cost_microunits == decision.estimated_cost_microunits
-        && replayed.expected_utility_microunits == decision.expected_utility_microunits
-        && replayed.policy_epoch == decision.policy_epoch
-        && replayed.catalog_epoch == decision.catalog_epoch
-    {
+    let expected_d = decision_digest(&replayed);
+    let actual_d = decision_digest(decision);
+
+    if expected_d != actual_d {
+        return VerifyResult::DigestMismatch {
+            expected_hex: digest_to_hex(&expected_d),
+            actual_hex: digest_to_hex(&actual_d),
+        };
+    }
+
+    if replayed == *decision {
         VerifyResult::Valid
     } else {
         VerifyResult::Mismatch {
-            expected_action: replayed.action,
-            expected_model: replayed.selected_model_id,
-            actual_action: decision.action,
-            actual_model: decision.selected_model_id,
+            expected: replayed,
+            actual: *decision,
         }
     }
 }
 
 /// Compute a fingerprint of a policy snapshot for audit binding.
 ///
-/// The fingerprint is a SHA-256 hash of the policy parameters and model catalog.
-/// Two snapshots with the same models and parameters produce the same fingerprint.
+/// Returns the hex-encoded canonical policy digest (models sorted by `model_id`).
 pub fn snapshot_fingerprint(snapshot: &PolicySnapshot) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(snapshot.policy_epoch.to_le_bytes());
-    hasher.update(snapshot.catalog_epoch.to_le_bytes());
-    hasher.update(snapshot.hard_risk_limit_bps.to_le_bytes());
-    hasher.update(snapshot.minimum_confidence_bps.to_le_bytes());
-    hasher.update(snapshot.risk_penalty_multiplier_bps.to_le_bytes());
-    hasher.update(snapshot.latency_penalty_microunits_per_ms.to_le_bytes());
-    for model in snapshot.models() {
-        hasher.update(model.model_id.to_le_bytes());
-        hasher.update(model.provider_id.to_le_bytes());
-        hasher.update(model.quality_bps.to_le_bytes());
-        hasher.update(model.risk_ceiling_bps.to_le_bytes());
-        hasher.update(model.enabled.to_le_bytes());
-        hasher.update(model.p95_latency_ms.to_le_bytes());
-        hasher.update(model.capabilities.to_le_bytes());
-        hasher.update(model.region_mask.to_le_bytes());
-        hasher.update(model.input_cost_microunits_per_million_tokens.to_le_bytes());
-        hasher.update(
-            model
-                .output_cost_microunits_per_million_tokens
-                .to_le_bytes(),
-        );
-    }
-    let digest = hasher.finalize();
-    digest.iter().map(|b| format!("{:02x}", b)).collect()
+    digest_to_hex(&policy_digest(snapshot))
 }
 
 /// A correctness certificate binding a decision to its policy and input.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CorrectnessCertificate {
-    /// SHA-256 fingerprint of the policy snapshot.
+    /// Hex-encoded canonical policy digest.
     pub policy_fingerprint: String,
-    /// The decision that was made.
+    /// Hex-encoded canonical input digest.
+    pub input_fingerprint: String,
+    /// Hex-encoded canonical decision digest.
+    pub decision_fingerprint: String,
     pub decision_sequence: u64,
-    /// Selected model ID.
     pub selected_model_id: u32,
-    /// Action taken.
     pub action: String,
-    /// Reason for the action.
     pub reason: String,
-    /// Whether replay verification passed.
     pub replay_valid: bool,
-    /// Number of models evaluated.
     pub evaluated_models: u16,
-    /// Number of eligible models.
     pub eligible_models: u16,
-    /// Counterfactual model (second-best).
     pub counterfactual_model_id: u32,
+    pub counterfactual_utility_microunits: i64,
 }
 
 /// Generate a correctness certificate for a decision.
-///
-/// This binds the decision to its policy via fingerprint and includes
-/// the replay verification result.
 pub fn certify_decision(
     snapshot: &PolicySnapshot,
     input: KernelInput,
     decision: &KernelDecision,
 ) -> CorrectnessCertificate {
-    let fingerprint = snapshot_fingerprint(snapshot);
-    let replay = verify_decision(snapshot, input, decision);
+    let bundle = audit_bundle(snapshot, input, decision);
     CorrectnessCertificate {
-        policy_fingerprint: fingerprint,
+        policy_fingerprint: bundle.policy_digest_hex,
+        input_fingerprint: bundle.input_digest_hex,
+        decision_fingerprint: bundle.decision_digest_hex,
         decision_sequence: decision.request_sequence,
         selected_model_id: decision.selected_model_id,
         action: format!("{}", decision.action),
         reason: format!("{}", decision.reason),
-        replay_valid: replay == VerifyResult::Valid,
+        replay_valid: bundle.replay_valid,
         evaluated_models: decision.evaluated_models,
         eligible_models: decision.eligible_models,
         counterfactual_model_id: decision.counterfactual_model_id,
+        counterfactual_utility_microunits: decision.counterfactual_utility_microunits,
+    }
+}
+
+/// Counterfactual utility if a specific model had been forced.
+///
+/// Returns `None` if the model is absent, disabled, or fails constraints.
+pub fn counterfactual_utility(
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    alt_model_id: u32,
+) -> Option<i64> {
+    let mut forced = input;
+    forced.requested_model_id = alt_model_id;
+    let decision = snapshot.prescribe(forced);
+    if decision.selected_model_id == alt_model_id
+        && decision.reason != KernelReason::NoEnabledModel
+        && decision.reason != KernelReason::CapabilityConstraint
+        && decision.reason != KernelReason::ProviderConstraint
+        && decision.reason != KernelReason::RegionConstraint
+        && decision.reason != KernelReason::QualityConstraint
+        && decision.reason != KernelReason::LatencyConstraint
+        && decision.reason != KernelReason::BudgetConstraint
+        && decision.reason != KernelReason::RiskCeilingConstraint
+        && decision.reason != KernelReason::NonPositiveUtility
+    {
+        Some(decision.expected_utility_microunits)
+    } else if decision.counterfactual_model_id == alt_model_id {
+        Some(decision.counterfactual_utility_microunits)
+    } else {
+        None
+    }
+}
+
+fn decode_hex32(hex: &str) -> Result<[u8; 32], hex::FromHexError> {
+    let bytes = hex::decode(hex)?;
+    if bytes.len() != 32 {
+        return Err(hex::FromHexError::InvalidStringLength);
+    }
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+mod hex {
+    use std::fmt;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FromHexError {
+        InvalidHexCharacter { digit: u8, index: usize },
+        OddLength,
+        InvalidStringLength,
+    }
+
+    impl fmt::Display for FromHexError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::InvalidHexCharacter { digit, index } => {
+                    write!(f, "invalid hex digit 0x{digit:02x} at index {index}")
+                }
+                Self::OddLength => write!(f, "odd hex string length"),
+                Self::InvalidStringLength => write!(f, "expected 64 hex characters"),
+            }
+        }
+    }
+
+    impl std::error::Error for FromHexError {}
+
+    pub fn decode(hex: &str) -> Result<Vec<u8>, FromHexError> {
+        if hex.len() % 2 != 0 {
+            return Err(FromHexError::OddLength);
+        }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        let bytes = hex.as_bytes();
+        for i in (0..bytes.len()).step_by(2) {
+            let hi = from_hex_digit(bytes[i], i)?;
+            let lo = from_hex_digit(bytes[i + 1], i + 1)?;
+            out.push((hi << 4) | lo);
+        }
+        Ok(out)
+    }
+
+    fn from_hex_digit(byte: u8, index: usize) -> Result<u8, FromHexError> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err(FromHexError::InvalidHexCharacter { digit: byte, index }),
+        }
     }
 }
 
@@ -144,7 +245,7 @@ mod tests {
     use crate::kernel::*;
 
     fn test_snapshot() -> PolicySnapshot {
-        PolicySnapshot::new(
+        PolicySnapshot::try_new(
             1,
             1,
             9600,
@@ -178,6 +279,7 @@ mod tests {
                 },
             ],
         )
+        .expect("valid snapshot")
     }
 
     fn test_input() -> KernelInput {
@@ -210,32 +312,43 @@ mod tests {
     }
 
     #[test]
-    fn tampered_decision_detected() {
+    fn tampered_counterfactual_detected() {
         let snap = test_snapshot();
         let input = test_input();
         let mut decision = snap.prescribe(input);
-        decision.selected_model_id = 99;
-        assert_ne!(
+        decision.counterfactual_utility_microunits += 1;
+        assert!(matches!(
             verify_decision(&snap, input, &decision),
-            VerifyResult::Valid
-        );
+            VerifyResult::DigestMismatch { .. } | VerifyResult::Mismatch { .. }
+        ));
     }
 
     #[test]
-    fn fingerprint_deterministic() {
+    fn audit_bundle_binds_input() {
         let snap = test_snapshot();
-        assert_eq!(snapshot_fingerprint(&snap), snapshot_fingerprint(&snap));
-        assert_eq!(snapshot_fingerprint(&snap).len(), 64);
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        let bundle = audit_bundle(&snap, input, &decision);
+        assert!(bundle.replay_valid);
+        assert_eq!(bundle.policy_digest_hex.len(), 64);
+        assert_eq!(bundle.input_digest_hex.len(), 64);
+        assert_eq!(bundle.decision_digest_hex.len(), 64);
     }
 
     #[test]
-    fn certificate_generated() {
+    fn fingerprint_matches_policy_digest() {
+        let snap = test_snapshot();
+        assert_eq!(snapshot_fingerprint(&snap), digest_to_hex(&policy_digest(&snap)));
+    }
+
+    #[test]
+    fn certificate_includes_input_fingerprint() {
         let snap = test_snapshot();
         let input = test_input();
         let decision = snap.prescribe(input);
         let cert = certify_decision(&snap, input, &decision);
         assert!(cert.replay_valid);
-        assert_eq!(cert.decision_sequence, 1);
-        assert_eq!(cert.policy_fingerprint.len(), 64);
+        assert_eq!(cert.input_fingerprint.len(), 64);
+        assert_eq!(cert.decision_fingerprint.len(), 64);
     }
 }

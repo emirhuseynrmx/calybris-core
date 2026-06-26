@@ -8,6 +8,9 @@
 //! The chain is validated on startup before accepting new decisions.
 //! Generic over the decision type: any `Serialize + Clone` works.
 
+use crate::digest::{digest_to_hex, policy_digest};
+use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
+use crate::verify::{audit_bundle, verify_decision, VerifyResult};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,6 +49,64 @@ pub enum WalError {
     },
     #[error("WAL duplicate sequence: {0}")]
     DuplicateSequence(u64),
+    #[error("WAL audit failed at sequence {sequence}: {reason}")]
+    AuditFailed { sequence: u64, reason: String },
+}
+
+/// Full audit record: policy/input/decision digests + replay flag + optional metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuditedRecord<M> {
+    pub audit: crate::verify::AuditBundle,
+    pub input: KernelInput,
+    pub decision: KernelDecision,
+    pub metadata: M,
+}
+
+/// Result of replay-verifying one audited WAL entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalReplayVerdict {
+    pub sequence: u64,
+    pub replay_valid: bool,
+    pub policy_digest_match: bool,
+    pub input_digest_match: bool,
+    pub decision_digest_match: bool,
+}
+
+impl<M> WalWriter<AuditedRecord<M>>
+where
+    M: Serialize + Clone,
+{
+    /// Append a fully audited decision record (bundle + input + decision + metadata).
+    pub fn append_audited(
+        &mut self,
+        snapshot: &PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        metadata: M,
+    ) -> Result<WalEntry<AuditedRecord<M>>, WalError> {
+        let audit = audit_bundle(snapshot, input, &decision);
+        let record = AuditedRecord {
+            audit,
+            input,
+            decision,
+            metadata,
+        };
+        self.append(record)
+    }
+}
+
+/// Append an audited record to any WAL writer.
+pub fn append_audited<M>(
+    wal: &mut WalWriter<AuditedRecord<M>>,
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: KernelDecision,
+    metadata: M,
+) -> Result<WalEntry<AuditedRecord<M>>, WalError>
+where
+    M: Serialize + Clone,
+{
+    wal.append_audited(snapshot, input, decision, metadata)
 }
 
 #[inline]
@@ -312,6 +373,60 @@ pub fn read_verified_wal_keyed<T: for<'de> Deserialize<'de>>(
 ) -> Result<Vec<WalEntry<T>>, WalError> {
     validate_chain_inner(path, Some(key))?;
     read_wal(path)
+}
+
+/// Replay-verify every audited entry against `snapshot` (chain + digests + prescribe).
+///
+/// Metadata is ignored during replay (`serde_json::Value`).
+pub fn replay_audited_wal(
+    path: &Path,
+    snapshot: &PolicySnapshot,
+) -> Result<Vec<WalReplayVerdict>, WalError> {
+    replay_audited_wal_keyed::<serde_json::Value>(path, snapshot, None)
+}
+
+/// Replay-verify audited WAL with optional HMAC key.
+pub fn replay_audited_wal_keyed<M>(
+    path: &Path,
+    snapshot: &PolicySnapshot,
+    key: Option<&[u8]>,
+) -> Result<Vec<WalReplayVerdict>, WalError>
+where
+    M: for<'de> Deserialize<'de>,
+{
+    validate_chain_inner(path, key)?;
+    let entries = read_wal::<AuditedRecord<M>>(path)?;
+    let expected_policy = digest_to_hex(&policy_digest(snapshot));
+
+    let mut verdicts = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let bundle = &entry.data.audit;
+        let replay = verify_decision(snapshot, entry.data.input, &entry.data.decision);
+        let replay_valid = replay == VerifyResult::Valid;
+        let policy_digest_match = bundle.policy_digest_hex == expected_policy;
+        let input_digest_match =
+            bundle.input_digest_hex == digest_to_hex(&crate::digest::input_digest(&entry.data.input));
+        let decision_digest_match = bundle.decision_digest_hex
+            == digest_to_hex(&crate::digest::decision_digest(&entry.data.decision));
+
+        if !replay_valid || !policy_digest_match {
+            return Err(WalError::AuditFailed {
+                sequence: entry.sequence,
+                reason: format!(
+                    "replay_valid={replay_valid} policy_match={policy_digest_match}"
+                ),
+            });
+        }
+
+        verdicts.push(WalReplayVerdict {
+            sequence: entry.sequence,
+            replay_valid,
+            policy_digest_match,
+            input_digest_match,
+            decision_digest_match,
+        });
+    }
+    Ok(verdicts)
 }
 
 #[cfg(test)]
@@ -608,6 +723,57 @@ mod tests {
         let entries = read_verified_wal_keyed::<TestDecision>(&path, key).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].data.model, "x");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn audited_append_replay_roundtrip() {
+        use crate::kernel::*;
+
+        let path = temp_path("audited-replay");
+        let _ = std::fs::remove_file(&path);
+
+        let models = vec![KernelModel {
+            model_id: 1,
+            provider_id: 0,
+            quality_bps: 9000,
+            risk_ceiling_bps: 9500,
+            enabled: 1,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }];
+        let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models).unwrap();
+        let input = KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        let decision = snapshot.prescribe(input);
+
+        {
+            let mut wal = WalWriter::open(&path).unwrap();
+            wal.append_audited(&snapshot, input, decision, "meta".to_string())
+                .unwrap();
+            wal.sync().unwrap();
+        }
+
+        let verdicts = replay_audited_wal(&path, &snapshot).unwrap();
+        assert_eq!(verdicts.len(), 1);
+        assert!(verdicts[0].replay_valid);
 
         let _ = std::fs::remove_file(&path);
     }

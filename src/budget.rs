@@ -82,15 +82,47 @@ fn debit_if_available(budget: &AtomicI64, amount: i64) -> Result<i64, i64> {
 /// (reservations → budgets) to prevent deadlock.
 pub struct BudgetEngine {
     tenant_budgets: Mutex<HashMap<Arc<str>, Arc<AtomicI64>>>,
+    initial_microcents: Mutex<HashMap<Arc<str>, i64>>,
+    committed_microcents: Mutex<HashMap<Arc<str>, i64>>,
     reservations: Mutex<HashMap<u64, ReservationRecord>>,
     // u64::MAX is ~18 quintillion reservations — practically unreachable.
     next_id: AtomicU64,
+}
+
+/// Point-in-time ledger row for one tenant (integer microcents only).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TenantLedger {
+    pub tenant_id: String,
+    pub initial_microcents: i64,
+    pub remaining_microcents: i64,
+    pub reserved_microcents: i64,
+    pub committed_microcents: i64,
+}
+
+/// Immutable financial snapshot across all tenants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BudgetSnapshot {
+    pub tenants: Vec<TenantLedger>,
+    pub active_reservations: usize,
+}
+
+/// Result of the conservation invariant check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConservationStatus {
+    /// `remaining + reserved + committed == initial` for every tenant.
+    Balanced,
+    /// Invariant violated — includes per-tenant deltas in microcents.
+    Violation { tenant_id: String, delta_microcents: i64 },
 }
 
 impl BudgetEngine {
     pub fn new() -> Self {
         Self {
             tenant_budgets: Mutex::new(HashMap::new()),
+            initial_microcents: Mutex::new(HashMap::new()),
+            committed_microcents: Mutex::new(HashMap::new()),
             reservations: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         }
@@ -106,10 +138,102 @@ impl BudgetEngine {
             "initial budget must be non-negative"
         );
         let mut budgets = self.tenant_budgets.lock().unwrap();
+        let mut initials = self.initial_microcents.lock().unwrap();
+        let mut committed = self.committed_microcents.lock().unwrap();
         let key: Arc<str> = Arc::from(tenant_id);
-        budgets
-            .entry(key)
-            .or_insert_with(|| Arc::new(AtomicI64::new(budget_microcents)));
+        if !budgets.contains_key(&key) {
+            budgets.insert(
+                Arc::clone(&key),
+                Arc::new(AtomicI64::new(budget_microcents)),
+            );
+            initials.insert(Arc::clone(&key), budget_microcents);
+            committed.insert(key, 0);
+        }
+    }
+
+    /// Initial budget granted to a tenant in microcents.
+    #[must_use]
+    pub fn initial_microcents(&self, tenant_id: &str) -> Option<i64> {
+        let initials = self.initial_microcents.lock().unwrap();
+        let key: Arc<str> = Arc::from(tenant_id);
+        initials.get(&key).copied()
+    }
+
+    /// Total committed (spent) microcents for a tenant.
+    #[must_use]
+    pub fn committed_microcents(&self, tenant_id: &str) -> Option<i64> {
+        let committed = self.committed_microcents.lock().unwrap();
+        let key: Arc<str> = Arc::from(tenant_id);
+        committed.get(&key).copied()
+    }
+
+    /// Sum of active reservation holds for a tenant.
+    #[must_use]
+    pub fn reserved_microcents(&self, tenant_id: &str) -> i64 {
+        let reservations = self.reservations.lock().unwrap();
+        let key: Arc<str> = Arc::from(tenant_id);
+        reservations
+            .values()
+            .filter(|r| r.tenant_id == key)
+            .map(|r| r.reserved_microcents)
+            .sum()
+    }
+
+    /// Capture a point-in-time ledger snapshot (mutex read — not on hot path).
+    ///
+    /// Lock order: reservations → budgets → initials → committed (matches hot path).
+    #[must_use]
+    pub fn snapshot(&self) -> BudgetSnapshot {
+        let reservations = self.reservations.lock().unwrap();
+        let budgets = self.tenant_budgets.lock().unwrap();
+        let initials = self.initial_microcents.lock().unwrap();
+        let committed = self.committed_microcents.lock().unwrap();
+
+        let mut reserved_by_tenant: HashMap<Arc<str>, i64> = HashMap::new();
+        for record in reservations.values() {
+            *reserved_by_tenant
+                .entry(Arc::clone(&record.tenant_id))
+                .or_insert(0) += record.reserved_microcents;
+        }
+
+        let mut tenants = Vec::with_capacity(budgets.len());
+        for (tenant_id, balance) in budgets.iter() {
+            tenants.push(TenantLedger {
+                tenant_id: tenant_id.to_string(),
+                initial_microcents: initials.get(tenant_id).copied().unwrap_or(0),
+                remaining_microcents: balance.load(Ordering::Acquire),
+                reserved_microcents: reserved_by_tenant.get(tenant_id).copied().unwrap_or(0),
+                committed_microcents: committed.get(tenant_id).copied().unwrap_or(0),
+            });
+        }
+        tenants.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
+        BudgetSnapshot {
+            tenants,
+            active_reservations: reservations.len(),
+        }
+    }
+
+    /// Verify `remaining + reserved + committed == initial` for every tenant.
+    #[must_use]
+    pub fn verify_conservation(&self) -> ConservationStatus {
+        for ledger in &self.snapshot().tenants {
+            let sum = ledger.remaining_microcents
+                + ledger.reserved_microcents
+                + ledger.committed_microcents;
+            if sum != ledger.initial_microcents {
+                return ConservationStatus::Violation {
+                    tenant_id: ledger.tenant_id.clone(),
+                    delta_microcents: sum - ledger.initial_microcents,
+                };
+            }
+            if ledger.remaining_microcents < 0 {
+                return ConservationStatus::Violation {
+                    tenant_id: ledger.tenant_id.clone(),
+                    delta_microcents: ledger.remaining_microcents,
+                };
+            }
+        }
+        ConservationStatus::Balanced
     }
 
     /// Remaining budget for a tenant in microcents.
@@ -220,6 +344,13 @@ impl BudgetEngine {
             }
         } else if delta < 0 {
             budget.fetch_add(-delta, Ordering::AcqRel);
+        }
+
+        {
+            let mut committed = self.committed_microcents.lock().unwrap();
+            *committed
+                .entry(Arc::clone(&reservation.tenant_id))
+                .or_insert(0) += actual_microcents;
         }
 
         let remaining = budget.load(Ordering::Acquire);
@@ -337,6 +468,20 @@ mod tests {
         engine.commit(id1.unwrap(), 25_000_000);
         engine.release(id2.unwrap());
         assert_eq!(engine.remaining_microcents("t1"), Some(75_000_000));
+        assert_eq!(engine.committed_microcents("t1"), Some(25_000_000));
+        assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+    }
+
+    #[test]
+    fn snapshot_balances() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk-a", 50_000_000);
+        engine.ensure_tenant("desk-b", 80_000_000);
+        let (_, id) = engine.try_reserve("desk-a", 10_000_000);
+        engine.commit(id.unwrap(), 9_000_000);
+        let snap = engine.snapshot();
+        assert_eq!(snap.tenants.len(), 2);
+        assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
     }
 
     #[test]

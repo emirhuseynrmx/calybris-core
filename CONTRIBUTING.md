@@ -32,13 +32,20 @@ cargo clippy -- -D warnings
 ```
 src/
   lib.rs      — crate root, feature flags, module re-exports
+  digest.rs   — canonical SHA-256 digests (policy, input, decision, ledger)
   kernel.rs   — allocation-free integer decision kernel
+  verify.rs   — audit bundles, replay verification, certificates
+  finance.rs  — ledger digest, conservation proofs (HFT microcents)
   budget.rs   — CAS atomic per-tenant budget engine
-  wal.rs      — HMAC-SHA256 hash-chained write-ahead log
+  wal.rs      — HMAC-SHA256 hash-chained write-ahead log + audited replay
 benches/
-  kernel_bench.rs — Criterion benchmarks
+  kernel_bench.rs  — prescribe latency
+  budget_bench.rs  — reserve/commit latency
 examples/
   simple_kernel.rs
+  route_decision.rs
+  replay_audit.rs
+  finance_hft.rs
   verify_wal.rs
 ```
 

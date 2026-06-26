@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-26
+
+### Added
+- `digest` module: versioned canonical SHA-256 digests for policy, input, decision, ledger
+- `AuditBundle` with policy + input + decision digest binding and full replay flag
+- `verify_decision` now checks complete `KernelDecision` equality and decision digest
+- `counterfactual_utility()` for alternative model analysis
+- `finance` module: `ledger_digest`, `FinancialCertificate`, `prove_conservation`
+- `BudgetEngine::snapshot()`, `verify_conservation()`, `initial/committed/reserved_microcents`
+- `TenantLedger`, `BudgetSnapshot`, `ConservationStatus` types
+- `PolicySnapshot::validate()`, `try_new()`, `prescribe_batch()`, `prescribe_with_trace()`
+- `RejectionHistogram`, `DecisionTrace`, `PolicyError`
+- WAL `AuditedRecord`, `append_audited`, `replay_audited_wal` / `replay_audited_wal_keyed`
+- Examples: `replay_audit`, `finance_hft`
+- Benchmark: `budget_bench` (reserve / reserve+commit latency)
+
+### Changed
+- `CorrectnessCertificate` includes input and decision fingerprints
+- `snapshot_fingerprint` now uses canonical sorted policy digest
+- Budget engine tracks per-tenant initial and committed microcents for conservation proofs
+
+## [0.3.0] - 2026-06-26
+
+### Added
+- `verify` module: `verify_decision`, `snapshot_fingerprint`, `certify_decision`
+- `Display` for `KernelAction` and `KernelReason`
+- Optional `serde` feature (default on); WAL behind `serde`
+- `tenant_count()`, `active_reservations()`, `entry_count()`
+
 ## [0.2.1] - 2026-06-26
 
 ### Changed

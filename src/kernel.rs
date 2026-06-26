@@ -224,18 +224,56 @@ struct Candidate {
     utility: i64,
 }
 
-#[derive(Default)]
-struct RejectionCounts {
-    disabled: u16,
-    quality: u16,
-    risk_ceiling: u16,
-    latency: u16,
-    capability: u16,
-    provider: u16,
-    region: u16,
-    budget: u16,
-    utility: u16,
+/// Per-constraint rejection counts from a single prescribe evaluation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RejectionHistogram {
+    /// Models skipped because `enabled == 0`.
+    pub disabled: u16,
+    /// Models below `minimum_quality_bps`.
+    pub quality: u16,
+    /// Models where request risk exceeds model risk ceiling.
+    pub risk_ceiling: u16,
+    /// Models above latency cap.
+    pub latency: u16,
+    /// Models missing required capabilities.
+    pub capability: u16,
+    /// Models filtered by provider mask or unrepresentable provider id.
+    pub provider: u16,
+    /// Models filtered by region mask.
+    pub region: u16,
+    /// Models above budget limit.
+    pub budget: u16,
+    /// Eligible models with non-positive utility.
+    pub utility: u16,
 }
+
+/// Explainability snapshot for a prescribe call (alloc-free alongside decision).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DecisionTrace {
+    pub rejections: RejectionHistogram,
+    pub evaluated_models: u16,
+    pub eligible_models: u16,
+}
+
+/// Policy catalog validation errors.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PolicyError {
+    #[error("model catalog is empty")]
+    EmptyCatalog,
+    #[error("duplicate model_id {model_id}")]
+    DuplicateModelId { model_id: u32 },
+    #[error("model_id {model_id} has provider_id {provider_id} > MAX_PROVIDER_ID")]
+    InvalidProviderId {
+        model_id: u32,
+        provider_id: u16,
+    },
+    #[error("no enabled models in catalog")]
+    NoEnabledModels,
+}
+
+type RejectionCounts = RejectionHistogram;
 
 impl PolicySnapshot {
     /// Creates a new policy snapshot from a model catalog.
@@ -291,6 +329,74 @@ impl PolicySnapshot {
         &self.models
     }
 
+    /// Validate catalog invariants before serving traffic.
+    pub fn validate(&self) -> Result<(), PolicyError> {
+        if self.models.is_empty() {
+            return Err(PolicyError::EmptyCatalog);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut any_enabled = false;
+        for model in self.models.iter() {
+            if !seen.insert(model.model_id) {
+                return Err(PolicyError::DuplicateModelId {
+                    model_id: model.model_id,
+                });
+            }
+            if model.provider_id > MAX_PROVIDER_ID {
+                return Err(PolicyError::InvalidProviderId {
+                    model_id: model.model_id,
+                    provider_id: model.provider_id,
+                });
+            }
+            if model.enabled != 0 {
+                any_enabled = true;
+            }
+        }
+        if !any_enabled {
+            return Err(PolicyError::NoEnabledModels);
+        }
+        Ok(())
+    }
+
+    /// Build a snapshot and validate the catalog.
+    pub fn try_new(
+        policy_epoch: u64,
+        catalog_epoch: u64,
+        hard_risk_limit_bps: u16,
+        minimum_confidence_bps: u16,
+        risk_penalty_multiplier_bps: u16,
+        latency_penalty_microunits_per_ms: u64,
+        models: Vec<KernelModel>,
+    ) -> Result<Self, PolicyError> {
+        let snapshot = Self::new(
+            policy_epoch,
+            catalog_epoch,
+            hard_risk_limit_bps,
+            minimum_confidence_bps,
+            risk_penalty_multiplier_bps,
+            latency_penalty_microunits_per_ms,
+            models,
+        );
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Evaluate many inputs. Allocates the output vector only.
+    pub fn prescribe_batch(&self, inputs: &[KernelInput]) -> Vec<KernelDecision> {
+        inputs.iter().map(|&input| self.prescribe(input)).collect()
+    }
+
+    /// Evaluate `input` and return decision plus rejection histogram.
+    pub fn prescribe_with_trace(&self, input: KernelInput) -> (KernelDecision, DecisionTrace) {
+        let (decision, rejections) = self.prescribe_inner(input);
+        let trace = DecisionTrace {
+            rejections,
+            evaluated_models: decision.evaluated_models,
+            eligible_models: decision.eligible_models,
+        };
+        (decision, trace)
+    }
+
     /// Evaluate `input` against the policy and return the optimal decision.
     ///
     /// The kernel checks 11 constraint gates per candidate, computes utility as
@@ -303,6 +409,10 @@ impl PolicySnapshot {
     /// **This function does not allocate.**
     #[must_use]
     pub fn prescribe(&self, input: KernelInput) -> KernelDecision {
+        self.prescribe_inner(input).0
+    }
+
+    fn prescribe_inner(&self, input: KernelInput) -> (KernelDecision, RejectionHistogram) {
         if input.risk_bps >= self.hard_risk_limit_bps {
             return self.reject(input, KernelReason::RiskHardLimit, 0, 0);
         }
@@ -443,25 +553,28 @@ impl PolicySnapshot {
         } else {
             KernelAction::Substitute
         };
-        KernelDecision {
-            request_sequence: input.request_sequence,
-            action,
-            reason: if action == KernelAction::ExecuteRequested {
-                KernelReason::RequestedModelMaximizesUtility
-            } else {
-                KernelReason::AlternativeMaximizesUtility
+        (
+            KernelDecision {
+                request_sequence: input.request_sequence,
+                action,
+                reason: if action == KernelAction::ExecuteRequested {
+                    KernelReason::RequestedModelMaximizesUtility
+                } else {
+                    KernelReason::AlternativeMaximizesUtility
+                },
+                selected_model_id: best.model_id,
+                selected_model_index: best.model_index,
+                estimated_cost_microunits: best.cost,
+                expected_utility_microunits: best.utility,
+                counterfactual_model_id: second.map_or(0, |candidate| candidate.model_id),
+                counterfactual_utility_microunits: second.map_or(0, |candidate| candidate.utility),
+                evaluated_models,
+                eligible_models,
+                policy_epoch: self.policy_epoch,
+                catalog_epoch: self.catalog_epoch,
             },
-            selected_model_id: best.model_id,
-            selected_model_index: best.model_index,
-            estimated_cost_microunits: best.cost,
-            expected_utility_microunits: best.utility,
-            counterfactual_model_id: second.map_or(0, |candidate| candidate.model_id),
-            counterfactual_utility_microunits: second.map_or(0, |candidate| candidate.utility),
-            evaluated_models,
-            eligible_models,
-            policy_epoch: self.policy_epoch,
-            catalog_epoch: self.catalog_epoch,
-        }
+            rejected,
+        )
     }
 
     #[inline]
@@ -483,22 +596,25 @@ impl PolicySnapshot {
         reason: KernelReason,
         evaluated_models: u16,
         eligible_models: u16,
-    ) -> KernelDecision {
-        KernelDecision {
-            request_sequence: input.request_sequence,
-            action: KernelAction::Reject,
-            reason,
-            selected_model_id: 0,
-            selected_model_index: u16::MAX,
-            estimated_cost_microunits: 0,
-            expected_utility_microunits: 0,
-            counterfactual_model_id: 0,
-            counterfactual_utility_microunits: 0,
-            evaluated_models,
-            eligible_models,
-            policy_epoch: self.policy_epoch,
-            catalog_epoch: self.catalog_epoch,
-        }
+    ) -> (KernelDecision, RejectionHistogram) {
+        (
+            KernelDecision {
+                request_sequence: input.request_sequence,
+                action: KernelAction::Reject,
+                reason,
+                selected_model_id: 0,
+                selected_model_index: u16::MAX,
+                estimated_cost_microunits: 0,
+                expected_utility_microunits: 0,
+                counterfactual_model_id: 0,
+                counterfactual_utility_microunits: 0,
+                evaluated_models,
+                eligible_models,
+                policy_epoch: self.policy_epoch,
+                catalog_epoch: self.catalog_epoch,
+            },
+            RejectionHistogram::default(),
+        )
     }
 }
 
@@ -649,10 +765,10 @@ mod tests {
 
     fn prescribe_reference(snapshot: &PolicySnapshot, input: KernelInput) -> KernelDecision {
         if input.risk_bps >= snapshot.hard_risk_limit_bps {
-            return snapshot.reject(input, KernelReason::RiskHardLimit, 0, 0);
+            return snapshot.reject(input, KernelReason::RiskHardLimit, 0, 0).0;
         }
         if input.confidence_bps < snapshot.minimum_confidence_bps {
-            return snapshot.reject(input, KernelReason::ConfidenceHardLimit, 0, 0);
+            return snapshot.reject(input, KernelReason::ConfidenceHardLimit, 0, 0).0;
         }
 
         let mut best: Option<Candidate> = None;
@@ -741,12 +857,14 @@ mod tests {
 
         let evaluated_models = u16::try_from(snapshot.models.len()).unwrap_or(u16::MAX);
         let Some(best) = best else {
-            return snapshot.reject(
-                input,
-                dominant_rejection_reason(&rejected),
-                evaluated_models,
-                eligible_models,
-            );
+            return snapshot
+                .reject(
+                    input,
+                    dominant_rejection_reason(&rejected),
+                    evaluated_models,
+                    eligible_models,
+                )
+                .0;
         };
         let action = if best.model_id == input.requested_model_id {
             KernelAction::ExecuteRequested
