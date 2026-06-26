@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.3] - 2026-06-26
 
+### Fixed
+- Pin `indexmap` to 2.13 in `Cargo.lock` (2.14 requires Cargo edition2024 / Rust > 1.83)
+- CI uses `--locked` for reproducible MSRV builds
+
 ### Added
 - `top_up_tenant()` — add funds without resetting lifetime `committed_microcents`
 - `TopUpResult` enum
