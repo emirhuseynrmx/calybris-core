@@ -99,8 +99,8 @@ fn main() {
     // Commit records routing fee as lifetime spend; exposure surplus returns to remaining
     match budget.commit(exposure_reservation, routing_fee_microcents) {
         BudgetSettlement::Committed { .. } => {
-            let cert = certify_ledger(&budget);
             let proof = prove_conservation(&budget).unwrap();
+            let cert = certify_ledger(&budget);
             println!("Financial certificate:");
             println!("  conservation: {}", cert.conservation_balanced);
             println!(
@@ -112,7 +112,7 @@ fn main() {
                 budget.reserved_microcents("desk-alpha")
             );
             println!("  ledger digest:  {}...", &proof.ledger_digest_hex[..16]);
-            assert_eq!(proof.snapshot_version, cert.snapshot_version);
+            assert_eq!(cert.snapshot_version, budget.snapshot_version());
             assert_eq!(budget.verify_conservation(), ConservationStatus::Balanced);
         }
         other => println!("Settlement failed: {other:?}"),
