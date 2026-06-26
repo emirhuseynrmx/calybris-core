@@ -41,10 +41,12 @@ path = "examples/simple_kernel.rs"
 [[example]]
 name = "verify_wal"
 path = "examples/verify_wal.rs"
+required-features = ["wal"]
 
 [[example]]
 name = "llm_routing"
 path = "examples/llm_routing.rs"
+required-features = ["wal"]
 
 [[example]]
 name = "hft_pretrade_guard"
@@ -53,10 +55,12 @@ path = "examples/hft_pretrade_guard.rs"
 [[example]]
 name = "route_decision"
 path = "examples/route_decision.rs"
+required-features = ["wal"]
 
 [[example]]
 name = "replay_audit"
 path = "examples/replay_audit.rs"
+required-features = ["wal"]
 
 [[example]]
 name = "finance_hft"
