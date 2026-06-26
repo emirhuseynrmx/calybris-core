@@ -1,3 +1,9 @@
+<div align="center">
+  <img src="assets/banner.png" alt="Calybris Core — Proof-Carrying Decision Engine" width="100%" />
+</div>
+
+<br/>
+
 # Calybris Core
 
 [![CI](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml)
