@@ -21,7 +21,7 @@ Not an LLM framework. Not an exchange or strategy engine. A domain-neutral primi
 candidate + policy constraints → decision + digests + optional WAL + budget proof
 ```
 
-`#![forbid(unsafe_code)]` · 51 unit tests · 2 doc tests · Apache-2.0
+`#![forbid(unsafe_code)]` · extensive unit/proptest/Loom coverage · Apache-2.0
 
 ## Two Reference Use Cases
 
@@ -117,7 +117,7 @@ cargo add calybris-core --no-default-features
 2. **`verify`** — Policy + input + decision digests, full replay, `DigestDecodeError` on public API.
 3. **`finance`** — Ledger digest, `FinancialCertificate`, `ConservationProof`, `prove_conservation`, `certify_snapshot`.
 4. **`wal`** — Tamper-evident hash chain, `append_audited`, fail-closed `replay_audited_wal`.
-5. **`budget`** — CAS reserve/commit/release. Conservation: `remaining + reserved + committed_lifetime == initial`.
+5. **`budget`** — CAS reserve/commit/release. Conservation: `remaining + reserved + committed_lifetime == initial`. Loom model tests in CI.
 
 ## Audit Pipeline
 
@@ -144,7 +144,10 @@ budget.top_up_tenant("desk", 50_000_000);
 let proof = prove_conservation(&budget)?;
 let cert = calybris_core::finance::certify_ledger(&budget)?;
 assert_eq!(proof.ledger_digest_hex, cert.ledger_digest_hex);
+assert_eq!(proof.snapshot_version, cert.snapshot_version);
 ```
+
+Policy snapshots: use `PolicySnapshot::try_new(...)` in production (validates BPS ranges and catalog).
 
 ## Examples
 
@@ -164,10 +167,15 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-features
 cargo test --no-default-features
+RUSTFLAGS='--cfg loom' cargo test --test budget_loom
 cargo doc --no-deps
 ```
 
-Tested on **Rust 1.85.0** (MSRV) and **stable**.
+Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri is on the hardening roadmap (Loom covers budget concurrency today).
+
+## Integration contract
+
+Calybris verifies decisions and conservation proofs — it does **not** auto-invoke `verify_decision` in your hot path. Callers must invoke verification at audit boundaries (pre-WAL append, reconciliation, external review). This keeps the kernel allocation-free and leaves control flow to the host system.
 
 ## What This Crate Is Not
 

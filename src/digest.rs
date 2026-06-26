@@ -122,7 +122,7 @@ mod tests {
     use crate::kernel::*;
 
     fn snap() -> PolicySnapshot {
-        PolicySnapshot::new(
+        PolicySnapshot::new_unchecked(
             1,
             2,
             9600,
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn policy_digest_order_independent() {
         let a = snap();
-        let b = PolicySnapshot::new(
+        let b = PolicySnapshot::new_unchecked(
             1,
             2,
             9600,

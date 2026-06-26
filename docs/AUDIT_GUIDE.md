@@ -45,7 +45,7 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 | Policy validation | `src/kernel.rs` | 4 unit tests |
 | WAL tamper / chain | `src/wal.rs` | 14+ unit, 2 proptests |
 | Budget concurrency + proptest | `src/budget.rs` | 20+ unit, 2 proptests |
-| Budget Loom model tests | `tests/budget_loom.rs` | 4 Loom tests (`RUSTFLAGS='--cfg loom'`) |
+| Budget Loom model tests | `tests/budget_loom.rs` | 6 Loom tests (`RUSTFLAGS='--cfg loom'`) |
 | Verify / decode hex | `src/verify.rs` | 10+ unit, 1 proptest |
 | Digest sensitivity | `src/digest.rs` | 3+ unit, 1 proptest |
 | Finance conservation | `src/finance.rs` | 5 unit |
@@ -56,7 +56,7 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 - Network APIs, TLS, authn/z
 - Secret storage (you provide HMAC key bytes)
 - Rate limiting, multi-region replication
-- Miri — optional future hardening (Loom budget concurrency covered in CI)
+- Miri — roadmap item (Loom + `cfg(loom)` sync primitives cover budget concurrency in CI)
 
 ## 6. Supporting documents
 

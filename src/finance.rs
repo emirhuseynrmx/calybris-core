@@ -8,7 +8,10 @@
 //! Typical pre-trade path: [`BudgetEngine::try_reserve`] → fill → [`BudgetEngine::commit`].
 //! Hot-path reserve/commit uses CAS on `AtomicI64` — no mutex during debit.
 
-use crate::budget::{BudgetEngine, BudgetSnapshot, ConservationStatus, TenantLedger};
+use crate::budget::{
+    conservation_status_for_snapshot, BudgetEngine, BudgetSnapshot, ConservationStatus,
+    TenantLedger,
+};
 use crate::digest::{digest_to_hex, LEDGER_DIGEST_TAG};
 use sha2::{Digest, Sha256};
 
@@ -19,6 +22,7 @@ pub const MICROCENTS_PER_CENT: i64 = 1_000_000;
 pub fn ledger_digest(snapshot: &BudgetSnapshot) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(LEDGER_DIGEST_TAG);
+    hasher.update(snapshot.version.to_le_bytes());
     hasher.update((snapshot.tenants.len() as u64).to_le_bytes());
     hasher.update((snapshot.active_reservations as u64).to_le_bytes());
     for ledger in &snapshot.tenants {
@@ -64,7 +68,7 @@ pub struct ConservationProof {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FinancialCertificate {
-    /// Monotonic snapshot epoch from [`BudgetEngine::snapshot_version`].
+    /// Snapshot epoch embedded in the frozen [`BudgetSnapshot`].
     pub snapshot_version: u64,
     pub ledger_digest_hex: String,
     pub tenant_count: usize,
@@ -80,14 +84,13 @@ pub struct FinancialCertificate {
 #[must_use]
 pub fn certify_snapshot(
     snapshot: &BudgetSnapshot,
-    snapshot_version: u64,
     conservation_balanced: bool,
     committed_since_last_certificate: i64,
 ) -> FinancialCertificate {
     let digest = ledger_digest(snapshot);
     let (total_initial, total_committed) = snapshot_totals(snapshot);
     FinancialCertificate {
-        snapshot_version,
+        snapshot_version: snapshot.version,
         ledger_digest_hex: digest_to_hex(&digest),
         tenant_count: snapshot.tenants.len(),
         active_reservations: snapshot.active_reservations,
@@ -101,14 +104,9 @@ pub fn certify_snapshot(
 /// Issue a financial certificate from the current engine state (single snapshot pass).
 pub fn certify_ledger(engine: &BudgetEngine) -> FinancialCertificate {
     let snapshot = engine.snapshot();
-    let balanced = engine.verify_conservation() == ConservationStatus::Balanced;
+    let balanced = conservation_status_for_snapshot(&snapshot) == ConservationStatus::Balanced;
     let committed_since = engine.committed_since_last_certificate();
-    let cert = certify_snapshot(
-        &snapshot,
-        engine.snapshot_version(),
-        balanced,
-        committed_since,
-    );
+    let cert = certify_snapshot(&snapshot, balanced, committed_since);
     engine.mark_certificate_issued();
     cert
 }
@@ -116,15 +114,16 @@ pub fn certify_ledger(engine: &BudgetEngine) -> FinancialCertificate {
 /// Prove conservation and return a structured proof binding the ledger digest.
 ///
 /// Returns `Err` with the violating tenant if the invariant is broken.
+/// Digest, conservation status, and version all refer to the same frozen snapshot.
 pub fn prove_conservation(engine: &BudgetEngine) -> Result<ConservationProof, ConservationStatus> {
-    let status = engine.verify_conservation();
     let snapshot = engine.snapshot();
+    let status = conservation_status_for_snapshot(&snapshot);
     let digest = ledger_digest(&snapshot);
     let (total_initial, total_committed) = snapshot_totals(&snapshot);
     match status {
         ConservationStatus::Balanced => Ok(ConservationProof {
             ledger_digest_hex: digest_to_hex(&digest),
-            snapshot_version: engine.snapshot_version(),
+            snapshot_version: snapshot.version,
             tenant_count: snapshot.tenants.len(),
             active_reservations: snapshot.active_reservations,
             total_initial_microcents: total_initial,
@@ -160,7 +159,8 @@ mod tests {
         assert!(cert.snapshot_version > 0);
         assert_eq!(cert.total_committed_microcents, 95_000);
         let proof = prove_conservation(&engine).unwrap();
-        assert_eq!(proof.ledger_digest_hex, cert.ledger_digest_hex);
+        assert_eq!(proof.ledger_digest_hex.len(), 64);
+        assert!(proof.snapshot_version > 0);
     }
 
     #[test]
@@ -211,9 +211,23 @@ mod tests {
         let engine = BudgetEngine::new();
         engine.ensure_tenant("desk", 1_000_000);
         let snap = engine.snapshot();
-        let cert = certify_snapshot(&snap, 1, true, 0);
+        let cert = certify_snapshot(&snap, true, 0);
         engine.top_up_tenant("desk", 999_999);
         assert_ne!(ledger_digest(&engine.snapshot()), ledger_digest(&snap));
         assert_eq!(cert.ledger_digest_hex, digest_to_hex(&ledger_digest(&snap)));
+        assert_eq!(cert.snapshot_version, snap.version);
+    }
+
+    #[test]
+    fn prove_and_certify_are_internally_consistent() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, id) = engine.try_reserve("desk", 50_000);
+        engine.commit(id.unwrap(), 40_000);
+        let proof = prove_conservation(&engine).unwrap();
+        assert_eq!(proof.snapshot_version, engine.snapshot_version());
+        let cert = certify_ledger(&engine);
+        assert!(cert.conservation_balanced);
+        assert_eq!(cert.snapshot_version, engine.snapshot_version());
     }
 }

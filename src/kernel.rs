@@ -198,7 +198,8 @@ pub struct KernelDecision {
 
 /// An immutable snapshot of the decision policy and model catalog.
 ///
-/// Create with [`PolicySnapshot::new`], then call [`prescribe`](PolicySnapshot::prescribe)
+/// Create with [`PolicySnapshot::try_new`] (validated) or [`PolicySnapshot::new_unchecked`],
+/// then call [`prescribe`](PolicySnapshot::prescribe)
 /// for each request. The snapshot is `Clone` and can be shared across threads via `Arc`.
 #[derive(Clone, Debug)]
 pub struct PolicySnapshot {
@@ -257,6 +258,12 @@ pub struct DecisionTrace {
     pub eligible_models: u16,
 }
 
+/// Maximum basis-points value accepted by policy validation (100%).
+pub const MAX_BPS: u16 = 10_000;
+
+/// Upper bound for [`PolicySnapshot::risk_penalty_multiplier_bps`] validation.
+pub const MAX_RISK_PENALTY_MULTIPLIER_BPS: u16 = 50_000;
+
 /// Policy catalog validation errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
@@ -268,16 +275,22 @@ pub enum PolicyError {
     InvalidProviderId { model_id: u32, provider_id: u16 },
     #[error("no enabled models in catalog")]
     NoEnabledModels,
+    #[error("{field} must be <= {max}, got {value}")]
+    OutOfRangeBps {
+        field: &'static str,
+        value: u16,
+        max: u16,
+    },
 }
 
 type RejectionCounts = RejectionHistogram;
 
 impl PolicySnapshot {
-    /// Creates a new policy snapshot from a model catalog.
+    /// Creates a policy snapshot without validation.
     ///
-    /// Allocates once (for the internal `Arc<[KernelModel]>`).
-    /// The resulting snapshot is immutable and can be reused for many decisions.
-    pub fn new(
+    /// Prefer [`try_new`](Self::try_new) for production traffic. This constructor
+    /// may produce invalid policy parameters or catalog invariants.
+    pub fn new_unchecked(
         policy_epoch: u64,
         catalog_epoch: u64,
         hard_risk_limit_bps: u16,
@@ -321,13 +334,59 @@ impl PolicySnapshot {
         }
     }
 
+    /// Creates a new policy snapshot from a model catalog (alias for [`new_unchecked`](Self::new_unchecked)).
+    #[deprecated(
+        since = "0.3.9",
+        note = "use PolicySnapshot::try_new for validated snapshots or new_unchecked for tests"
+    )]
+    pub fn new(
+        policy_epoch: u64,
+        catalog_epoch: u64,
+        hard_risk_limit_bps: u16,
+        minimum_confidence_bps: u16,
+        risk_penalty_multiplier_bps: u16,
+        latency_penalty_microunits_per_ms: u64,
+        models: Vec<KernelModel>,
+    ) -> Self {
+        Self::new_unchecked(
+            policy_epoch,
+            catalog_epoch,
+            hard_risk_limit_bps,
+            minimum_confidence_bps,
+            risk_penalty_multiplier_bps,
+            latency_penalty_microunits_per_ms,
+            models,
+        )
+    }
+
     /// Returns the model catalog.
     pub fn models(&self) -> &[KernelModel] {
         &self.models
     }
 
-    /// Validate catalog invariants before serving traffic.
+    /// Validate catalog and basis-point invariants before serving traffic.
     pub fn validate(&self) -> Result<(), PolicyError> {
+        if self.hard_risk_limit_bps > MAX_BPS {
+            return Err(PolicyError::OutOfRangeBps {
+                field: "hard_risk_limit_bps",
+                value: self.hard_risk_limit_bps,
+                max: MAX_BPS,
+            });
+        }
+        if self.minimum_confidence_bps > MAX_BPS {
+            return Err(PolicyError::OutOfRangeBps {
+                field: "minimum_confidence_bps",
+                value: self.minimum_confidence_bps,
+                max: MAX_BPS,
+            });
+        }
+        if self.risk_penalty_multiplier_bps > MAX_RISK_PENALTY_MULTIPLIER_BPS {
+            return Err(PolicyError::OutOfRangeBps {
+                field: "risk_penalty_multiplier_bps",
+                value: self.risk_penalty_multiplier_bps,
+                max: MAX_RISK_PENALTY_MULTIPLIER_BPS,
+            });
+        }
         if self.models.is_empty() {
             return Err(PolicyError::EmptyCatalog);
         }
@@ -343,6 +402,20 @@ impl PolicySnapshot {
                 return Err(PolicyError::InvalidProviderId {
                     model_id: model.model_id,
                     provider_id: model.provider_id,
+                });
+            }
+            if model.quality_bps > MAX_BPS {
+                return Err(PolicyError::OutOfRangeBps {
+                    field: "model.quality_bps",
+                    value: model.quality_bps,
+                    max: MAX_BPS,
+                });
+            }
+            if model.risk_ceiling_bps > MAX_BPS {
+                return Err(PolicyError::OutOfRangeBps {
+                    field: "model.risk_ceiling_bps",
+                    value: model.risk_ceiling_bps,
+                    max: MAX_BPS,
                 });
             }
             if model.enabled != 0 {
@@ -365,7 +438,7 @@ impl PolicySnapshot {
         latency_penalty_microunits_per_ms: u64,
         models: Vec<KernelModel>,
     ) -> Result<Self, PolicyError> {
-        let snapshot = Self::new(
+        let snapshot = Self::new_unchecked(
             policy_epoch,
             catalog_epoch,
             hard_risk_limit_bps,
@@ -706,7 +779,7 @@ mod tests {
     const REGION_EU: u64 = 1 << 0;
 
     fn snapshot() -> PolicySnapshot {
-        PolicySnapshot::new(
+        PolicySnapshot::new_unchecked(
             7,
             11,
             9_600,
@@ -926,7 +999,7 @@ mod tests {
 
     #[test]
     fn policy_error_empty_catalog() {
-        let snap = PolicySnapshot::new(1, 1, 9_600, 5_500, 3_500, 0, vec![]);
+        let snap = PolicySnapshot::new_unchecked(1, 1, 9_600, 5_500, 3_500, 0, vec![]);
         assert_eq!(snap.validate(), Err(PolicyError::EmptyCatalog));
         assert!(matches!(
             PolicySnapshot::try_new(1, 1, 9_600, 5_500, 3_500, 0, vec![]),
@@ -936,7 +1009,7 @@ mod tests {
 
     #[test]
     fn policy_error_duplicate_model_id() {
-        let snap = PolicySnapshot::new(
+        let snap = PolicySnapshot::new_unchecked(
             1,
             1,
             9_600,
@@ -955,7 +1028,7 @@ mod tests {
     fn policy_error_invalid_provider_id() {
         let mut model = base_model(1, 1);
         model.provider_id = MAX_PROVIDER_ID + 1;
-        let snap = PolicySnapshot::new(1, 1, 9_600, 5_500, 3_500, 0, vec![model]);
+        let snap = PolicySnapshot::new_unchecked(1, 1, 9_600, 5_500, 3_500, 0, vec![model]);
         assert_eq!(
             snap.validate(),
             Err(PolicyError::InvalidProviderId {
@@ -967,7 +1040,7 @@ mod tests {
 
     #[test]
     fn policy_error_no_enabled_models() {
-        let snap = PolicySnapshot::new(
+        let snap = PolicySnapshot::new_unchecked(
             1,
             1,
             9_600,
@@ -977,6 +1050,29 @@ mod tests {
             vec![base_model(1, 0), base_model(2, 0)],
         );
         assert_eq!(snap.validate(), Err(PolicyError::NoEnabledModels));
+    }
+
+    #[test]
+    fn policy_error_out_of_range_bps() {
+        let models = vec![base_model(1, 1)];
+        assert!(matches!(
+            PolicySnapshot::try_new(1, 1, 10_001, 5_500, 3_500, 0, models.clone()),
+            Err(PolicyError::OutOfRangeBps { .. })
+        ));
+        assert!(matches!(
+            PolicySnapshot::try_new(1, 1, 9_600, 10_001, 3_500, 0, models.clone()),
+            Err(PolicyError::OutOfRangeBps { .. })
+        ));
+        assert!(matches!(
+            PolicySnapshot::try_new(1, 1, 9_600, 5_500, 50_001, 0, models.clone()),
+            Err(PolicyError::OutOfRangeBps { .. })
+        ));
+        let mut bad_quality = base_model(2, 1);
+        bad_quality.quality_bps = 10_001;
+        assert!(matches!(
+            PolicySnapshot::try_new(1, 1, 9_600, 5_500, 3_500, 0, vec![bad_quality]),
+            Err(PolicyError::OutOfRangeBps { .. })
+        ));
     }
 
     #[test]
@@ -1071,7 +1167,7 @@ mod tests {
                 input_cost_microunits_per_million_tokens: input_price,
                 output_cost_microunits_per_million_tokens: output_price,
             };
-            let snapshot = PolicySnapshot::new(1, 1, u16::MAX, 0, 0, 0, vec![model]);
+            let snapshot = PolicySnapshot::new_unchecked(1, 1, u16::MAX, 0, 0, 0, vec![model]);
             if snapshot.all_costs_fit_u64(input_tokens, output_tokens) {
                 prop_assert_eq!(
                     model_cost_fast(&model, input_tokens, output_tokens),
@@ -1144,7 +1240,7 @@ mod tests {
             input_cost_microunits_per_million_tokens: 100,
             output_cost_microunits_per_million_tokens: 400,
         }];
-        let snapshot = PolicySnapshot::new(1, 1, 9600, 5500, 3500, 0, models);
+        let snapshot = PolicySnapshot::new_unchecked(1, 1, 9600, 5500, 3500, 0, models);
         let mut request = input();
         request.allowed_provider_mask = ALL_PROVIDERS;
         let decision = snapshot.prescribe(request);

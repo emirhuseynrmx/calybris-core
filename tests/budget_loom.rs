@@ -4,9 +4,11 @@
 
 #[cfg(loom)]
 mod loom_tests {
-    use calybris_core::budget::{BudgetEngine, BudgetReservation, ConservationStatus};
+    use calybris_core::budget::{
+        conservation_status_for_snapshot, BudgetEngine, BudgetReservation, ConservationStatus,
+    };
+    use loom::sync::Arc;
     use loom::thread;
-    use std::sync::Arc;
 
     #[test]
     fn concurrent_reserve_release_two_threads() {
@@ -97,6 +99,59 @@ mod loom_tests {
             t1.join().unwrap();
             t2.join().unwrap();
             assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+        });
+    }
+
+    #[test]
+    fn exposure_cap_concurrent_loom() {
+        loom::model(|| {
+            let engine = Arc::new(BudgetEngine::new());
+            engine.ensure_tenant("t1", 500_000);
+            engine.set_max_reserved_microcents("t1", 100_000);
+            let a = Arc::clone(&engine);
+            let b = Arc::clone(&engine);
+            let t1 = thread::spawn(move || {
+                let (res, _) = a.try_reserve("t1", 80_000);
+                matches!(res, BudgetReservation::Reserved { .. })
+            });
+            let t2 = thread::spawn(move || {
+                let (res, _) = b.try_reserve("t1", 80_000);
+                matches!(res, BudgetReservation::Reserved { .. })
+            });
+            let s1 = t1.join().unwrap();
+            let s2 = t2.join().unwrap();
+            assert!(!(s1 && s2));
+            assert!(engine.reserved_microcents("t1") <= 100_000);
+            assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+        });
+    }
+
+    #[test]
+    fn snapshot_restore_after_mutation_loom() {
+        loom::model(|| {
+            let engine = Arc::new(BudgetEngine::new());
+            engine.ensure_tenant("t1", 40_000);
+            let a = Arc::clone(&engine);
+            let b = Arc::clone(&engine);
+            let t1 = thread::spawn(move || {
+                let _ = a.top_up_tenant("t1", 10_000);
+            });
+            let t2 = thread::spawn(move || {
+                let (_, id) = b.try_reserve("t1", 15_000);
+                if let Some(id) = id {
+                    let _ = b.release(id);
+                }
+            });
+            t1.join().unwrap();
+            t2.join().unwrap();
+            let snap = engine.snapshot();
+            assert_eq!(
+                conservation_status_for_snapshot(&snap),
+                ConservationStatus::Balanced
+            );
+            let restored = BudgetEngine::new();
+            restored.restore_from_snapshot(snap).unwrap();
+            assert_eq!(restored.verify_conservation(), ConservationStatus::Balanced);
         });
     }
 }

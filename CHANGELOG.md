@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] - 2026-06-26
+
+### Fixed
+- `prove_conservation` / `certify_ledger` now bind digest, conservation status, and version to a **single frozen snapshot**
+- Concurrent exposure cap (`set_max_reserved_microcents`) enforced via per-tenant `AtomicI64` reserved totals (CAS)
+
+### Added
+- `BudgetSnapshot::version` — epoch embedded in snapshot and ledger digest
+- `conservation_status_for_snapshot` — audit path without extra engine reads
+- `PolicySnapshot::new_unchecked`, BPS range validation in `validate()` (`MAX_BPS`, `MAX_RISK_PENALTY_MULTIPLIER_BPS`)
+- Loom sync primitives in budget core (`src/sync.rs` under `cfg(loom)`)
+- Loom tests: exposure cap concurrent, snapshot restore after mutation
+- README integration contract (`verify_decision` at audit boundaries)
+
+### Changed
+- `certify_snapshot` takes frozen snapshot only (version from `snapshot.version`)
+- `ledger_digest` includes snapshot version
+- `PolicySnapshot::new` deprecated — use `try_new` or `new_unchecked`
+- `hft_pretrade_guard` separates exposure hold vs routing fee commit
+
 ## [0.3.8] - 2026-06-26
 
 ### Added

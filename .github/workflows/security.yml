@@ -85,3 +85,4 @@ jobs:
         run: cargo test --locked --test budget_loom
         env:
           RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 3

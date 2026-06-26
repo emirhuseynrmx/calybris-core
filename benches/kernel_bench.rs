@@ -18,7 +18,7 @@ fn make_snapshot(model_count: u32) -> PolicySnapshot {
             output_cost_microunits_per_million_tokens: 40 + (i as u64) * 200,
         })
         .collect();
-    PolicySnapshot::new(1, 1, 9600, 5500, 3500, 0, models)
+    PolicySnapshot::new_unchecked(1, 1, 9600, 5500, 3500, 0, models)
 }
 
 fn make_input(seq: u64) -> KernelInput {

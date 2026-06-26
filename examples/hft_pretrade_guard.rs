@@ -2,7 +2,11 @@
 //!
 //! **Not** an exchange, strategy engine, or market data system.
 //! Demonstrates: candidate order → deterministic admit/reject → exposure hold →
-//! financial certificate → conservation proof.
+//! routing-fee commit → financial certificate → conservation proof.
+//!
+//! Financial model (two distinct concepts):
+//! - **Exposure hold** — notional / position risk reserved until fill or cancel
+//! - **Routing fee** — small venue/model execution cost recorded as lifetime spend
 //!
 //! ```bash
 //! cargo run --example hft_pretrade_guard
@@ -24,6 +28,8 @@ fn main() {
 
     let budget = BudgetEngine::new();
     budget.ensure_tenant("desk-alpha", 100_000_000 * MICROCENTS_PER_CENT);
+    // Cap concurrent open exposure (not lifetime spend)
+    budget.set_max_reserved_microcents("desk-alpha", 50_000_000 * MICROCENTS_PER_CENT);
 
     println!("Calybris — Pre-Trade Guard");
     println!("==========================\n");
@@ -74,25 +80,39 @@ fn main() {
         return;
     }
 
-    let hold = notional_microcents;
-    let (_, reservation_id) = budget.try_reserve("desk-alpha", hold);
-    let Some(reservation_id) = reservation_id else {
+    // Exposure hold: full notional until fill settles (surplus refunded on commit)
+    let exposure_hold_microcents = notional_microcents;
+    // Routing/venue fee: estimated execution cost (lifetime spend, not notional)
+    let routing_fee_microcents = decision.estimated_cost_microunits as i64;
+
+    println!("Budget layer:");
+    println!("  exposure hold:  {exposure_hold_microcents} microcents (notional)");
+    println!("  routing fee:    {routing_fee_microcents} microcents (venue cost)");
+    println!();
+
+    let (_, exposure_reservation) = budget.try_reserve("desk-alpha", exposure_hold_microcents);
+    let Some(exposure_reservation) = exposure_reservation else {
         println!("Exposure limit hit at budget layer.");
         return;
     };
 
-    let actual = decision.estimated_cost_microunits as i64;
-    match budget.commit(reservation_id, actual) {
+    // Commit records routing fee as lifetime spend; exposure surplus returns to remaining
+    match budget.commit(exposure_reservation, routing_fee_microcents) {
         BudgetSettlement::Committed { .. } => {
             let cert = certify_ledger(&budget);
             let proof = prove_conservation(&budget).unwrap();
             println!("Financial certificate:");
             println!("  conservation: {}", cert.conservation_balanced);
             println!(
-                "  lifetime spend: {:?} microcents",
+                "  lifetime spend (fees): {:?} microcents",
                 budget.committed_microcents("desk-alpha")
             );
+            println!(
+                "  open exposure:         {} microcents",
+                budget.reserved_microcents("desk-alpha")
+            );
             println!("  ledger digest:  {}...", &proof.ledger_digest_hex[..16]);
+            assert_eq!(proof.snapshot_version, cert.snapshot_version);
             assert_eq!(budget.verify_conservation(), ConservationStatus::Balanced);
         }
         other => println!("Settlement failed: {other:?}"),

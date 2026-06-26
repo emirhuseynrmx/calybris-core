@@ -20,6 +20,8 @@
 
 #![forbid(unsafe_code)]
 
+mod sync;
+
 /// Per-tenant atomic budget engine with CAS reservation.
 pub mod budget;
 /// Canonical SHA-256 digests for audit binding.

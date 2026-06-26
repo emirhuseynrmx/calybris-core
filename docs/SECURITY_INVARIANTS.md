@@ -48,7 +48,7 @@ Formal properties the OSS crate is designed to uphold. Each maps to tests audito
 
 **Code:** `src/budget.rs` — `verify_conservation`, `debit_if_available` CAS.
 
-**Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `exposure_limit_blocks_reserve`, Loom (`tests/budget_loom.rs`).
+**Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `exposure_limit_blocks_reserve`, `exposure_limit_holds_under_concurrent_reserve`, Loom (`tests/budget_loom.rs`, 6 scenarios).
 
 ## I7 — No unsafe in project code
 
@@ -58,8 +58,8 @@ Formal properties the OSS crate is designed to uphold. Each maps to tests audito
 
 ## I8 — Ledger digest stability
 
-**Invariant:** `ledger_digest` is independent of tenant insertion order; `prove_conservation` returns `Ok` iff I6 holds.
+**Invariant:** `ledger_digest` is independent of tenant insertion order; includes `BudgetSnapshot::version`; `prove_conservation` / `certify_ledger` bind digest + status + version to one frozen snapshot.
 
-**Code:** `src/finance.rs`.
+**Code:** `src/finance.rs` — `conservation_status_for_snapshot`, `certify_snapshot`.
 
-**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `ConservationProof` structured binding.
+**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `prove_and_certify_share_single_snapshot_semantics`.
