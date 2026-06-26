@@ -12,11 +12,17 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.83-orange)]()
 
-Three building blocks for auditable decision systems:
+A small Rust decision engine for auditable, deterministic policy decisions.
 
-1. **`kernel`** — Integer-only decision kernel. Evaluates candidates against 11 constraints, picks the highest-utility option. No floating-point, no allocation in the hot path. ~115ns per decision.
-2. **`wal`** — Hash-chained write-ahead log. Each entry links to the previous via SHA-256 (or HMAC-SHA256 with a key). Generic over any `Serialize` type.
-3. **`budget`** — CAS atomic budget engine. Per-tenant reservations with a conservation invariant: `remaining + reserved + committed = initial`.
+Calybris Core evaluates candidates under hard constraints, selects the highest-utility valid option, and records decisions through tamper-evident primitives.
+
+The first packaged use case is **LLM/model routing**: choosing between models under budget, latency, risk, quality, provider, and region constraints. The core pattern is domain-neutral — any system that chooses between candidates under constraints can use the same primitives.
+
+Built from three components:
+
+1. **`kernel`** — Integer-only decision kernel. 11 constraint gates, ~115ns per decision. No floating-point, no allocation in the hot path.
+2. **`wal`** — Hash-chained write-ahead log. SHA-256 or HMAC-SHA256. Generic over any `Serialize` type.
+3. **`budget`** — CAS atomic budget engine. Conservation invariant: `remaining + reserved + committed = initial`.
 
 `#![forbid(unsafe_code)]` · 37 tests · 6 direct dependencies · Apache-2.0
 

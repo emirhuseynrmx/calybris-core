@@ -66,6 +66,7 @@ fn main() {
     });
     print_and_log(
         &decision,
+        1,
         &names,
         "Compliance review (quality=0.90)",
         &mut wal,
@@ -87,7 +88,13 @@ fn main() {
         allowed_provider_mask: ALL_PROVIDERS,
         required_region_mask: 0,
     });
-    print_and_log(&decision, &names, "Support ticket (quality=0.60)", &mut wal);
+    print_and_log(
+        &decision,
+        1,
+        &names,
+        "Support ticket (quality=0.60)",
+        &mut wal,
+    );
 
     // Scenario 3: Budget exhausted
     let decision = snapshot.prescribe(KernelInput {
@@ -107,6 +114,7 @@ fn main() {
     });
     print_and_log(
         &decision,
+        3,
         &names,
         "Budget exhausted ($0.00001 left)",
         &mut wal,
@@ -128,7 +136,13 @@ fn main() {
         allowed_provider_mask: ALL_PROVIDERS,
         required_region_mask: 0,
     });
-    print_and_log(&decision, &names, "High-risk request (risk=0.98)", &mut wal);
+    print_and_log(
+        &decision,
+        1,
+        &names,
+        "High-risk request (risk=0.98)",
+        &mut wal,
+    );
 
     // Verify WAL
     wal.flush_and_sync().unwrap();
@@ -144,11 +158,12 @@ fn main() {
 
 fn print_and_log(
     d: &KernelDecision,
+    requested_model_id: u32,
     names: &[(&str, u32)],
     scenario: &str,
     wal: &mut WalWriter<RoutingDecision>,
 ) {
-    let requested = name_of(d.request_sequence as u32, names);
+    let requested = name_of(requested_model_id, names);
     let selected = name_of(d.selected_model_id, names);
     let action = format!("{:?}", d.action);
     let reason = format!("{:?}", d.reason);
