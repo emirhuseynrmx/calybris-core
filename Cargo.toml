@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -28,7 +28,7 @@ thiserror = "2"
 
 [dev-dependencies]
 proptest = "1"
-criterion = { version = "0.8", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[example]]
 name = "quickstart"

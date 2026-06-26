@@ -12,9 +12,8 @@ updates:
           - hmac
           - subtle
     ignore:
-      # criterion major bumps need bench API review — bump manually
+      # criterion 0.8+ requires rustc 1.86; MSRV is 1.85 — bump with MSRV raise
       - dependency-name: criterion
-        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /

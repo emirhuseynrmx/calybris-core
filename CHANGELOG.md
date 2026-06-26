@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] - 2026-06-26
+
+### Fixed
+- Pin `criterion` to 0.5 (0.8 requires rustc 1.86; MSRV stays 1.85)
+- Dependabot: ignore all `criterion` bumps until MSRV ≥ 1.86
+
+### Changed
+- GitHub Actions: `actions/checkout@v7`, `actions/cache@v6`
+
 ## [0.3.6] - 2026-06-26
 
 ### Changed
