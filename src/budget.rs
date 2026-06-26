@@ -210,11 +210,7 @@ impl BudgetEngine {
     /// Sum of lifetime `committed_microcents` across all tenants.
     #[must_use]
     pub fn total_committed_microcents(&self) -> i64 {
-        self.committed_microcents
-            .lock()
-            .unwrap()
-            .values()
-            .sum()
+        self.committed_microcents.lock().unwrap().values().sum()
     }
 
     /// Committed total since the last financial certificate was issued.

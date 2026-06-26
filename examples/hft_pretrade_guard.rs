@@ -92,10 +92,7 @@ fn main() {
                 "  lifetime spend: {:?} microcents",
                 budget.committed_microcents("desk-alpha")
             );
-            println!(
-                "  ledger digest:  {}...",
-                &proof.ledger_digest_hex[..16]
-            );
+            println!("  ledger digest:  {}...", &proof.ledger_digest_hex[..16]);
             assert_eq!(budget.verify_conservation(), ConservationStatus::Balanced);
         }
         other => println!("Settlement failed: {other:?}"),

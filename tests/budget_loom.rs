@@ -4,9 +4,7 @@
 
 #[cfg(loom)]
 mod loom_tests {
-    use calybris_core::budget::{
-        BudgetEngine, BudgetReservation, ConservationStatus,
-    };
+    use calybris_core::budget::{BudgetEngine, BudgetReservation, ConservationStatus};
     use loom::thread;
     use std::sync::Arc;
 
@@ -50,7 +48,10 @@ mod loom_tests {
                     })
                 })
                 .collect();
-            let successes: usize = handles.into_iter().map(|h| h.join().unwrap() as usize).sum();
+            let successes: usize = handles
+                .into_iter()
+                .map(|h| h.join().unwrap() as usize)
+                .sum();
             assert!(successes <= 1);
             assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
         });
