@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `top_up_tenant` holds `initial_microcents` lock through read → credit → write (fixes concurrent lost-update breaking I6)
+- `conservation_status_for_snapshot` uses checked per-tenant sums (adversarial `BudgetSnapshot` no longer panics/wraps)
 - `snapshot_totals` uses `i128` checked sums instead of `saturating_add` — overflow surfaces as `ConservationStatus::AggregateOverflow` / `aggregate_totals_representable: false` on certificates
+
+### Changed
+- Module docs: lock-order comment softened to scoped metadata locking + exclusive restore contract
 
 ### Added
 - Loom test `concurrent_two_topups_preserve_conservation_loom`

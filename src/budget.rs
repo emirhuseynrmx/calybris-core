@@ -4,7 +4,7 @@
 //! No floating-point in the core API.
 //!
 //! CAS-based balance updates; metadata maps are mutex-protected.
-//! Lock ordering is always: reservations first, then tenant_budgets — no deadlock.
+//! Metadata locks use scoped ordering within each operation; restore requires exclusive recovery (no concurrent hot-path use).
 //!
 //! Conservation invariant (per tenant, after completed operations):
 //!
@@ -155,8 +155,8 @@ fn try_increment_reserved_total(
 ///
 /// CAS-based balance updates on `Arc<AtomicI64>` — the atomic is cloned out of
 /// the map before the CAS loop, so no lock is held during the contended operation.
-/// Metadata maps are mutex-protected with consistent lock ordering
-/// (reservations → budgets) to prevent deadlock.
+/// Metadata maps are mutex-protected; each operation acquires only the locks it needs.
+/// [`restore_from_snapshot`](Self::restore_from_snapshot) is exclusive recovery — not concurrent with hot-path ops.
 pub struct BudgetEngine {
     tenant_budgets: Mutex<HashMap<Arc<str>, Arc<AtomicI64>>>,
     initial_microcents: Mutex<HashMap<Arc<str>, i64>>,
@@ -200,12 +200,20 @@ pub struct BudgetSnapshot {
 #[must_use]
 pub fn conservation_status_for_snapshot(snapshot: &BudgetSnapshot) -> ConservationStatus {
     for ledger in &snapshot.tenants {
-        let sum =
-            ledger.remaining_microcents + ledger.reserved_microcents + ledger.committed_microcents;
+        let Some(sum) = ledger
+            .remaining_microcents
+            .checked_add(ledger.reserved_microcents)
+            .and_then(|v| v.checked_add(ledger.committed_microcents))
+        else {
+            return ConservationStatus::AggregateOverflow;
+        };
         if sum != ledger.initial_microcents {
+            let Some(delta) = sum.checked_sub(ledger.initial_microcents) else {
+                return ConservationStatus::AggregateOverflow;
+            };
             return ConservationStatus::Violation {
                 tenant_id: ledger.tenant_id.clone(),
-                delta_microcents: sum - ledger.initial_microcents,
+                delta_microcents: delta,
             };
         }
         if ledger.remaining_microcents < 0 {
@@ -1055,6 +1063,25 @@ mod tests {
         assert_eq!(engine.rotate_certificate_baseline(150), 150);
         assert_eq!(engine.rotate_certificate_baseline(100), 0);
         assert_eq!(engine.rotate_certificate_baseline(200), 50);
+    }
+
+    #[test]
+    fn adversarial_snapshot_per_tenant_sum_overflow() {
+        let snap = BudgetSnapshot {
+            version: 1,
+            tenants: vec![TenantLedger {
+                tenant_id: "evil".into(),
+                initial_microcents: 0,
+                remaining_microcents: i64::MAX,
+                reserved_microcents: 1,
+                committed_microcents: 0,
+            }],
+            active_reservations: 0,
+        };
+        assert_eq!(
+            conservation_status_for_snapshot(&snap),
+            ConservationStatus::AggregateOverflow
+        );
     }
 
     #[test]
