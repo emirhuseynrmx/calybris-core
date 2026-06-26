@@ -33,6 +33,10 @@ path = "examples/simple_kernel.rs"
 name = "verify_wal"
 path = "examples/verify_wal.rs"
 
+[[example]]
+name = "route_decision"
+path = "examples/route_decision.rs"
+
 [[bench]]
 name = "kernel_bench"
 harness = false
