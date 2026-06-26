@@ -53,31 +53,40 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn compute_hash(previous_hash: &str, data_json: &str, key: Option<&[u8]>) -> String {
+fn compute_hash(
+    previous_hash: &str,
+    data_json: &str,
+    key: Option<&[u8]>,
+) -> Result<String, WalError> {
     match key {
         Some(k) => {
-            let mut mac =
-                HmacSha256::new_from_slice(k).expect("HMAC-SHA256 accepts any key length");
+            let mut mac = HmacSha256::new_from_slice(k).map_err(|_| {
+                WalError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid HMAC key length",
+                ))
+            })?;
             mac.update(previous_hash.as_bytes());
             mac.update(data_json.as_bytes());
-            hex_encode(&mac.finalize().into_bytes())
+            Ok(hex_encode(&mac.finalize().into_bytes()))
         }
         None => {
             let mut hasher = Sha256::new();
             hasher.update(previous_hash.as_bytes());
             hasher.update(data_json.as_bytes());
-            hex_encode(&hasher.finalize())
+            Ok(hex_encode(&hasher.finalize()))
         }
     }
 }
 
+#[cfg(test)]
 fn hash_entry<T: Serialize>(
     previous_hash: &str,
     data: &T,
     key: Option<&[u8]>,
 ) -> Result<String, WalError> {
     let payload = serde_json::to_string(data)?;
-    Ok(compute_hash(previous_hash, &payload, key))
+    compute_hash(previous_hash, &payload, key)
 }
 
 /// Hash-chained WAL writer.
@@ -136,20 +145,27 @@ impl<T: Serialize + Clone> WalWriter<T> {
     #[must_use = "check the returned entry for the hash chain link"]
     pub fn append(&mut self, data: T) -> Result<WalEntry<T>, WalError> {
         self.sequence += 1;
-        let entry_hash = hash_entry(&self.last_hash, &data, self.hmac_key.as_deref())?;
+        // Serialize data once — reuse for both hash computation and file write.
+        let data_json = serde_json::to_string(&data)?;
+        let entry_hash = compute_hash(&self.last_hash, &data_json, self.hmac_key.as_deref())?;
 
-        let entry = WalEntry {
+        // Build the line manually to avoid serializing data a second time.
+        // Format: {"sequence":N,"previous_hash":"...","entry_hash":"...","data":...}
+        writeln!(
+            self.file,
+            "{{\"sequence\":{},\"previous_hash\":\"{}\",\"entry_hash\":\"{}\",\"data\":{}}}",
+            self.sequence, self.last_hash, entry_hash, data_json
+        )?;
+
+        let prev = self.last_hash.clone();
+        self.last_hash = entry_hash.clone();
+
+        Ok(WalEntry {
             sequence: self.sequence,
-            previous_hash: self.last_hash.clone(),
-            entry_hash: entry_hash.clone(),
+            previous_hash: prev,
+            entry_hash,
             data,
-        };
-
-        let line = serde_json::to_string(&entry)?;
-        writeln!(self.file, "{}", line)?;
-
-        self.last_hash = entry_hash;
-        Ok(entry)
+        })
     }
 
     /// Flush userspace buffer to OS and fsync to disk.
@@ -221,7 +237,7 @@ fn validate_chain_inner(path: &Path, key: Option<&[u8]>) -> Result<(u64, String)
         }
 
         let data_str = serde_json::to_string(&entry.data)?;
-        let computed = compute_hash(&entry.previous_hash, &data_str, key);
+        let computed = compute_hash(&entry.previous_hash, &data_str, key)?;
         // Constant-time comparison to prevent timing side-channel on keyed WAL
         if computed
             .as_bytes()
@@ -561,9 +577,9 @@ mod tests {
 
     #[test]
     fn hmac_different_key_different_hash() {
-        let h1 = compute_hash("prev", "{\"x\":1}", Some(b"key-a"));
-        let h2 = compute_hash("prev", "{\"x\":1}", Some(b"key-b"));
-        let h3 = compute_hash("prev", "{\"x\":1}", None);
+        let h1 = compute_hash("prev", "{\"x\":1}", Some(b"key-a")).unwrap();
+        let h2 = compute_hash("prev", "{\"x\":1}", Some(b"key-b")).unwrap();
+        let h3 = compute_hash("prev", "{\"x\":1}", None).unwrap();
         assert_ne!(h1, h2);
         assert_ne!(h1, h3);
         assert_ne!(h2, h3);

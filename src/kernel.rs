@@ -203,6 +203,10 @@ struct RejectionCounts {
 }
 
 impl PolicySnapshot {
+    /// Creates a new policy snapshot from a model catalog.
+    ///
+    /// Allocates once (for the internal `Arc<[KernelModel]>`).
+    /// The resulting snapshot is immutable and can be reused for many decisions.
     pub fn new(
         policy_epoch: u64,
         catalog_epoch: u64,
