@@ -30,18 +30,22 @@ candidate + policy constraints → decision + digests + optional WAL + budget pr
 | **LLM routing** | Select / substitute / reject models under budget, risk, quality, latency |
 | **Pre-trade guard** | Admit / reject candidate orders under exposure, risk, and latency limits |
 
-```bash
-cargo run --example llm_routing          # routing + rejection histogram + WAL
-cargo run --example hft_pretrade_guard   # order admission + financial certificate
-```
-
 Calybris is **not** an exchange, market data feed, colocation stack, or alpha engine. It is a **deterministic pre-trade decision kernel** — integer-only constraints, replay verification, and fixed-point conservation proofs.
 
-## Quick Start
+## Try it locally
+
+```bash
+git clone https://github.com/emirhuseynrmx/calybris-core
+cd calybris-core
+cargo run --example quickstart
+cargo run --example llm_routing
+cargo run --example replay_audit
+```
+
+## Use as a dependency
 
 ```bash
 cargo add calybris-core
-cargo run --example quickstart
 ```
 
 ```rust
