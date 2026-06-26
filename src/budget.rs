@@ -705,4 +705,83 @@ mod tests {
             "budget must never go negative, got {remaining}"
         );
     }
+
+    #[test]
+    fn double_commit_rejected() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("t1", 100_000_000);
+        let (_, id) = engine.try_reserve("t1", 10_000_000);
+        let id = id.unwrap();
+        assert!(matches!(
+            engine.commit(id, 8_000_000),
+            BudgetSettlement::Committed { .. }
+        ));
+        assert!(matches!(
+            engine.commit(id, 8_000_000),
+            BudgetSettlement::MissingReservation
+        ));
+    }
+
+    #[test]
+    fn double_release_rejected() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("t1", 100_000_000);
+        let (_, id) = engine.try_reserve("t1", 10_000_000);
+        let id = id.unwrap();
+        assert!(matches!(
+            engine.release(id),
+            BudgetSettlement::Released { .. }
+        ));
+        assert!(matches!(
+            engine.release(id),
+            BudgetSettlement::MissingReservation
+        ));
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn random_ops_maintain_conservation(
+            seed_ops in prop::collection::vec((0u8..4, any::<u8>(), 1i64..50_000), 1..40),
+        ) {
+            let engine = BudgetEngine::new();
+            engine.ensure_tenant("t0", 5_000_000);
+            engine.ensure_tenant("t1", 5_000_000);
+            let mut open_ids = Vec::new();
+
+            for (op, tenant_sel, amount) in seed_ops {
+                let tenant = if tenant_sel % 2 == 0 { "t0" } else { "t1" };
+                match op % 4 {
+                    0 => {
+                        let (_, id) = engine.try_reserve(tenant, amount);
+                        if let Some(id) = id {
+                            open_ids.push(id);
+                        }
+                    }
+                    1 if !open_ids.is_empty() => {
+                        let idx = (tenant_sel as usize) % open_ids.len();
+                        let id = open_ids[idx];
+                        match engine.commit(id, amount) {
+                            BudgetSettlement::Committed { .. } => {
+                                open_ids.remove(idx);
+                            }
+                            BudgetSettlement::Overrun { .. } => {}
+                            _ => {}
+                        }
+                    }
+                    2 if !open_ids.is_empty() => {
+                        let idx = (tenant_sel as usize) % open_ids.len();
+                        let id = open_ids.remove(idx);
+                        let _ = engine.release(id);
+                    }
+                    3 => {
+                        let _ = engine.top_up_tenant(tenant, amount);
+                    }
+                    _ => {}
+                }
+                prop_assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+            }
+        }
+    }
 }

@@ -909,6 +909,104 @@ mod tests {
         assert_eq!(decision.selected_model_id, 10);
     }
 
+    fn base_model(model_id: u32, enabled: u8) -> KernelModel {
+        KernelModel {
+            model_id,
+            provider_id: 0,
+            quality_bps: 8_000,
+            risk_ceiling_bps: 9_500,
+            enabled,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }
+    }
+
+    #[test]
+    fn policy_error_empty_catalog() {
+        let snap = PolicySnapshot::new(1, 1, 9_600, 5_500, 3_500, 0, vec![]);
+        assert_eq!(snap.validate(), Err(PolicyError::EmptyCatalog));
+        assert!(matches!(
+            PolicySnapshot::try_new(1, 1, 9_600, 5_500, 3_500, 0, vec![]),
+            Err(PolicyError::EmptyCatalog)
+        ));
+    }
+
+    #[test]
+    fn policy_error_duplicate_model_id() {
+        let snap = PolicySnapshot::new(
+            1,
+            1,
+            9_600,
+            5_500,
+            3_500,
+            0,
+            vec![base_model(1, 1), base_model(1, 1)],
+        );
+        assert_eq!(
+            snap.validate(),
+            Err(PolicyError::DuplicateModelId { model_id: 1 })
+        );
+    }
+
+    #[test]
+    fn policy_error_invalid_provider_id() {
+        let mut model = base_model(1, 1);
+        model.provider_id = MAX_PROVIDER_ID + 1;
+        let snap = PolicySnapshot::new(1, 1, 9_600, 5_500, 3_500, 0, vec![model]);
+        assert_eq!(
+            snap.validate(),
+            Err(PolicyError::InvalidProviderId {
+                model_id: 1,
+                provider_id: MAX_PROVIDER_ID + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn policy_error_no_enabled_models() {
+        let snap = PolicySnapshot::new(
+            1,
+            1,
+            9_600,
+            5_500,
+            3_500,
+            0,
+            vec![base_model(1, 0), base_model(2, 0)],
+        );
+        assert_eq!(snap.validate(), Err(PolicyError::NoEnabledModels));
+    }
+
+    #[test]
+    fn prescribe_batch_matches_individual() {
+        let snap = snapshot();
+        let inputs = [
+            input(),
+            KernelInput {
+                request_sequence: 2,
+                requested_model_id: 10,
+                input_tokens: 500,
+                output_tokens: 100,
+                business_value_microunits: 50_000_000,
+                budget_limit_microunits: 5_000_000,
+                risk_bps: 500,
+                confidence_bps: 9_500,
+                minimum_quality_bps: 7_000,
+                max_p95_latency_ms: 500,
+                required_capabilities: TOOLS,
+                allowed_provider_mask: ALL_PROVIDERS,
+                required_region_mask: REGION_EU,
+            },
+        ];
+        let batch = snap.prescribe_batch(&inputs);
+        assert_eq!(batch.len(), inputs.len());
+        for (i, &inp) in inputs.iter().enumerate() {
+            assert_eq!(batch[i], snap.prescribe(inp));
+        }
+    }
+
     #[test]
     fn hard_constraints_fail_closed() {
         let mut request = input();

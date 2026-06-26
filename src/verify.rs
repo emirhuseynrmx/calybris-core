@@ -360,4 +360,87 @@ mod tests {
         assert_eq!(cert.input_fingerprint.len(), 64);
         assert_eq!(cert.decision_fingerprint.len(), 64);
     }
+
+    #[test]
+    fn decode_hex32_rejects_odd_length() {
+        let bundle = AuditBundle {
+            policy_digest_hex: "abc".into(),
+            input_digest_hex: "00".repeat(32),
+            decision_digest_hex: "00".repeat(32),
+            replay_valid: true,
+        };
+        assert_eq!(bundle.policy_digest(), Err(DigestDecodeError::OddLength));
+    }
+
+    #[test]
+    fn decode_hex32_rejects_invalid_characters() {
+        let bundle = AuditBundle {
+            policy_digest_hex: format!("{}g", "a".repeat(63)),
+            input_digest_hex: "00".repeat(32),
+            decision_digest_hex: "00".repeat(32),
+            replay_valid: true,
+        };
+        assert!(matches!(
+            bundle.policy_digest(),
+            Err(DigestDecodeError::InvalidHexCharacter { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_hex32_rejects_wrong_length() {
+        let bundle = AuditBundle {
+            policy_digest_hex: "00".repeat(30),
+            input_digest_hex: "00".repeat(32),
+            decision_digest_hex: "00".repeat(32),
+            replay_valid: true,
+        };
+        assert_eq!(
+            bundle.policy_digest(),
+            Err(DigestDecodeError::InvalidStringLength)
+        );
+    }
+
+    #[test]
+    fn counterfactual_utility_for_eligible_model() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let utility = counterfactual_utility(&snap, input, 2);
+        assert!(utility.is_some());
+        assert!(utility.unwrap() > 0);
+    }
+
+    #[test]
+    fn counterfactual_utility_none_for_missing_model() {
+        let snap = test_snapshot();
+        let input = test_input();
+        assert!(counterfactual_utility(&snap, input, 999).is_none());
+    }
+
+    #[test]
+    fn verify_decision_wrong_policy_epoch() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        let mut other = snap.clone();
+        other.policy_epoch = snap.policy_epoch + 1;
+        assert_ne!(
+            verify_decision(&other, input, &decision),
+            VerifyResult::Valid
+        );
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn decode_hex32_rejects_non_hex_strings(s in "[^0-9a-fA-F]{1,20}") {
+            let bundle = AuditBundle {
+                policy_digest_hex: s,
+                input_digest_hex: "00".repeat(32),
+                decision_digest_hex: "00".repeat(32),
+                replay_valid: true,
+            };
+            prop_assert!(bundle.policy_digest().is_err());
+        }
+    }
 }

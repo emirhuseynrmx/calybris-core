@@ -46,6 +46,9 @@ jobs:
       - name: Test (no default features)
         run: cargo test --locked --no-default-features
 
+      - name: Integration audit pipeline
+        run: cargo test --locked --test audit_pipeline
+
   stable:
     name: Stable
     runs-on: ubuntu-latest

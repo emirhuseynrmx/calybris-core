@@ -830,10 +830,273 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn duplicate_sequence_rejected() {
+        let path = temp_path("dup-seq");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            wal.append(TestDecision {
+                model: "a".into(),
+                cost: 1,
+            })
+            .unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let duplicate = content.lines().next().unwrap();
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{duplicate}").unwrap();
+
+        let result = verify_wal(&path);
+        assert!(matches!(result, Err(WalError::DuplicateSequence(1))));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn previous_hash_mismatch_rejected() {
+        let path = temp_path("prev-hash");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            wal.append(TestDecision {
+                model: "a".into(),
+                cost: 1,
+            })
+            .unwrap();
+            wal.append(TestDecision {
+                model: "b".into(),
+                cost: 2,
+            })
+            .unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        let tampered = lines[1].replacen(
+            "\"previous_hash\":\"",
+            "\"previous_hash\":\"0000000000000000000000000000000000000000000000000000000000000000",
+            1,
+        );
+        std::fs::write(&path, format!("{}\n{}\n", lines[0], tampered)).unwrap();
+
+        let result = verify_wal(&path);
+        assert!(matches!(result, Err(WalError::ChainBroken { .. })));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn truncated_last_line_rejected() {
+        let path = temp_path("truncated");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            wal.append(TestDecision {
+                model: "a".into(),
+                cost: 1,
+            })
+            .unwrap();
+        }
+
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(file, "{{\"sequence\":2,\"previous").unwrap();
+
+        let result = verify_wal(&path);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn malformed_json_line_rejected() {
+        let path = temp_path("malformed");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "not valid json\n").unwrap();
+        let result = verify_wal(&path);
+        assert!(matches!(result, Err(WalError::Json(_))));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn audited_replay_fails_on_policy_digest_mismatch() {
+        use crate::kernel::*;
+
+        let path = temp_path("audited-policy-tamper");
+        let _ = std::fs::remove_file(&path);
+
+        let models = vec![KernelModel {
+            model_id: 1,
+            provider_id: 0,
+            quality_bps: 9000,
+            risk_ceiling_bps: 9500,
+            enabled: 1,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }];
+        let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models).unwrap();
+        let input = KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        let decision = snapshot.prescribe(input);
+
+        {
+            let mut wal = WalWriter::open(&path).unwrap();
+            wal.append_audited(&snapshot, input, decision, ()).unwrap();
+            wal.sync().unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let tampered = content.replacen(
+            &digest_to_hex(&policy_digest(&snapshot)),
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            1,
+        );
+        std::fs::write(&path, tampered).unwrap();
+
+        let result = replay_audited_wal(&path, &snapshot);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn audited_replay_fails_on_decision_digest_mismatch() {
+        use crate::kernel::*;
+
+        let path = temp_path("audited-decision-tamper");
+        let _ = std::fs::remove_file(&path);
+
+        let models = vec![KernelModel {
+            model_id: 1,
+            provider_id: 0,
+            quality_bps: 9000,
+            risk_ceiling_bps: 9500,
+            enabled: 1,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }];
+        let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models).unwrap();
+        let input = KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        let decision = snapshot.prescribe(input);
+
+        {
+            let mut wal = WalWriter::open(&path).unwrap();
+            wal.append_audited(&snapshot, input, decision, ()).unwrap();
+            wal.sync().unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let tampered = content.replacen(
+            &digest_to_hex(&crate::digest::decision_digest(&decision)),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            1,
+        );
+        std::fs::write(&path, tampered).unwrap();
+
+        let result = replay_audited_wal(&path, &snapshot);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn json_field_reorder_breaks_chain() {
+        let path = temp_path("json-reorder");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            wal.append(TestDecision {
+                model: "x".into(),
+                cost: 42,
+            })
+            .unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let reordered =
+            content.replace("\"model\":\"x\",\"cost\":42", "\"cost\":42,\"model\":\"x\"");
+        assert_ne!(reordered, content);
+        std::fs::write(&path, reordered).unwrap();
+        let result = verify_wal(&path);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     // Fuzz-like proptest: random data, random sequence lengths
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn keyed_wal_roundtrip(
+            key in prop::array::uniform16(any::<u8>()),
+            count in 1_usize..30,
+        ) {
+            let path = temp_path(&format!("keyed-{count}"));
+            let _ = std::fs::remove_file(&path);
+
+            {
+                let mut wal = WalWriter::<TestDecision>::open_keyed(&path, &key).unwrap();
+                for i in 0..count {
+                    wal.append(TestDecision {
+                        model: format!("m{i}"),
+                        cost: i as i64,
+                    }).unwrap();
+                }
+            }
+
+            let entries = read_verified_wal_keyed::<TestDecision>(&path, &key).unwrap();
+            prop_assert_eq!(entries.len(), count);
+
+            let _ = std::fs::remove_file(&path);
+        }
+
         #[test]
         fn arbitrary_data_survives_roundtrip(
             model in "[a-z]{1,20}",

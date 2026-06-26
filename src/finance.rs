@@ -108,4 +108,33 @@ mod tests {
         }
         assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
     }
+
+    #[test]
+    fn ledger_digest_tenant_order_independent() {
+        let engine_a = BudgetEngine::new();
+        engine_a.ensure_tenant("alpha", 100_000);
+        engine_a.ensure_tenant("zulu", 200_000);
+
+        let engine_b = BudgetEngine::new();
+        engine_b.ensure_tenant("zulu", 200_000);
+        engine_b.ensure_tenant("alpha", 100_000);
+
+        assert_eq!(
+            ledger_digest(&engine_a.snapshot()),
+            ledger_digest(&engine_b.snapshot())
+        );
+    }
+
+    #[test]
+    fn prove_conservation_ok_after_mixed_ops() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, id) = engine.try_reserve("desk", 100_000);
+        engine.commit(id.unwrap(), 90_000);
+        engine.top_up_tenant("desk", 50_000);
+        let digest = prove_conservation(&engine).expect("balanced ledger");
+        assert_eq!(digest.len(), 64);
+        let cert = certify_ledger(&engine);
+        assert!(cert.conservation_balanced);
+    }
 }

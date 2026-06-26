@@ -1,0 +1,62 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-security-${{ hashFiles('Cargo.lock') }}
+
+      - uses: taiki-e/install-action@cargo-audit
+
+      - name: Cargo audit
+        run: cargo audit
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  adversarial:
+    name: Extended adversarial tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-adversarial-${{ hashFiles('Cargo.lock') }}
+
+      - name: Proptest (10k cases)
+        run: cargo test --locked --all-features
+        env:
+          PROPTEST_CASES: 10000
+
+      - name: Integration audit pipeline
+        run: cargo test --locked --test audit_pipeline

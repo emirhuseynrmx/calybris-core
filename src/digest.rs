@@ -221,4 +221,61 @@ mod tests {
         assert_eq!(input_digest(&input), input_digest(&input));
         assert_eq!(decision_digest(&decision), decision_digest(&decision));
     }
+
+    #[test]
+    fn input_digest_sensitive_to_single_field_change() {
+        let snap = snap();
+        let mut input = KernelInput {
+            request_sequence: 7,
+            requested_model_id: 1,
+            input_tokens: 100,
+            output_tokens: 50,
+            business_value_microunits: 10_000,
+            budget_limit_microunits: 1_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        let base = input_digest(&input);
+        input.input_tokens += 1;
+        assert_ne!(input_digest(&input), base);
+        let decision = snap.prescribe(input);
+        let mut other = decision;
+        other.request_sequence = decision.request_sequence.wrapping_add(1);
+        assert_ne!(decision_digest(&other), decision_digest(&decision));
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn digests_stable_under_repeat(seq in any::<u64>()) {
+            let snap = snap();
+            let input = KernelInput {
+                request_sequence: seq,
+                requested_model_id: 1,
+                input_tokens: 100,
+                output_tokens: 50,
+                business_value_microunits: 10_000,
+                budget_limit_microunits: 1_000_000,
+                risk_bps: 500,
+                confidence_bps: 8000,
+                minimum_quality_bps: 5000,
+                max_p95_latency_ms: 0,
+                required_capabilities: 0,
+                allowed_provider_mask: ALL_PROVIDERS,
+                required_region_mask: 0,
+            };
+            let d1 = input_digest(&input);
+            let d2 = input_digest(&input);
+            prop_assert_eq!(d1, d2);
+            let decision = snap.prescribe(input);
+            prop_assert_eq!(policy_digest(&snap), policy_digest(&snap));
+            prop_assert_eq!(decision_digest(&decision), decision_digest(&decision));
+        }
+    }
 }
