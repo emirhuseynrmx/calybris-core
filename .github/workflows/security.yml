@@ -63,3 +63,25 @@ jobs:
 
       - name: Integration audit pipeline
         run: cargo test --locked --test audit_pipeline
+
+  loom:
+    name: Loom budget concurrency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-loom-${{ hashFiles('Cargo.lock') }}
+
+      - name: Loom model tests
+        run: cargo test --locked --test budget_loom
+        env:
+          RUSTFLAGS: --cfg loom

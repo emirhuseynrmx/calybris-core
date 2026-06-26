@@ -34,8 +34,8 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 | `digest` | Canonical hashing | `policy_digest`, `input_digest`, `decision_digest` |
 | `verify` | Replay + certificates | `verify_decision`, `audit_bundle` |
 | `wal` | Tamper-evident log | `validate_chain_inner`, `replay_audited_wal_keyed` |
-| `budget` | CAS conservation | `debit_if_available`, `verify_conservation` |
-| `finance` | Ledger binding | `prove_conservation`, `ledger_digest` |
+| `budget` | CAS conservation | `debit_if_available`, `verify_conservation`, `restore_from_snapshot` |
+| `finance` | Ledger binding | `prove_conservation`, `ConservationProof`, `certify_snapshot`, `ledger_digest` |
 
 ## 4. Adversarial test inventory
 
@@ -44,7 +44,8 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 | Kernel proptest (ref ≡ optimized) | `src/kernel.rs` | 4 proptests |
 | Policy validation | `src/kernel.rs` | 4 unit tests |
 | WAL tamper / chain | `src/wal.rs` | 14+ unit, 2 proptests |
-| Budget concurrency + proptest | `src/budget.rs` | 17+ unit, 1 proptest |
+| Budget concurrency + proptest | `src/budget.rs` | 20+ unit, 2 proptests |
+| Budget Loom model tests | `tests/budget_loom.rs` | 4 Loom tests (`RUSTFLAGS='--cfg loom'`) |
 | Verify / decode hex | `src/verify.rs` | 10+ unit, 1 proptest |
 | Digest sensitivity | `src/digest.rs` | 3+ unit, 1 proptest |
 | Finance conservation | `src/finance.rs` | 5 unit |
@@ -55,7 +56,7 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 - Network APIs, TLS, authn/z
 - Secret storage (you provide HMAC key bytes)
 - Rate limiting, multi-region replication
-- Formal verification (Loom/Miri) — planned hardening
+- Miri — optional future hardening (Loom budget concurrency covered in CI)
 
 ## 6. Supporting documents
 

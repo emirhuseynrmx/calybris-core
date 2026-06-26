@@ -85,14 +85,17 @@ fn main() {
     match budget.commit(reservation_id, actual) {
         BudgetSettlement::Committed { .. } => {
             let cert = certify_ledger(&budget);
-            let digest = prove_conservation(&budget).unwrap();
+            let proof = prove_conservation(&budget).unwrap();
             println!("Financial certificate:");
             println!("  conservation: {}", cert.conservation_balanced);
             println!(
                 "  lifetime spend: {:?} microcents",
                 budget.committed_microcents("desk-alpha")
             );
-            println!("  ledger digest:  {}...", &digest[..16]);
+            println!(
+                "  ledger digest:  {}...",
+                &proof.ledger_digest_hex[..16]
+            );
             assert_eq!(budget.verify_conservation(), ConservationStatus::Balanced);
         }
         other => println!("Settlement failed: {other:?}"),

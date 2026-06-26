@@ -48,7 +48,7 @@ Formal properties the OSS crate is designed to uphold. Each maps to tests audito
 
 **Code:** `src/budget.rs` — `verify_conservation`, `debit_if_available` CAS.
 
-**Tests:** `conservation_invariant`, `random_ops_maintain_conservation` (proptest), `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`.
+**Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `exposure_limit_blocks_reserve`, Loom (`tests/budget_loom.rs`).
 
 ## I7 — No unsafe in project code
 
@@ -62,4 +62,4 @@ Formal properties the OSS crate is designed to uphold. Each maps to tests audito
 
 **Code:** `src/finance.rs`.
 
-**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`.
+**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `ConservationProof` structured binding.

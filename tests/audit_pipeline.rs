@@ -89,8 +89,8 @@ fn full_audit_pipeline_with_budget_and_keyed_wal() {
     let (_, reservation) = engine.try_reserve("desk", 500_000);
     engine.commit(reservation.unwrap(), 450_000);
     assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
-    let ledger_hex = prove_conservation(&engine).expect("balanced ledger");
-    assert_eq!(ledger_hex.len(), 64);
+    let proof = prove_conservation(&engine).expect("balanced ledger");
+    assert_eq!(proof.ledger_digest_hex.len(), 64);
 
     let path = temp_path("e2e");
     let _ = std::fs::remove_file(&path);
@@ -98,7 +98,7 @@ fn full_audit_pipeline_with_budget_and_keyed_wal() {
 
     {
         let mut wal = WalWriter::open_keyed(&path, key).unwrap();
-        wal.append_audited(&snap, input, decision, ledger_hex.clone())
+        wal.append_audited(&snap, input, decision, proof.ledger_digest_hex.clone())
             .unwrap();
         wal.sync().unwrap();
     }

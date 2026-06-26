@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-06-26
+
+### Added
+- `ConservationProof` — structured `prove_conservation` result with digest + totals + snapshot version
+- `BudgetEngine::restore_from_snapshot`, `set_max_reserved_microcents`, exposure limit on `try_reserve`
+- `certify_snapshot` — immutable financial certificate from frozen `BudgetSnapshot`
+- Enriched `FinancialCertificate`: snapshot version, totals, `committed_since_last_certificate`
+- Aggressive budget proptest (`aggressive_mixed_ops_maintain_conservation`)
+- Loom concurrency tests (`tests/budget_loom.rs`) + CI job
+- Expanded `budget_bench`: contention, top-up, snapshot/digest at scale
+
+### Changed
+- `prove_conservation` returns `Result<ConservationProof, ConservationStatus>` (was `Result<String, _>`)
+
 ## [0.3.7] - 2026-06-26
 
 ### Fixed

@@ -46,7 +46,7 @@ cargo run --example quickstart
 
 ```rust
 use calybris_core::budget::BudgetEngine;
-use calybris_core::finance::prove_conservation;
+use calybris_core::finance::{prove_conservation, ConservationProof};
 use calybris_core::kernel::*;
 use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
 
@@ -101,7 +101,8 @@ assert!(audit_bundle(&snapshot, input, &decision).replay_valid);
 
 let budget = BudgetEngine::new();
 budget.ensure_tenant("desk-1", 100_000_000);
-prove_conservation(&budget)?;
+let proof: ConservationProof = prove_conservation(&budget)?;
+assert_eq!(proof.ledger_digest_hex.len(), 64);
 ```
 
 Kernel-only (no WAL):
@@ -114,7 +115,7 @@ cargo add calybris-core --no-default-features
 
 1. **`kernel`** — Integer-only decision kernel (~115ns/decision). `prescribe_with_trace` exposes per-constraint rejection counts.
 2. **`verify`** — Policy + input + decision digests, full replay, `DigestDecodeError` on public API.
-3. **`finance`** — Ledger digest, `FinancialCertificate`, `prove_conservation`.
+3. **`finance`** — Ledger digest, `FinancialCertificate`, `ConservationProof`, `prove_conservation`, `certify_snapshot`.
 4. **`wal`** — Tamper-evident hash chain, `append_audited`, fail-closed `replay_audited_wal`.
 5. **`budget`** — CAS reserve/commit/release. Conservation: `remaining + reserved + committed_lifetime == initial`.
 
@@ -133,12 +134,16 @@ Fixed-point `i64` microcents (1 cent = 1,000,000). No `f64`.
 - `committed_microcents` — **lifetime cumulative spend** (monotonic; never decreases)
 - `reserved_microcents` — active holds awaiting commit/release
 - `top_up_tenant` — add funds without resetting lifetime spend
+- `restore_from_snapshot` — crash recovery from frozen `BudgetSnapshot`
 - `verify_conservation` — audit/reconciliation path (full snapshot)
+- Loom model tests (`budget_loom`) — CAS concurrency verification under `RUSTFLAGS='--cfg loom'`
 
 ```rust
 budget.ensure_tenant("desk", 100_000_000);
 budget.top_up_tenant("desk", 50_000_000);
-prove_conservation(&budget)?;
+let proof = prove_conservation(&budget)?;
+let cert = calybris_core::finance::certify_ledger(&budget)?;
+assert_eq!(proof.ledger_digest_hex, cert.ledger_digest_hex);
 ```
 
 ## Examples

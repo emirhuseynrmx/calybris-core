@@ -33,6 +33,10 @@ pub enum BudgetReservation {
     },
     MissingTenant,
     MissingReservation,
+    ExposureLimitExceeded {
+        current_reserved_microcents: i64,
+        max_reserved_microcents: i64,
+    },
 }
 
 /// Result of topping up a tenant budget.
@@ -106,8 +110,14 @@ pub struct BudgetEngine {
     initial_microcents: Mutex<HashMap<Arc<str>, i64>>,
     committed_microcents: Mutex<HashMap<Arc<str>, i64>>,
     reservations: Mutex<HashMap<u64, ReservationRecord>>,
+    /// Per-tenant cap on sum of open reservation holds (`0` = unlimited).
+    max_reserved_microcents: Mutex<HashMap<Arc<str>, i64>>,
     // u64::MAX is ~18 quintillion reservations — practically unreachable.
     next_id: AtomicU64,
+    /// Monotonic epoch incremented on each [`snapshot`](BudgetEngine::snapshot) call.
+    snapshot_version: AtomicU64,
+    /// Cumulative committed total at last [`crate::finance::certify_ledger`] call.
+    last_certified_committed_total: Mutex<i64>,
 }
 
 /// Point-in-time ledger row for one tenant (integer microcents only).
@@ -159,6 +169,13 @@ impl std::fmt::Display for ConservationStatus {
 
 impl std::error::Error for ConservationStatus {}
 
+/// Error restoring engine state from a [`BudgetSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RestoreError {
+    #[error("cannot restore snapshot with {count} active reservations")]
+    ActiveReservations { count: usize },
+}
+
 impl BudgetEngine {
     pub fn new() -> Self {
         Self {
@@ -166,8 +183,79 @@ impl BudgetEngine {
             initial_microcents: Mutex::new(HashMap::new()),
             committed_microcents: Mutex::new(HashMap::new()),
             reservations: Mutex::new(HashMap::new()),
+            max_reserved_microcents: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            snapshot_version: AtomicU64::new(0),
+            last_certified_committed_total: Mutex::new(0),
         }
+    }
+
+    /// Set a per-tenant exposure cap on open reservation holds (`0` removes the cap).
+    pub fn set_max_reserved_microcents(&self, tenant_id: &str, max_microcents: i64) {
+        let key: Arc<str> = Arc::from(tenant_id);
+        let mut limits = self.max_reserved_microcents.lock().unwrap();
+        if max_microcents <= 0 {
+            limits.remove(&key);
+        } else {
+            limits.insert(key, max_microcents);
+        }
+    }
+
+    /// Current snapshot epoch (incremented on each [`snapshot`](Self::snapshot)).
+    #[must_use]
+    pub fn snapshot_version(&self) -> u64 {
+        self.snapshot_version.load(Ordering::Acquire)
+    }
+
+    /// Sum of lifetime `committed_microcents` across all tenants.
+    #[must_use]
+    pub fn total_committed_microcents(&self) -> i64 {
+        self.committed_microcents
+            .lock()
+            .unwrap()
+            .values()
+            .sum()
+    }
+
+    /// Committed total since the last financial certificate was issued.
+    #[must_use]
+    pub fn committed_since_last_certificate(&self) -> i64 {
+        let current = self.total_committed_microcents();
+        let baseline = *self.last_certified_committed_total.lock().unwrap();
+        current.saturating_sub(baseline)
+    }
+
+    pub(crate) fn mark_certificate_issued(&self) {
+        *self.last_certified_committed_total.lock().unwrap() = self.total_committed_microcents();
+    }
+
+    /// Rebuild tenant balances from a snapshot. Active reservations must be zero.
+    pub fn restore_from_snapshot(&self, snap: BudgetSnapshot) -> Result<(), RestoreError> {
+        if snap.active_reservations > 0 {
+            return Err(RestoreError::ActiveReservations {
+                count: snap.active_reservations,
+            });
+        }
+        {
+            let mut reservations = self.reservations.lock().unwrap();
+            reservations.clear();
+        }
+        let mut budgets = self.tenant_budgets.lock().unwrap();
+        let mut initials = self.initial_microcents.lock().unwrap();
+        let mut committed = self.committed_microcents.lock().unwrap();
+        budgets.clear();
+        initials.clear();
+        committed.clear();
+        for ledger in snap.tenants {
+            let key: Arc<str> = Arc::from(ledger.tenant_id.as_str());
+            budgets.insert(
+                Arc::clone(&key),
+                Arc::new(AtomicI64::new(ledger.remaining_microcents)),
+            );
+            initials.insert(Arc::clone(&key), ledger.initial_microcents);
+            committed.insert(key, ledger.committed_microcents);
+        }
+        Ok(())
     }
 
     /// Initialize a tenant with a budget in microcents.
@@ -288,6 +376,7 @@ impl BudgetEngine {
             });
         }
         tenants.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
+        self.snapshot_version.fetch_add(1, Ordering::AcqRel);
         BudgetSnapshot {
             tenants,
             active_reservations: reservations.len(),
@@ -355,6 +444,28 @@ impl BudgetEngine {
                 None => return (BudgetReservation::MissingTenant, None),
             }
         };
+
+        let max_reserved = {
+            let limits = self.max_reserved_microcents.lock().unwrap();
+            limits.get(&key).copied().unwrap_or(0)
+        };
+        if max_reserved > 0 {
+            let reservations = self.reservations.lock().unwrap();
+            let current_reserved: i64 = reservations
+                .values()
+                .filter(|r| r.tenant_id == key)
+                .map(|r| r.reserved_microcents)
+                .sum();
+            if current_reserved.saturating_add(cost_microcents) > max_reserved {
+                return (
+                    BudgetReservation::ExposureLimitExceeded {
+                        current_reserved_microcents: current_reserved,
+                        max_reserved_microcents: max_reserved,
+                    },
+                    None,
+                );
+            }
+        }
 
         match debit_if_available(&budget, cost_microcents) {
             Err(current) => (
@@ -738,9 +849,139 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn restore_from_snapshot_roundtrip() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, id) = engine.try_reserve("desk", 100_000);
+        engine.commit(id.unwrap(), 90_000);
+        let snap = engine.snapshot();
+        assert!(snap.active_reservations == 0);
+        let fresh = BudgetEngine::new();
+        fresh.restore_from_snapshot(snap).unwrap();
+        assert_eq!(fresh.remaining_microcents("desk"), Some(910_000));
+        assert_eq!(fresh.committed_microcents("desk"), Some(90_000));
+        assert_eq!(fresh.verify_conservation(), ConservationStatus::Balanced);
+    }
+
+    #[test]
+    fn restore_rejects_active_reservations() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, id) = engine.try_reserve("desk", 50_000);
+        id.unwrap();
+        let mut snap = engine.snapshot();
+        snap.active_reservations = 1;
+        let fresh = BudgetEngine::new();
+        assert!(matches!(
+            fresh.restore_from_snapshot(snap),
+            Err(RestoreError::ActiveReservations { count: 1 })
+        ));
+    }
+
+    #[test]
+    fn exposure_limit_blocks_reserve() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        engine.set_max_reserved_microcents("desk", 100_000);
+        let (_, id1) = engine.try_reserve("desk", 60_000);
+        assert!(id1.is_some());
+        let (res, id2) = engine.try_reserve("desk", 50_000);
+        assert!(matches!(
+            res,
+            BudgetReservation::ExposureLimitExceeded { .. }
+        ));
+        assert!(id2.is_none());
+        assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+    }
+
     use proptest::prelude::*;
 
+    fn edge_amounts() -> impl Strategy<Value = i64> {
+        prop_oneof![
+            Just(1_i64),
+            Just(-1),
+            Just(0),
+            Just(1_000_000_i64),
+            1i64..1_000_000,
+        ]
+    }
+
     proptest! {
+        #[test]
+        fn aggressive_mixed_ops_maintain_conservation(
+            tenant_count in 1_usize..8,
+            seed_ops in prop::collection::vec((0u8..6, any::<u8>(), edge_amounts()), 5..80),
+        ) {
+            let engine = BudgetEngine::new();
+            for t in 0..tenant_count {
+                engine.ensure_tenant(&format!("tenant-{t}"), 2_000_000);
+                if t % 2 == 0 {
+                    engine.set_max_reserved_microcents(&format!("tenant-{t}"), 500_000);
+                }
+            }
+            let mut open_ids = Vec::new();
+
+            for (op, sel, amount) in seed_ops {
+                let tenant = format!("tenant-{}", sel as usize % tenant_count);
+                let snap_before = engine.snapshot();
+                let digest_before = crate::finance::ledger_digest(&snap_before);
+
+                match op % 6 {
+                    0 => {
+                        let (_, id) = engine.try_reserve(&tenant, amount);
+                        if let Some(id) = id {
+                            open_ids.push(id);
+                        }
+                    }
+                    1 if !open_ids.is_empty() => {
+                        let idx = sel as usize % open_ids.len();
+                        let id = open_ids[idx];
+                        let commit_amount = if amount <= 0 {
+                            1
+                        } else {
+                            amount.saturating_mul(2)
+                        };
+                        match engine.commit(id, commit_amount) {
+                            BudgetSettlement::Committed { .. } => {
+                                open_ids.remove(idx);
+                            }
+                            BudgetSettlement::Overrun { .. } => {}
+                            _ => {}
+                        }
+                    }
+                    2 if !open_ids.is_empty() => {
+                        let idx = sel as usize % open_ids.len();
+                        let id = open_ids.remove(idx);
+                        let _ = engine.release(id);
+                    }
+                    3 => {
+                        if amount > 0 {
+                            let _ = engine.top_up_tenant(&tenant, amount);
+                        }
+                    }
+                    4 => {
+                        let extra = format!("extra-{}", sel % 4);
+                        if amount > 0 {
+                            engine.ensure_tenant(&extra, amount);
+                        }
+                    }
+                    _ => {
+                        let _ = engine.snapshot();
+                    }
+                }
+
+                prop_assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+                let snap_after = engine.snapshot();
+                if open_ids.is_empty() && snap_after.active_reservations == 0 {
+                    let digest_after = crate::finance::ledger_digest(&snap_after);
+                    if snap_after.tenants == snap_before.tenants {
+                        prop_assert_eq!(digest_before, digest_after);
+                    }
+                }
+            }
+        }
+
         #[test]
         fn random_ops_maintain_conservation(
             seed_ops in prop::collection::vec((0u8..4, any::<u8>(), 1i64..50_000), 1..40),

@@ -28,7 +28,7 @@ fn main() {
 
     assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
     let cert = certify_ledger(&engine);
-    let digest = prove_conservation(&engine).unwrap();
+    let proof = prove_conservation(&engine).unwrap();
 
     println!("HFT budget demo");
     println!("===============");
@@ -36,7 +36,7 @@ fn main() {
     println!("Committed:      {committed}");
     println!("Avg ns/op:      {ns_per_op} (reserve+commit pairs)");
     println!("Conservation:   {}", cert.conservation_balanced);
-    println!("Ledger digest:  {}...", &digest[..16]);
+    println!("Ledger digest:  {}...", &proof.ledger_digest_hex[..16]);
     println!("Tenants:        {}", cert.tenant_count);
     println!(
         "Remaining:      {:?} microcents",

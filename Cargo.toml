@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["decision-engine", "proof-carrying", "write-ahead-log", "budget-engine", "deterministic"]
 categories = ["algorithms", "finance"]
 exclude = ["assets/", ".github/"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [features]
 default = ["wal"]
@@ -29,6 +32,7 @@ thiserror = "2"
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+loom = { version = "0.7", features = ["checkpoint"] }
 
 [[example]]
 name = "quickstart"
@@ -74,6 +78,10 @@ harness = false
 name = "audit_pipeline"
 path = "tests/audit_pipeline.rs"
 required-features = ["wal"]
+
+[[test]]
+name = "budget_loom"
+path = "tests/budget_loom.rs"
 
 [[bench]]
 name = "budget_bench"
