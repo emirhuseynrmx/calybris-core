@@ -18,12 +18,16 @@ use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// A single WAL entry with hash chain link.
+/// A single entry in the hash-chained WAL.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalEntry<T> {
+    /// Monotonically increasing sequence number (starts at 1).
     pub sequence: u64,
+    /// Hash of the previous entry (or `"genesis"` for the first).
     pub previous_hash: String,
+    /// Hash of this entry (SHA-256 or HMAC-SHA256 of `previous_hash` + `data`).
     pub entry_hash: String,
+    /// The decision or record stored in this entry.
     pub data: T,
 }
 
@@ -44,6 +48,7 @@ pub enum WalError {
     DuplicateSequence(u64),
 }
 
+#[inline]
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -76,6 +81,13 @@ fn hash_entry<T: Serialize>(
 }
 
 /// Hash-chained WAL writer.
+/// Hash-chained, tamper-evident Write-Ahead Log writer.
+///
+/// Without a key, the chain detects accidental corruption (bit rot, truncation).
+/// With an HMAC key ([`open_keyed`](WalWriter::open_keyed)), an attacker who
+/// modifies the file cannot recompute valid hashes.
+///
+/// The chain is validated on every [`open`](WalWriter::open) call.
 pub struct WalWriter<T> {
     file: File,
     sequence: u64,

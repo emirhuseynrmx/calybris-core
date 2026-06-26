@@ -27,83 +27,144 @@ pub const ALL_REGIONS: u64 = u64::MAX;
 /// Maximum representable provider ID. IDs >= 64 are unconditionally rejected.
 pub const MAX_PROVIDER_ID: u16 = 63;
 
+/// A candidate model in the decision catalog.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KernelModel {
+    /// Unique identifier for this model.
     pub model_id: u32,
+    /// Provider index (0–63). IDs > [`MAX_PROVIDER_ID`] are rejected.
     pub provider_id: u16,
+    /// Quality score in basis points (0–10,000).
     pub quality_bps: u16,
+    /// Maximum risk this model can handle, in basis points.
     pub risk_ceiling_bps: u16,
+    /// 1 = enabled, 0 = disabled (skipped during evaluation).
     pub enabled: u8,
+    /// 95th-percentile latency in milliseconds.
     pub p95_latency_ms: u32,
+    /// Bitmask of capabilities this model supports.
     pub capabilities: u64,
+    /// Bitmask of regions where this model is available.
     pub region_mask: u64,
+    /// Input cost per million tokens, in microunits (1 cent = 1,000,000).
     pub input_cost_microunits_per_million_tokens: u64,
+    /// Output cost per million tokens, in microunits.
     pub output_cost_microunits_per_million_tokens: u64,
 }
 
+/// A decision request to be evaluated against the policy.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KernelInput {
+    /// Monotonic sequence number for this request.
     pub request_sequence: u64,
+    /// The model the caller originally requested.
     pub requested_model_id: u32,
+    /// Number of input tokens.
     pub input_tokens: u32,
+    /// Number of output tokens.
     pub output_tokens: u32,
+    /// Expected business value of this request, in microunits.
     pub business_value_microunits: i64,
+    /// Maximum cost allowed, in microunits.
     pub budget_limit_microunits: u64,
+    /// Risk level of this request, in basis points (0 = safe, 10,000 = max).
     pub risk_bps: u16,
+    /// Confidence in the risk estimate, in basis points.
     pub confidence_bps: u16,
+    /// Minimum acceptable quality, in basis points.
     pub minimum_quality_bps: u16,
+    /// Maximum acceptable p95 latency (0 = no limit).
     pub max_p95_latency_ms: u32,
+    /// Required capability bitmask (all bits must match).
     pub required_capabilities: u64,
+    /// Allowed provider bitmask ([`ALL_PROVIDERS`] = any).
     pub allowed_provider_mask: u64,
+    /// Required region bitmask (0 = no constraint).
     pub required_region_mask: u64,
 }
 
+/// The action the kernel decided to take.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KernelAction {
+    /// The requested model was selected (it maximized utility).
     ExecuteRequested = 1,
+    /// A different model was selected (it had higher utility).
     Substitute = 2,
+    /// No model passed all constraints with positive utility.
     Reject = 3,
 }
 
+/// Why the kernel made this decision.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KernelReason {
+    /// The requested model had the highest utility.
     RequestedModelMaximizesUtility = 1,
+    /// A substitute model had higher utility.
     AlternativeMaximizesUtility = 2,
+    /// Request risk exceeded the hard limit.
     RiskHardLimit = 100,
+    /// Request confidence was below the minimum.
     ConfidenceHardLimit = 101,
+    /// No enabled models in the catalog.
     NoEnabledModel = 102,
+    /// All models failed the quality floor.
     QualityConstraint = 103,
+    /// All models exceeded the latency cap.
     LatencyConstraint = 104,
+    /// No model had the required capabilities.
     CapabilityConstraint = 105,
+    /// No model matched the allowed provider mask.
     ProviderConstraint = 106,
+    /// No model matched the required region mask.
     RegionConstraint = 107,
+    /// All models exceeded the budget limit.
     BudgetConstraint = 108,
+    /// All eligible models had non-positive utility.
     NonPositiveUtility = 109,
+    /// Request risk exceeded the model's risk ceiling.
     RiskCeilingConstraint = 110,
 }
 
+/// The result of evaluating a [`KernelInput`] against a [`PolicySnapshot`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KernelDecision {
+    /// Echoed from the input.
     pub request_sequence: u64,
+    /// What to do: execute, substitute, or reject.
     pub action: KernelAction,
+    /// Why this action was chosen.
     pub reason: KernelReason,
+    /// The model that was selected (0 if rejected).
     pub selected_model_id: u32,
+    /// Index of the selected model in the catalog.
     pub selected_model_index: u16,
+    /// Estimated cost of the selected model, in microunits.
     pub estimated_cost_microunits: u64,
+    /// Expected utility of the selected model.
     pub expected_utility_microunits: i64,
+    /// The second-best model (for counterfactual analysis).
     pub counterfactual_model_id: u32,
+    /// Utility of the counterfactual model.
     pub counterfactual_utility_microunits: i64,
+    /// How many models were evaluated.
     pub evaluated_models: u16,
+    /// How many models passed all constraints.
     pub eligible_models: u16,
+    /// Policy version used for this decision.
     pub policy_epoch: u64,
+    /// Catalog version used for this decision.
     pub catalog_epoch: u64,
 }
 
+/// An immutable snapshot of the decision policy and model catalog.
+///
+/// Create with [`PolicySnapshot::new`], then call [`prescribe`](PolicySnapshot::prescribe)
+/// for each request. The snapshot is `Clone` and can be shared across threads via `Arc`.
 #[derive(Clone, Debug)]
 pub struct PolicySnapshot {
     pub policy_epoch: u64,

@@ -45,6 +45,7 @@ pub enum BudgetSettlement {
     MissingTenant,
 }
 
+#[derive(Debug)]
 struct ReservationRecord {
     tenant_id: Arc<str>,
     reserved_microcents: i64,
@@ -82,6 +83,7 @@ fn debit_if_available(budget: &AtomicI64, amount: i64) -> Result<i64, i64> {
 pub struct BudgetEngine {
     tenant_budgets: Mutex<HashMap<Arc<str>, Arc<AtomicI64>>>,
     reservations: Mutex<HashMap<u64, ReservationRecord>>,
+    // u64::MAX is ~18 quintillion reservations — practically unreachable.
     next_id: AtomicU64,
 }
 
@@ -111,6 +113,7 @@ impl BudgetEngine {
     }
 
     /// Remaining budget for a tenant in microcents.
+    #[must_use]
     pub fn remaining_microcents(&self, tenant_id: &str) -> Option<i64> {
         let budgets = self.tenant_budgets.lock().unwrap();
         let key: Arc<str> = Arc::from(tenant_id);
