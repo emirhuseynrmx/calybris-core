@@ -11,19 +11,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Build & Test (${{ matrix.rust }})
+  msrv:
+    name: MSRV (1.85.0)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [1.83.0, stable]
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: 1.85.0
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -33,7 +29,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-1.85.0-cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Format check
         run: cargo fmt --check
@@ -50,16 +46,45 @@ jobs:
       - name: Test (no default features)
         run: cargo test --locked --no-default-features
 
+  stable:
+    name: Stable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-stable-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Test
+        run: cargo test --locked --all-features
+
       - name: Install cargo-llvm-cov
-        if: matrix.rust == 'stable'
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Test with coverage
-        if: matrix.rust == 'stable'
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
-        if: matrix.rust == 'stable'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -67,17 +92,15 @@ jobs:
           fail_ci_if_error: false
 
       - name: Doc
-        if: matrix.rust == 'stable'
-        run: cargo doc --no-deps
+        run: cargo doc --locked --no-deps
 
       - name: Examples
-        if: matrix.rust == 'stable'
         run: |
-          cargo run --example quickstart
-          cargo run --example llm_routing
-          cargo run --example hft_pretrade_guard
-          cargo run --example route_decision
-          cargo run --example replay_audit
-          cargo run --example finance_hft
-          cargo run --example simple_kernel
-          cargo run --example verify_wal
+          cargo run --locked --example quickstart
+          cargo run --locked --example llm_routing
+          cargo run --locked --example hft_pretrade_guard
+          cargo run --locked --example route_decision
+          cargo run --locked --example replay_audit
+          cargo run --locked --example finance_hft
+          cargo run --locked --example simple_kernel
+          cargo run --locked --example verify_wal

@@ -11,7 +11,7 @@
 [![Crates.io](https://img.shields.io/crates/v/calybris-core)](https://crates.io/crates/calybris-core)
 [![docs.rs](https://img.shields.io/docsrs/calybris-core)](https://docs.rs/calybris-core)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.83-orange)]()
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
 
 **Deterministic proof-carrying decision core** for systems that must explain and replay why an action was allowed, substituted, or rejected.
 
@@ -162,7 +162,7 @@ cargo test --no-default-features
 cargo doc --no-deps
 ```
 
-Tested on **Rust 1.83.0** (MSRV) and **stable**.
+Tested on **Rust 1.85.0** (MSRV) and **stable**.
 
 ## What This Crate Is Not
 

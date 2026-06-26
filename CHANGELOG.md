@@ -5,11 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-06-26
+
+### Changed
+- MSRV raised to **1.85** (transitive deps such as `indexmap` 2.14 / `clap_lex` 1.1 use edition2024)
+- CI split into two jobs: `MSRV (1.85.0)` and `Stable`
+
 ## [0.3.3] - 2026-06-26
 
 ### Fixed
-- Pin `indexmap` to 2.13 in `Cargo.lock` (2.14 requires Cargo edition2024 / Rust > 1.83)
-- CI uses `--locked` for reproducible MSRV builds
+- Pin `indexmap` to 2.13 in `Cargo.lock` (superseded by MSRV 1.85 in 0.3.4)
+- CI uses `--locked` for reproducible builds
 
 ### Added
 - `top_up_tenant()` — add funds without resetting lifetime `committed_microcents`
