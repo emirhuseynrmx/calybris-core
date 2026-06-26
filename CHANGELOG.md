@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-26
+
+### Changed
+- WAL `append()` serializes data once instead of twice (~2x faster)
+- `compute_hash` returns `Result` instead of panicking on invalid HMAC key
+- Comprehensive rustdoc on every public struct, enum, field, and function
+- Budget `ReservationRecord` derives `Debug`
+- `debug_assert` on negative initial budget in `ensure_tenant`
+
+### Fixed
+- `hash_entry` moved to `#[cfg(test)]` (was dead code in production)
+- `write!` with trailing newline replaced by `writeln!`
+
 ## [0.2.0] - 2026-06-26
 
 ### Added
@@ -14,7 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `flush_and_sync()` method for batched WAL durability
 - `MAX_PROVIDER_ID` constant (replaces magic number 64)
 - `#[must_use]` on `WalWriter::append`
-- `no_std` support with `std` feature flag (default enabled)
 - `thiserror` derive for WAL error types
 - Proptest fuzz: random data + random lengths WAL roundtrip
 - Doc comments on kernel, WAL, and budget public APIs

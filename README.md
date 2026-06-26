@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/banner.png" alt="Calybris Core" width="100%" />
+  <img src="https://raw.githubusercontent.com/emirhuseynrmx/calybris-core/main/assets/banner.png" alt="Calybris Core" width="100%" />
 </div>
 
 <br/>
@@ -18,7 +18,7 @@ Three building blocks for auditable decision systems:
 2. **`wal`** — Hash-chained write-ahead log. Each entry links to the previous via SHA-256 (or HMAC-SHA256 with a key). Generic over any `Serialize` type.
 3. **`budget`** — CAS atomic budget engine. Per-tenant reservations with a conservation invariant: `remaining + reserved + committed = initial`.
 
-`#![forbid(unsafe_code)]` · 37 tests · 5 dependencies · Apache-2.0
+`#![forbid(unsafe_code)]` · 37 tests · 6 direct dependencies · Apache-2.0
 
 ## Quick Start
 
