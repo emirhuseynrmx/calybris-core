@@ -19,10 +19,12 @@ pub const LEDGER_DIGEST_TAG: &[u8] = b"calyldg1\0";
 
 #[inline]
 pub fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 #[inline]
