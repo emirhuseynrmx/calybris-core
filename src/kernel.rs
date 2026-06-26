@@ -186,10 +186,22 @@ impl PolicySnapshot {
         }
     }
 
+    /// Returns the model catalog.
     pub fn models(&self) -> &[KernelModel] {
         &self.models
     }
 
+    /// Evaluate `input` against the policy and return the optimal decision.
+    ///
+    /// The kernel checks 11 constraint gates per candidate, computes utility as
+    /// `quality_adjusted_value - risk_penalty - cost - latency_penalty`,
+    /// and selects the candidate with the highest positive utility.
+    ///
+    /// If no candidate has positive utility, the request is rejected (fail-closed).
+    /// The decision also records the counterfactual (second-best) candidate.
+    ///
+    /// **This function does not allocate.**
+    #[must_use]
     pub fn prescribe(&self, input: KernelInput) -> KernelDecision {
         if input.risk_bps >= self.hard_risk_limit_bps {
             return self.reject(input, KernelReason::RiskHardLimit, 0, 0);
@@ -432,6 +444,7 @@ fn scaled_term_reference(value: u64, first_bps: u64, second_bps: u64) -> i128 {
         / i128::from(SCALED_BASIS_POINTS)
 }
 
+/// Tie-breaking order: utility > lower cost > higher quality > lower model_id.
 #[inline(always)]
 fn candidate_better(left: Candidate, right: Candidate) -> bool {
     left.utility > right.utility

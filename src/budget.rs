@@ -51,7 +51,10 @@ struct ReservationRecord {
 }
 
 /// Atomically debit `amount` from `budget` if sufficient balance exists.
-/// Returns Ok(remaining) or Err(current_balance).
+/// Returns `Ok(remaining)` or `Err(current_balance)`.
+///
+/// Uses a CAS loop — no lock required, safe under any contention.
+#[inline]
 fn debit_if_available(budget: &AtomicI64, amount: i64) -> Result<i64, i64> {
     let mut current = budget.load(Ordering::Acquire);
     loop {
@@ -92,7 +95,14 @@ impl BudgetEngine {
     }
 
     /// Initialize a tenant with a budget in microcents.
+    ///
+    /// Idempotent — calling with a tenant that already exists does nothing.
+    /// Panics in debug mode if `budget_microcents` is negative.
     pub fn ensure_tenant(&self, tenant_id: &str, budget_microcents: i64) {
+        debug_assert!(
+            budget_microcents >= 0,
+            "initial budget must be non-negative"
+        );
         let mut budgets = self.tenant_budgets.lock().unwrap();
         let key: Arc<str> = Arc::from(tenant_id);
         budgets
@@ -107,7 +117,11 @@ impl BudgetEngine {
         budgets.get(&key).map(|b| b.load(Ordering::Acquire))
     }
 
-    /// Reserve budget atomically using CAS. Returns reservation ID on success.
+    /// Reserve budget atomically using CAS.
+    ///
+    /// Returns `(BudgetReservation::Reserved { .. }, Some(id))` on success,
+    /// or `(BudgetReservation::Insufficient { .. }, None)` if the tenant
+    /// doesn't have enough balance. Zero or negative amounts are rejected.
     pub fn try_reserve(
         &self,
         tenant_id: &str,
@@ -161,6 +175,11 @@ impl BudgetEngine {
     }
 
     /// Commit a reservation with actual cost. Surplus is refunded.
+    ///
+    /// If `actual_microcents > reserved`, the engine attempts to debit the
+    /// difference (overrun). If the tenant can't afford the overrun, the
+    /// reservation is re-inserted and `Overrun` is returned — the original
+    /// reserved amount stays deducted (no refund on failed overrun).
     pub fn commit(&self, reservation_id: u64, actual_microcents: i64) -> BudgetSettlement {
         if actual_microcents < 0 {
             return BudgetSettlement::InvalidAmount;
@@ -207,7 +226,7 @@ impl BudgetEngine {
         }
     }
 
-    /// Release a reservation, returning full amount to budget.
+    /// Release a reservation, returning the full reserved amount to the tenant's budget.
     pub fn release(&self, reservation_id: u64) -> BudgetSettlement {
         let mut reservations = self.reservations.lock().unwrap();
         let Some((_, reservation)) = reservations.remove_entry(&reservation_id) else {

@@ -233,7 +233,10 @@ fn validate_chain_inner(path: &Path, key: Option<&[u8]>) -> Result<(u64, String)
     Ok((last_sequence, last_hash))
 }
 
-/// Read a WAL file without chain verification.
+/// Read a WAL file **without** chain verification.
+///
+/// Use [`read_verified_wal`] or [`read_verified_wal_keyed`] if you need
+/// tamper detection. This function is faster but trusts the data.
 pub fn read_wal<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<WalEntry<T>>, WalError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
