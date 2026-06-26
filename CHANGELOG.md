@@ -5,19 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.10] - 2026-06-26
+## [0.3.10] - 2026-06-27
 
 ### Fixed
 - `top_up_tenant` holds `initial_microcents` lock through read → credit → write (fixes concurrent lost-update breaking I6)
 - `conservation_status_for_snapshot` uses checked per-tenant sums (adversarial `BudgetSnapshot` no longer panics/wraps)
 - `snapshot_totals` uses `i128` checked sums instead of `saturating_add` — overflow surfaces as `ConservationStatus::AggregateOverflow` / `aggregate_totals_representable: false` on certificates
+- Rustdoc intra-doc links now build without broken-link warnings
+- `WalWriter::append` advances sequence/hash state only after serialization and write succeed
+- `ledger_digest` sorts tenants internally, so raw `BudgetSnapshot` order cannot change the canonical digest
+- GitHub Actions use stable `actions/checkout@v4` and `actions/cache@v4`
 
 ### Changed
 - Module docs: lock-order comment softened to scoped metadata locking + exclusive restore contract
+- README separates local examples from dependency installation (`git clone` vs `cargo add`)
+- Launch positioning avoids framework/exchange claims and keeps HFT language out of the top-level pitch
 
 ### Added
 - Loom test `concurrent_two_topups_preserve_conservation_loom`
 - `ConservationProof::aggregate_totals_representable`, `FinancialCertificate::aggregate_totals_representable`
+- `BudgetEngine::try_total_committed_microcents`
+- Regression tests for WAL append failure state, raw ledger ordering, and aggregate committed overflow
 
 ## [0.3.9] - 2026-06-26
 
