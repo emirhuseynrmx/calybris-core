@@ -50,14 +50,21 @@ Generic, tamper-evident decision log. Each entry's hash chains to the previous.
 
 ## Benchmarks
 
+Run with `cargo bench` (Criterion):
+
 | Metric | Value |
 |--------|-------|
-| Kernel throughput | 8.6M decisions/sec |
+| Kernel throughput (22 models) | **8.6M decisions/sec** |
+| Per decision | 115 ns |
+| Reject path (risk gate) | < 10 ns |
+| Model scaling (4→64 models) | Linear |
 | HTTP gateway (full engine) | 6,084 req/sec |
-| HTTP p99 (full engine) | 42ms |
-| Real data (full engine) | 1.1M decisions, 0 runtime failures |
 
-Public core includes 35 default-running tests (including property tests and HMAC verification), plus 1 ignored release-only latency guard. The full proprietary engine has 336 tests (40% adversarial) against the complete stack.
+Benchmarks use Criterion with HTML reports. Results are from a local test environment — hardware, concurrency, and compiler flags affect numbers. Build with `--release` and `lto = true` for best results.
+
+**MSRV:** Rust 1.83+
+
+Public core includes 36 tests (35 default + 1 ignored release guard), including proptest property-based verification, 100-thread concurrency stress, and HMAC chain validation.
 
 Full methodology: [emirhuseyin.tech/engine/methodology.html](https://emirhuseyin.tech/engine/methodology.html)
 

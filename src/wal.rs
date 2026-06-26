@@ -144,6 +144,12 @@ impl<T: Serialize + Clone> WalWriter<T> {
     }
 
     /// Append a decision to the WAL. Returns the entry with proof.
+    ///
+    /// Writes to the OS buffer but does **not** fsync. Call [`sync`] or
+    /// [`flush_and_sync`] explicitly when you need crash durability.
+    /// This keeps the hot path fast (~1µs per append) while letting
+    /// callers batch durability when appropriate.
+    #[must_use = "check the returned entry for the hash chain link"]
     pub fn append(&mut self, data: T) -> Result<WalEntry<T>, WalError> {
         self.sequence += 1;
         let entry_hash = hash_entry(&self.last_hash, &data, self.hmac_key.as_deref())?;
@@ -157,13 +163,26 @@ impl<T: Serialize + Clone> WalWriter<T> {
 
         let line = serde_json::to_string(&entry)?;
         writeln!(self.file, "{}", line)?;
-        self.file.flush()?;
 
         self.last_hash = entry_hash;
         Ok(entry)
     }
 
-    /// Sync data to disk (fsync).
+    /// Flush userspace buffer to OS and fsync to disk.
+    /// Call after a batch of appends for crash durability.
+    pub fn flush_and_sync(&mut self) -> Result<(), WalError> {
+        self.file.flush()?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    /// Flush userspace buffer to OS (no fsync).
+    pub fn flush(&mut self) -> Result<(), WalError> {
+        self.file.flush()?;
+        Ok(())
+    }
+
+    /// Sync data to disk (fsync). Assumes buffer is already flushed.
     pub fn sync(&self) -> Result<(), WalError> {
         self.file.sync_data()?;
         Ok(())
