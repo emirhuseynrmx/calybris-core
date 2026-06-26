@@ -14,17 +14,18 @@
 
 A small Rust decision engine for auditable, deterministic policy decisions.
 
-Calybris Core evaluates candidates under hard constraints, selects the highest-utility valid option, and records decisions through tamper-evident primitives.
+Calybris Core evaluates candidates under hard constraints, selects the highest-utility valid option, records decisions through tamper-evident primitives, and lets you independently verify that every decision matches the policy that produced it.
 
 The first packaged use case is **LLM/model routing**: choosing between models under budget, latency, risk, quality, provider, and region constraints. The core pattern is domain-neutral — any system that chooses between candidates under constraints can use the same primitives.
 
-Built from three components:
+Built from four components:
 
 1. **`kernel`** — Integer-only decision kernel. 11 constraint gates, ~115ns per decision. No floating-point, no allocation in the hot path.
-2. **`wal`** — Hash-chained write-ahead log. SHA-256 or HMAC-SHA256. Generic over any `Serialize` type.
-3. **`budget`** — CAS atomic budget engine. Conservation invariant: `remaining + reserved + committed = initial`.
+2. **`verify`** — Deterministic replay check, policy fingerprinting, and correctness certificates.
+3. **`wal`** — Hash-chained write-ahead log. SHA-256 or HMAC-SHA256. Generic over any `Serialize` type.
+4. **`budget`** — CAS atomic budget engine. Conservation invariant: `remaining + reserved + committed = initial`.
 
-`#![forbid(unsafe_code)]` · 37 tests · 6 direct dependencies · Apache-2.0
+`#![forbid(unsafe_code)]` · 40 unit tests · 2 doc tests · 6 direct dependencies · Apache-2.0
 
 ## Quick Start
 
@@ -34,13 +35,26 @@ cargo add calybris-core
 
 ```rust
 use calybris_core::kernel::*;
+use calybris_core::verify::{certify_decision, verify_decision, VerifyResult};
 
 let models = vec![/* your model catalog */];
 let snapshot = PolicySnapshot::new(1, 1, 9600, 5500, 3500, 0, models);
+let input = KernelInput { /* ... */ };
+
 let decision = snapshot.prescribe(input);
 // decision.action: ExecuteRequested | Substitute | Reject
 // decision.selected_model_id: which model was chosen
 // decision.expected_utility_microunits: why
+
+assert_eq!(verify_decision(&snapshot, input, &decision), VerifyResult::Valid);
+let cert = certify_decision(&snapshot, input, &decision);
+assert!(cert.replay_valid);
+```
+
+Disable Serde (kernel + budget only, no WAL):
+
+```bash
+cargo add calybris-core --no-default-features
 ```
 
 ## Modules
@@ -57,7 +71,25 @@ All values are basis points (1/10,000) or microunits (1/1,000,000). The fast pat
 
 Constraints checked per decision: risk ceiling, confidence floor, quality minimum, budget limit, latency cap, capability match, provider mask, region mask, cost, utility sign, optimality.
 
+Public types implement `Display` and optional `Serialize`/`Deserialize` (behind the `serde` feature, enabled by default).
+
+### `verify.rs`
+
+Independently confirm that a recorded decision is consistent with the policy snapshot that should have produced it:
+
+```rust
+use calybris_core::verify::{certify_decision, snapshot_fingerprint, verify_decision};
+
+let replay = verify_decision(&snapshot, input, &decision);
+let fingerprint = snapshot_fingerprint(&snapshot); // SHA-256 policy binding
+let cert = certify_decision(&snapshot, input, &decision);
+```
+
+`verify_decision` replays `snapshot.prescribe(input)` and compares the outcome. `certify_decision` binds the decision to a policy fingerprint and includes the replay result — useful for audit trails and WAL records.
+
 ### `wal.rs`
+
+Requires the `serde` feature (on by default).
 
 ```rust
 // Unkeyed — detects accidental corruption
@@ -77,9 +109,20 @@ let engine = BudgetEngine::new();
 engine.ensure_tenant("team-a", 100_000_000);
 let (res, id) = engine.try_reserve("team-a", 25_000_000);
 engine.commit(id.unwrap(), 20_000_000); // surplus refunded
+
+engine.tenant_count();        // registered tenants
+engine.active_reservations(); // uncommitted holds
 ```
 
 `Arc<AtomicI64>` per tenant, cloned out before the CAS loop — no mutex held during contention. Lock ordering: reservations → budgets.
+
+## Examples
+
+```bash
+cargo run --example simple_kernel   # minimal prescribe() demo
+cargo run --example route_decision  # LLM routing + WAL audit trail
+cargo run --example verify_wal      # hash-chain validation
+```
 
 ## Benchmarks
 
@@ -99,11 +142,11 @@ Results from Criterion on one machine. Your numbers will differ.
 ## Tests
 
 ```
-cargo test           # 37 tests (36 + 1 doc)
-cargo test --release # includes latency guard
+cargo test           # 40 unit + 2 doc tests
+cargo test --release # includes latency guard (1 ignored in debug)
 ```
 
-Includes proptest property-based verification, 100-thread concurrency stress, HMAC chain validation, and WAL fuzz roundtrips.
+Includes proptest property-based verification, 100-thread concurrency stress, HMAC chain validation, decision replay checks, and WAL fuzz roundtrips.
 
 ## What This Crate Is Not
 
