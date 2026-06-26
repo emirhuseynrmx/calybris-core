@@ -332,6 +332,10 @@ impl BudgetEngine {
     }
 
     /// Rebuild tenant balances from a validated snapshot (no active or ghost reservations).
+    ///
+    /// Must be called during **exclusive recovery** — no concurrent `try_reserve`,
+    /// `commit`, `release`, or `top_up_tenant` on this engine. Concurrent hot-path
+    /// operations may hold cloned state across a clear/replace and corrupt restored ledgers.
     pub fn restore_from_snapshot(&self, snap: BudgetSnapshot) -> Result<(), RestoreError> {
         validate_snapshot_for_restore(&snap)?;
         {

@@ -5,7 +5,7 @@
 //!
 //! - **`kernel`**: Allocation-free integer decision kernel (8.6M decisions/sec)
 //! - **`verify`**: Canonical digests, replay verification, correctness certificates
-//! - **`finance`**: Ledger snapshots, conservation proofs (HFT-grade integer accounting)
+//! - **`finance`**: Ledger snapshots and fixed-point conservation proofs for pre-trade guard primitives
 //! - **`wal`**: Generic tamper-evident hash-chained WAL with optional HMAC keying
 //! - **`budget`**: Per-tenant atomic budget management with conservation invariant
 //!

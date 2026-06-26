@@ -63,7 +63,7 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 - **Unkeyed WAL:** Detects accidental corruption; a filesystem attacker can recompute plain SHA-256 chain hashes. Use **keyed WAL** in production.
 - **`read_wal`:** Does not verify chain — use `read_verified_wal*` only on trusted paths.
 - **Caller responsibility:** `verify_decision` must be enforced by your control plane; the library does not block application logic on failure.
-- **Formal concurrency proofs:** CAS budget tested under thread contention; Loom/Miri not yet in CI.
+- **Formal concurrency proofs:** Loom/Miri in CI cover selected budget interleavings and UB paths; not exhaustive for all production schedules.
 
 ## Dependency Policy
 

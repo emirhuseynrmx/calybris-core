@@ -54,7 +54,7 @@
 - **Capability:** Many threads racing on same tenant budget.
 - **Goal:** Double-spend via TOCTOU.
 - **Mitigation:** `debit_if_available` CAS loop; mutex ordering on metadata maps.
-- **Residual risk:** Not formally verified with Loom/Miri in CI (roadmap item).
+- **Residual risk:** Loom/Miri cover selected concurrency and UB scenarios, but they are not formal proofs of all possible production interleavings.
 
 ### A4 — Digest confusion
 - **Capability:** Supply malformed hex in `AuditBundle`.
