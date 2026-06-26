@@ -19,7 +19,7 @@ serde = ["dep:serde", "dep:serde_json"]
 wal = ["serde", "dep:hmac", "dep:subtle"]
 
 [dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = { version = "0.12", optional = true }
 subtle = { version = "2.6", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
