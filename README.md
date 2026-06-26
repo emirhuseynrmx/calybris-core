@@ -21,7 +21,7 @@ Not an LLM framework. Not an exchange or strategy engine. A domain-neutral primi
 candidate + policy constraints → decision + digests + optional WAL + budget proof
 ```
 
-`#![forbid(unsafe_code)]` · extensive unit/proptest/Loom coverage · Apache-2.0
+`#![forbid(unsafe_code)]` · unit/proptest/Loom/Miri coverage · Apache-2.0
 
 ## Two Reference Use Cases
 
@@ -117,7 +117,7 @@ cargo add calybris-core --no-default-features
 2. **`verify`** — Policy + input + decision digests, full replay, `DigestDecodeError` on public API.
 3. **`finance`** — Ledger digest, `FinancialCertificate`, `ConservationProof`, `prove_conservation`, `certify_snapshot`.
 4. **`wal`** — Tamper-evident hash chain, `append_audited`, fail-closed `replay_audited_wal`.
-5. **`budget`** — CAS reserve/commit/release. Conservation: `remaining + reserved + committed_lifetime == initial`. Loom model tests in CI.
+5. **`budget`** — CAS reserve/commit/release. Conservation: `remaining + reserved + committed_lifetime == initial`. Loom + Miri in CI.
 
 ## Audit Pipeline
 
@@ -141,13 +141,18 @@ Fixed-point `i64` microcents (1 cent = 1,000,000). No `f64`.
 ```rust
 budget.ensure_tenant("desk", 100_000_000);
 budget.top_up_tenant("desk", 50_000_000);
-let proof = prove_conservation(&budget)?;
-let cert = calybris_core::finance::certify_ledger(&budget)?;
-assert_eq!(proof.ledger_digest_hex, cert.ledger_digest_hex);
-assert_eq!(proof.snapshot_version, cert.snapshot_version);
+let proof = prove_conservation(&budget)?; // one frozen snapshot
+let cert = certify_ledger(&budget);     // separate snapshot call — compare conservation, not cross-call version
+assert!(cert.conservation_balanced);
 ```
 
-Policy snapshots: use `PolicySnapshot::try_new(...)` in production (validates BPS ranges and catalog).
+## Policy API
+
+| API | Use |
+|-----|-----|
+| `PolicySnapshot::try_new` | **Production** — validates catalog + BPS (`MAX_BPS`, etc.) |
+| `PolicySnapshot::new_unchecked` | Tests / fuzz only — invalid policy possible; never serve without explicit `validate()` |
+| `PolicySnapshot::new` | Deprecated alias for `new_unchecked` |
 
 ## Examples
 
@@ -167,15 +172,26 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-features
 cargo test --no-default-features
-RUSTFLAGS='--cfg loom' cargo test --test budget_loom
+RUSTFLAGS='--cfg loom' LOOM_MAX_PREEMPTIONS=3 cargo test --test budget_loom
+cargo +nightly miri test --lib --all-features   # see docs/MIRI.md for CI filters
 cargo doc --no-deps
 ```
 
-Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri is on the hardening roadmap (Loom covers budget concurrency today).
+Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri runs on **nightly** in CI (UB detection); Loom covers budget concurrency interleavings.
 
 ## Integration contract
 
-Calybris verifies decisions and conservation proofs — it does **not** auto-invoke `verify_decision` in your hot path. Callers must invoke verification at audit boundaries (pre-WAL append, reconciliation, external review). This keeps the kernel allocation-free and leaves control flow to the host system.
+Calybris verifies decisions and conservation proofs — it does **not** auto-invoke `verify_decision` in your hot path. **You** must call it at audit boundaries:
+
+```
+prescribe → verify_decision → (optional WAL / prove_conservation)
+```
+
+Recommended hooks: before `append_audited`, at reconciliation, before exporting a `FinancialCertificate`. Skipping verification is a deployment risk, not a library default. See [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md).
+
+## External audit
+
+Invariant docs, adversarial tests, Loom, Miri, and supply-chain checks are in place for third-party review. A paid external audit is still your responsibility — see [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) §7.
 
 ## What This Crate Is Not
 

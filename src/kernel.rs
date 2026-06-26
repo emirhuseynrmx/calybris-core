@@ -286,10 +286,15 @@ pub enum PolicyError {
 type RejectionCounts = RejectionHistogram;
 
 impl PolicySnapshot {
-    /// Creates a policy snapshot without validation.
+    /// Creates a policy snapshot **without validation** (escape hatch).
     ///
-    /// Prefer [`try_new`](Self::try_new) for production traffic. This constructor
-    /// may produce invalid policy parameters or catalog invariants.
+    /// # Production guidance
+    ///
+    /// Use [`try_new`](Self::try_new) for any policy served to real traffic. `new_unchecked`
+    /// is for unit tests, fuzz fixtures, and experiments where you call [`validate`](Self::validate)
+    /// yourself or intentionally construct invalid catalogs.
+    ///
+    /// Serving from an unchecked snapshot without a successful `validate()` is an audit failure.
     pub fn new_unchecked(
         policy_epoch: u64,
         catalog_epoch: u64,

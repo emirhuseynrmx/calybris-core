@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Concurrent exposure cap (`set_max_reserved_microcents`) enforced via per-tenant `AtomicI64` reserved totals (CAS)
 
 ### Added
+- Miri CI job (nightly) — UB detection on lib tests + `audit_pipeline` ([docs/MIRI.md](docs/MIRI.md))
+- Audit guide: policy `new_unchecked` escape hatch, caller `verify_decision` contract, external audit readiness checklist
 - `BudgetSnapshot::version` — epoch embedded in snapshot and ledger digest
 - `conservation_status_for_snapshot` — audit path without extra engine reads
 - `PolicySnapshot::new_unchecked`, BPS range validation in `validate()` (`MAX_BPS`, `MAX_RISK_PENALTY_MULTIPLIER_BPS`)

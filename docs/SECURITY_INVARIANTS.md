@@ -56,6 +56,8 @@ Formal properties the OSS crate is designed to uphold. Each maps to tests audito
 
 **Code:** `src/lib.rs`.
 
+**Tests:** Miri UB pass on `--lib` + `audit_pipeline` (CI `security.yml`); Loom for concurrent budget paths.
+
 ## I8 — Ledger digest stability
 
 **Invariant:** `ledger_digest` is independent of tenant insertion order; includes `BudgetSnapshot::version`; `prove_conservation` / `certify_ledger` bind digest + status + version to one frozen snapshot.

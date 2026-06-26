@@ -86,3 +86,42 @@ jobs:
         env:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: 3
+
+  miri:
+    name: Miri (UB detection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-miri-${{ hashFiles('Cargo.lock') }}
+
+      - name: Miri setup
+        run: cargo miri setup
+
+      - name: Miri library tests
+        run: >
+          cargo miri test --locked --lib --all-features --
+          --skip wal::
+          --skip aggressive_mixed
+          --skip random_ops
+          --skip arbitrary_
+          --skip digests_stable
+          --skip prescriptive_kernel
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+
+      - name: Miri audit pipeline
+        run: cargo miri test --locked --test audit_pipeline
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation

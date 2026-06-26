@@ -737,6 +737,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn concurrent_reserve_never_overspends() {
         let engine = Arc::new(BudgetEngine::new());
         engine.ensure_tenant("t1", 100_000_000);
@@ -803,6 +804,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn no_deadlock_under_contention() {
         let engine = Arc::new(BudgetEngine::new());
         engine.ensure_tenant("t1", 1_000_000_000);
@@ -828,6 +830,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn concurrent_overrun_never_goes_negative() {
         let engine = Arc::new(BudgetEngine::new());
         engine.ensure_tenant("t1", 50_000_000);
@@ -920,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn exposure_limit_holds_under_concurrent_reserve() {
         let engine = Arc::new(BudgetEngine::new());
         engine.ensure_tenant("desk", 10_000_000);
