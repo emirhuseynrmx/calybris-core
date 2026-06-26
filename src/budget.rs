@@ -41,6 +41,9 @@ pub enum BudgetReservation {
         current_reserved_microcents: i64,
         max_reserved_microcents: i64,
     },
+    Overflow {
+        current_reserved_microcents: i64,
+    },
 }
 
 /// Result of topping up a tenant budget.
@@ -120,13 +123,26 @@ fn credit_if_no_overflow(budget: &AtomicI64, amount: i64) -> Result<i64, ()> {
     }
 }
 
-/// CAS-increment reserved total; returns `Err(current)` when `max > 0` and the new total would exceed it.
-fn try_increment_reserved_total(total: &AtomicI64, amount: i64, max: i64) -> Result<i64, i64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservedTotalError {
+    Overflow,
+    ExposureExceeded { current: i64 },
+}
+
+/// CAS-increment reserved total with `checked_add` (no silent wrap).
+fn try_increment_reserved_total(
+    total: &AtomicI64,
+    amount: i64,
+    max: i64,
+) -> Result<i64, ReservedTotalError> {
     let mut current = total.load(Ordering::Acquire);
     loop {
-        let new_total = current.saturating_add(amount);
+        let new_total = match current.checked_add(amount) {
+            Some(n) => n,
+            None => return Err(ReservedTotalError::Overflow),
+        };
         if max > 0 && new_total > max {
-            return Err(current);
+            return Err(ReservedTotalError::ExposureExceeded { current });
         }
         match total.compare_exchange_weak(current, new_total, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return Ok(new_total),
@@ -572,21 +588,25 @@ impl BudgetEngine {
             let limits = self.max_reserved_microcents.lock().unwrap();
             limits.get(&key).copied().unwrap_or(0)
         };
-        if max_reserved > 0 {
-            match try_increment_reserved_total(&reserved_total, cost_microcents, max_reserved) {
-                Ok(_) => {}
-                Err(current_reserved) => {
-                    return (
-                        BudgetReservation::ExposureLimitExceeded {
-                            current_reserved_microcents: current_reserved,
-                            max_reserved_microcents: max_reserved,
-                        },
-                        None,
-                    );
-                }
+        match try_increment_reserved_total(&reserved_total, cost_microcents, max_reserved) {
+            Ok(_) => {}
+            Err(ReservedTotalError::Overflow) => {
+                return (
+                    BudgetReservation::Overflow {
+                        current_reserved_microcents: reserved_total.load(Ordering::Acquire),
+                    },
+                    None,
+                );
             }
-        } else {
-            reserved_total.fetch_add(cost_microcents, Ordering::AcqRel);
+            Err(ReservedTotalError::ExposureExceeded { current }) => {
+                return (
+                    BudgetReservation::ExposureLimitExceeded {
+                        current_reserved_microcents: current,
+                        max_reserved_microcents: max_reserved,
+                    },
+                    None,
+                );
+            }
         }
 
         match debit_if_available(&budget, cost_microcents) {
@@ -651,26 +671,26 @@ impl BudgetEngine {
         };
         drop(reservations);
 
-        {
-            let committed = self.committed_microcents.lock().unwrap();
-            let current = committed.get(&reservation.tenant_id).copied().unwrap_or(0);
-            if current.checked_add(actual_microcents).is_none() {
+        let tenant_key = Arc::clone(&reservation.tenant_id);
+        let mut committed_guard = self.committed_microcents.lock().unwrap();
+        let current_committed = committed_guard.get(&tenant_key).copied().unwrap_or(0);
+        let new_committed = match current_committed.checked_add(actual_microcents) {
+            Some(v) => v,
+            None => {
+                drop(committed_guard);
                 let mut reservations = self.reservations.lock().unwrap();
                 reservations.insert(reservation_id, reservation);
                 return BudgetSettlement::Overflow {
                     remaining_microcents: budget.load(Ordering::Acquire),
                 };
             }
-        }
+        };
 
         let delta: i64 = actual_microcents - reservation.reserved_microcents;
         match delta.cmp(&0) {
             std::cmp::Ordering::Greater => {
-                // Overrun: atomically debit additional amount via CAS
                 if let Err(remaining) = debit_if_available(&budget, delta) {
-                    // Can't afford overrun — re-insert reservation but do NOT refund.
-                    // The original reserved amount is still deducted from the budget;
-                    // refunding it here would violate conservation (create money).
+                    drop(committed_guard);
                     let mut reservations = self.reservations.lock().unwrap();
                     reservations.insert(reservation_id, reservation);
                     return BudgetSettlement::Overrun {
@@ -686,20 +706,13 @@ impl BudgetEngine {
 
         {
             let totals = self.tenant_reserved_totals.lock().unwrap();
-            if let Some(total) = totals.get(&reservation.tenant_id) {
+            if let Some(total) = totals.get(&tenant_key) {
                 total.fetch_sub(reservation.reserved_microcents, Ordering::AcqRel);
             }
         }
 
-        {
-            let mut committed = self.committed_microcents.lock().unwrap();
-            let entry = committed
-                .entry(Arc::clone(&reservation.tenant_id))
-                .or_insert(0);
-            *entry = entry
-                .checked_add(actual_microcents)
-                .expect("committed overflow checked before debit");
-        }
+        committed_guard.insert(tenant_key, new_committed);
+        drop(committed_guard);
 
         let remaining = budget.load(Ordering::Acquire);
         BudgetSettlement::Committed {
@@ -1056,6 +1069,17 @@ mod tests {
             engine.top_up_tenant("desk", 20),
             TopUpResult::Overflow
         ));
+    }
+
+    #[test]
+    fn reserve_rejects_reserved_total_overflow() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", i64::MAX);
+        engine.set_max_reserved_microcents("desk", 0);
+        let (res, _) = engine.try_reserve("desk", i64::MAX);
+        assert!(matches!(res, BudgetReservation::Reserved { .. }));
+        let (res2, _) = engine.try_reserve("desk", 1);
+        assert!(matches!(res2, BudgetReservation::Overflow { .. }));
     }
 
     #[test]

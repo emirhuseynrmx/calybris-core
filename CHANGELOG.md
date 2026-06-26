@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/MIRI.md`: "Why some tests are skipped" — explicit Miri vs Loom vs proptest division
 
 ### Fixed
+- `commit` holds `committed_microcents` lock from overflow check through final write (no panic under concurrent commits)
+- `try_reserve` uses checked reserved-total increment; `BudgetReservation::Overflow` on `i64` saturation
 - `rotate_certificate_baseline` monotonic — stale concurrent certs cannot regress baseline
 - `restore_from_snapshot` rejects duplicate `tenant_id` in snapshot
 - `top_up_tenant` / `commit` return `Overflow` on `i64` saturation (checked arithmetic)
