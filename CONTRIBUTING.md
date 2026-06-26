@@ -55,7 +55,7 @@ examples/
 - **No allocation in `prescribe()`**: The hot path must be zero-alloc
 - **Fail-closed**: If the engine can't safely evaluate, it rejects
 - **Deterministic replay**: Same inputs → same outputs, across platforms
-- **Conservation invariant**: `remaining + reserved + committed = initial` (budget)
+- **Conservation invariant**: `remaining + reserved + committed = initial` after completed budget ops (budget)
 
 ## Commit Messages
 

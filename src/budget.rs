@@ -6,11 +6,16 @@
 //! CAS-based balance updates; metadata maps are mutex-protected.
 //! Lock ordering is always: reservations first, then tenant_budgets — no deadlock.
 //!
-//! Conservation invariant (per tenant, at any instant):
+//! Conservation invariant (per tenant, after completed operations):
 //!
 //! ```text
 //! remaining + reserved + committed_lifetime == initial
 //! ```
+//!
+//! Holds after each **completed** reserve / commit / release / top-up and at reconciliation
+//! boundaries (`verify_conservation`, `prove_conservation`). Multi-step operations update
+//! `reserved_total`, `remaining`, and maps in separate steps — a snapshot taken mid-operation
+//! is not a linearizable transaction view and may show a transient imbalance.
 //!
 //! - `remaining` — spendable balance right now
 //! - `reserved` — sum of active (uncommitted) holds
@@ -183,7 +188,7 @@ pub fn conservation_status_for_snapshot(snapshot: &BudgetSnapshot) -> Conservati
 /// Result of the conservation invariant check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConservationStatus {
-    /// `remaining + reserved + committed == initial` for every tenant.
+    /// `remaining + reserved + committed == initial` for every tenant in this snapshot.
     Balanced,
     /// Invariant violated — includes per-tenant deltas in microcents.
     Violation {
@@ -214,6 +219,62 @@ impl std::error::Error for ConservationStatus {}
 pub enum RestoreError {
     #[error("cannot restore snapshot with {count} active reservations")]
     ActiveReservations { count: usize },
+    #[error(
+        "tenant {tenant_id} has reserved_microcents={reserved_microcents} with no active reservations"
+    )]
+    GhostReservation {
+        tenant_id: String,
+        reserved_microcents: i64,
+    },
+    #[error("tenant {tenant_id} has negative {field}: {value}")]
+    NegativeLedgerField {
+        tenant_id: String,
+        field: &'static str,
+        value: i64,
+    },
+    #[error("snapshot failed conservation: {status}")]
+    ConservationViolation { status: ConservationStatus },
+}
+
+fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreError> {
+    if snap.active_reservations > 0 {
+        return Err(RestoreError::ActiveReservations {
+            count: snap.active_reservations,
+        });
+    }
+    for ledger in &snap.tenants {
+        if ledger.reserved_microcents != 0 {
+            return Err(RestoreError::GhostReservation {
+                tenant_id: ledger.tenant_id.clone(),
+                reserved_microcents: ledger.reserved_microcents,
+            });
+        }
+        if ledger.remaining_microcents < 0 {
+            return Err(RestoreError::NegativeLedgerField {
+                tenant_id: ledger.tenant_id.clone(),
+                field: "remaining_microcents",
+                value: ledger.remaining_microcents,
+            });
+        }
+        if ledger.initial_microcents < 0 {
+            return Err(RestoreError::NegativeLedgerField {
+                tenant_id: ledger.tenant_id.clone(),
+                field: "initial_microcents",
+                value: ledger.initial_microcents,
+            });
+        }
+        if ledger.committed_microcents < 0 {
+            return Err(RestoreError::NegativeLedgerField {
+                tenant_id: ledger.tenant_id.clone(),
+                field: "committed_microcents",
+                value: ledger.committed_microcents,
+            });
+        }
+    }
+    match conservation_status_for_snapshot(snap) {
+        ConservationStatus::Balanced => Ok(()),
+        status => Err(RestoreError::ConservationViolation { status }),
+    }
 }
 
 impl BudgetEngine {
@@ -262,17 +323,17 @@ impl BudgetEngine {
         current.saturating_sub(baseline)
     }
 
-    pub(crate) fn mark_certificate_issued(&self) {
-        *self.last_certified_committed_total.lock().unwrap() = self.total_committed_microcents();
+    /// Advance certificate baseline from a frozen snapshot total; returns delta since last cert.
+    pub(crate) fn rotate_certificate_baseline(&self, snapshot_total_committed: i64) -> i64 {
+        let mut baseline = self.last_certified_committed_total.lock().unwrap();
+        let delta = snapshot_total_committed.saturating_sub(*baseline);
+        *baseline = snapshot_total_committed;
+        delta
     }
 
-    /// Rebuild tenant balances from a snapshot. Active reservations must be zero.
+    /// Rebuild tenant balances from a validated snapshot (no active or ghost reservations).
     pub fn restore_from_snapshot(&self, snap: BudgetSnapshot) -> Result<(), RestoreError> {
-        if snap.active_reservations > 0 {
-            return Err(RestoreError::ActiveReservations {
-                count: snap.active_reservations,
-            });
-        }
+        validate_snapshot_for_restore(&snap)?;
         {
             let mut reservations = self.reservations.lock().unwrap();
             reservations.clear();
@@ -305,12 +366,11 @@ impl BudgetEngine {
     /// Use [`top_up_tenant`](Self::top_up_tenant) to add funds later.
     /// `initial_microcents` is fixed at creation for audit binding; top-ups extend it.
     ///
-    /// Panics in debug mode if `budget_microcents` is negative.
+    /// Negative `budget_microcents` is rejected (no-op).
     pub fn ensure_tenant(&self, tenant_id: &str, budget_microcents: i64) {
-        debug_assert!(
-            budget_microcents >= 0,
-            "initial budget must be non-negative"
-        );
+        if budget_microcents < 0 {
+            return;
+        }
         let mut budgets = self.tenant_budgets.lock().unwrap();
         let mut initials = self.initial_microcents.lock().unwrap();
         let mut committed = self.committed_microcents.lock().unwrap();
@@ -423,9 +483,9 @@ impl BudgetEngine {
         }
     }
 
-    /// Verify `remaining + reserved + committed_lifetime == initial` for every tenant.
+    /// Verify conservation on a point-in-time snapshot.
     ///
-    /// Takes a full ledger snapshot — intended for audit/reconciliation, not per-tick hot paths.
+    /// Intended for audit/reconciliation after completed operations — not mid-flight CAS steps.
     #[must_use]
     pub fn verify_conservation(&self) -> ConservationStatus {
         conservation_status_for_snapshot(&self.snapshot())
@@ -905,6 +965,37 @@ mod tests {
         assert_eq!(fresh.remaining_microcents("desk"), Some(910_000));
         assert_eq!(fresh.committed_microcents("desk"), Some(90_000));
         assert_eq!(fresh.verify_conservation(), ConservationStatus::Balanced);
+    }
+
+    #[test]
+    fn ensure_tenant_rejects_negative_budget() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", -1);
+        assert_eq!(engine.tenant_count(), 0);
+    }
+
+    #[test]
+    fn restore_rejects_ghost_reserved() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut snap = engine.snapshot();
+        snap.tenants[0].reserved_microcents = 100_000;
+        assert!(matches!(
+            BudgetEngine::new().restore_from_snapshot(snap),
+            Err(RestoreError::GhostReservation { .. })
+        ));
+    }
+
+    #[test]
+    fn restore_rejects_unbalanced_snapshot() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut snap = engine.snapshot();
+        snap.tenants[0].remaining_microcents = 0;
+        assert!(matches!(
+            BudgetEngine::new().restore_from_snapshot(snap),
+            Err(RestoreError::ConservationViolation { .. })
+        ));
     }
 
     #[test]

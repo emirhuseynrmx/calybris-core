@@ -44,11 +44,13 @@ Formal properties the OSS crate is designed to uphold. Each maps to tests audito
 
 ## I6 — Budget conservation
 
-**Invariant:** At all times per tenant: `remaining + reserved + committed_lifetime == initial`.
+**Invariant:** After each **completed** budget operation and at reconciliation boundaries, per tenant: `remaining + reserved + committed_lifetime == initial`.
 
-**Code:** `src/budget.rs` — `verify_conservation`, `debit_if_available` CAS.
+Mid-operation snapshots are not linearizable — multi-step reserve/commit/release may show transient imbalance between CAS and map updates.
 
-**Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `exposure_limit_blocks_reserve`, `exposure_limit_holds_under_concurrent_reserve`, Loom (`tests/budget_loom.rs`, 6 scenarios).
+**Code:** `src/budget.rs` — `conservation_status_for_snapshot`, `verify_conservation`, `debit_if_available` CAS.
+
+**Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `restore_rejects_ghost_reserved`, `restore_rejects_unbalanced_snapshot`, `ensure_tenant_rejects_negative_budget`, `exposure_limit_blocks_reserve`, `exposure_limit_holds_under_concurrent_reserve`, Loom (`tests/budget_loom.rs`, 6 scenarios).
 
 ## I7 — No unsafe in project code
 
@@ -60,8 +62,8 @@ Formal properties the OSS crate is designed to uphold. Each maps to tests audito
 
 ## I8 — Ledger digest stability
 
-**Invariant:** `ledger_digest` is independent of tenant insertion order; includes `BudgetSnapshot::version`; `prove_conservation` / `certify_ledger` bind digest + status + version to one frozen snapshot.
+**Invariant:** `ledger_digest` is independent of tenant insertion order; includes `BudgetSnapshot::version`; `prove_conservation` / `certify_ledger` bind digest + status + version + `committed_since_last_certificate` to one frozen snapshot.
 
-**Code:** `src/finance.rs` — `conservation_status_for_snapshot`, `certify_snapshot`.
+**Code:** `src/finance.rs` — `conservation_status_for_snapshot`, `certify_snapshot`, `BudgetEngine::rotate_certificate_baseline`.
 
-**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `prove_and_certify_share_single_snapshot_semantics`.
+**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `certify_ledger_binds_committed_delta_to_snapshot`, `prove_and_certify_are_internally_consistent`.

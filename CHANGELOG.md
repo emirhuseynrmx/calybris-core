@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.9] - 2026-06-26
 
 ### Fixed
+- `certify_ledger` binds `committed_since_last_certificate` to frozen snapshot total via `rotate_certificate_baseline`
+- `restore_from_snapshot` rejects ghost reservations, negative ledger fields, and unbalanced snapshots
+- `ensure_tenant` rejects negative budgets in release builds
+- Conservation docs: holds after completed operations, not mid-flight snapshots (I6)
 - `prove_conservation` / `certify_ledger` now bind digest, conservation status, and version to a **single frozen snapshot**
 - Concurrent exposure cap (`set_max_reserved_microcents`) enforced via per-tenant `AtomicI64` reserved totals (CAS)
 

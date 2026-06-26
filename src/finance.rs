@@ -102,13 +102,16 @@ pub fn certify_snapshot(
 }
 
 /// Issue a financial certificate from the current engine state (single snapshot pass).
+///
+/// Digest, conservation status, totals, and `committed_since_last_certificate` all bind to
+/// the same frozen snapshot — baseline rotation uses the snapshot committed total, not a
+/// subsequent engine read.
 pub fn certify_ledger(engine: &BudgetEngine) -> FinancialCertificate {
     let snapshot = engine.snapshot();
     let balanced = conservation_status_for_snapshot(&snapshot) == ConservationStatus::Balanced;
-    let committed_since = engine.committed_since_last_certificate();
-    let cert = certify_snapshot(&snapshot, balanced, committed_since);
-    engine.mark_certificate_issued();
-    cert
+    let (_, total_committed) = snapshot_totals(&snapshot);
+    let committed_since = engine.rotate_certificate_baseline(total_committed);
+    certify_snapshot(&snapshot, balanced, committed_since)
 }
 
 /// Prove conservation and return a structured proof binding the ledger digest.
@@ -216,6 +219,21 @@ mod tests {
         assert_ne!(ledger_digest(&engine.snapshot()), ledger_digest(&snap));
         assert_eq!(cert.ledger_digest_hex, digest_to_hex(&ledger_digest(&snap)));
         assert_eq!(cert.snapshot_version, snap.version);
+    }
+
+    #[test]
+    fn certify_ledger_binds_committed_delta_to_snapshot() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, id) = engine.try_reserve("desk", 100_000);
+        engine.commit(id.unwrap(), 90_000);
+        let cert = certify_ledger(&engine);
+        assert_eq!(cert.total_committed_microcents, 90_000);
+        assert_eq!(cert.committed_since_last_certificate, 90_000);
+        assert_eq!(
+            cert.total_committed_microcents,
+            cert.committed_since_last_certificate
+        );
     }
 
     #[test]

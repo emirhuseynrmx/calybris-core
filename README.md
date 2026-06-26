@@ -117,7 +117,7 @@ cargo add calybris-core --no-default-features
 2. **`verify`** — Policy + input + decision digests, full replay, `DigestDecodeError` on public API.
 3. **`finance`** — Ledger digest, `FinancialCertificate`, `ConservationProof`, `prove_conservation`, `certify_snapshot`.
 4. **`wal`** — Tamper-evident hash chain, `append_audited`, fail-closed `replay_audited_wal`.
-5. **`budget`** — CAS reserve/commit/release. Conservation: `remaining + reserved + committed_lifetime == initial`. Loom + Miri in CI.
+5. **`budget`** — CAS reserve/commit/release. Conservation holds after completed ops: `remaining + reserved + committed_lifetime == initial`. Loom + Miri in CI.
 
 ## Audit Pipeline
 

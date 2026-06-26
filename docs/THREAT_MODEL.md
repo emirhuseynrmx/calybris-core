@@ -11,7 +11,7 @@
 | **Decision correctness** | Wrong prescribe output routes capital or compute incorrectly |
 | **Audit digests** | Bind decisions to policy + input; tampering must be detectable |
 | **WAL chain integrity** | Historical decisions must not be silently rewritten |
-| **Budget conservation** | `remaining + reserved + committed_lifetime == initial` must hold |
+| **Budget conservation** | `remaining + reserved + committed_lifetime == initial` after completed ops and at reconciliation |
 | **HMAC key** (keyed WAL) | Secret that prevents hash recomputation by filesystem attacker |
 
 ## Trust boundaries
