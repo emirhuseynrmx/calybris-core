@@ -20,7 +20,7 @@
 //! - `remaining` — spendable balance right now
 //! - `reserved` — sum of active (uncommitted) holds
 //! - `committed_lifetime` — cumulative spend since tenant creation (monotonic, never decreases)
-//! - `initial` — total budget ever granted (`ensure_tenant` + [`top_up_tenant`](BudgetEngine::top_up_tenant))
+//! - `initial` — total budget ever granted (`ensure_tenant` + [`top_up_tenant`](crate::budget::BudgetEngine::top_up_tenant))
 
 use crate::sync::{Arc, AtomicI64, AtomicU64, Mutex, Ordering};
 use std::collections::HashMap;
@@ -367,7 +367,19 @@ impl BudgetEngine {
     /// Sum of lifetime `committed_microcents` across all tenants.
     #[must_use]
     pub fn total_committed_microcents(&self) -> i64 {
-        self.committed_microcents.lock().unwrap().values().sum()
+        self.try_total_committed_microcents().unwrap_or(i64::MAX)
+    }
+
+    /// Checked sum of lifetime `committed_microcents` across all tenants.
+    pub fn try_total_committed_microcents(&self) -> Result<i64, ConservationStatus> {
+        let committed = self.committed_microcents.lock().unwrap();
+        let mut total: i128 = 0;
+        for amount in committed.values() {
+            total = total
+                .checked_add(i128::from(*amount))
+                .ok_or(ConservationStatus::AggregateOverflow)?;
+        }
+        i64::try_from(total).map_err(|_| ConservationStatus::AggregateOverflow)
     }
 
     /// Committed total since the last financial certificate was issued.
@@ -1063,6 +1075,23 @@ mod tests {
         assert_eq!(engine.rotate_certificate_baseline(150), 150);
         assert_eq!(engine.rotate_certificate_baseline(100), 0);
         assert_eq!(engine.rotate_certificate_baseline(200), 50);
+    }
+
+    #[test]
+    fn total_committed_microcents_reports_aggregate_overflow() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk-a", 1);
+        engine.ensure_tenant("desk-b", 1);
+        {
+            let mut committed = engine.committed_microcents.lock().unwrap();
+            committed.insert(Arc::from("desk-a"), i64::MAX);
+            committed.insert(Arc::from("desk-b"), 1);
+        }
+        assert_eq!(
+            engine.try_total_committed_microcents(),
+            Err(ConservationStatus::AggregateOverflow)
+        );
+        assert_eq!(engine.total_committed_microcents(), i64::MAX);
     }
 
     #[test]

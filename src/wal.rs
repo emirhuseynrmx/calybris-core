@@ -194,31 +194,37 @@ impl<T: Serialize> WalWriter<T> {
 
     /// Append a decision to the WAL. Returns the entry with proof.
     ///
-    /// Writes to the OS buffer but does **not** fsync. Call [`sync`] or
-    /// [`flush_and_sync`] explicitly when you need crash durability.
+    /// Writes to the OS buffer but does **not** fsync. Call [`Self::sync`] or
+    /// [`Self::flush_and_sync`] explicitly when you need crash durability.
     /// This keeps the hot path fast (~1µs per append) while letting
     /// callers batch durability when appropriate.
     #[must_use = "check the returned entry for the hash chain link"]
     pub fn append(&mut self, data: T) -> Result<WalEntry<T>, WalError> {
-        self.sequence += 1;
+        let next_sequence = self.sequence.checked_add(1).ok_or_else(|| {
+            WalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WAL sequence overflow",
+            ))
+        })?;
         // Serialize data once — reuse for both hash computation and file write.
         let data_json = serde_json::to_string(&data)?;
         let entry_hash = compute_hash(&self.last_hash, &data_json, self.hmac_key.as_deref())?;
+        let previous_hash = self.last_hash.clone();
 
         // Build the line manually to avoid serializing data a second time.
         // Format: {"sequence":N,"previous_hash":"...","entry_hash":"...","data":...}
         writeln!(
             self.file,
             "{{\"sequence\":{},\"previous_hash\":\"{}\",\"entry_hash\":\"{}\",\"data\":{}}}",
-            self.sequence, self.last_hash, entry_hash, data_json
+            next_sequence, previous_hash, entry_hash, data_json
         )?;
 
-        let prev = self.last_hash.clone();
+        self.sequence = next_sequence;
         self.last_hash = entry_hash.clone();
 
         Ok(WalEntry {
             sequence: self.sequence,
-            previous_hash: prev,
+            previous_hash,
             entry_hash,
             data,
         })
@@ -468,6 +474,30 @@ mod tests {
         assert_eq!(entries[0].data.model, "gpt-4o");
         assert_eq!(entries[1].data.model, "mini");
         assert_eq!(entries[1].previous_hash, entries[0].entry_hash);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    struct FailingSerialize;
+
+    impl Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("intentional serialize failure"))
+        }
+    }
+
+    #[test]
+    fn append_serialize_error_does_not_advance_writer_state() {
+        let path = temp_path("append_serialize_error");
+        let _ = std::fs::remove_file(&path);
+
+        let mut wal = WalWriter::<FailingSerialize>::open(&path).unwrap();
+        assert!(wal.append(FailingSerialize).is_err());
+        assert_eq!(wal.sequence(), 0);
+        assert_eq!(wal.last_hash(), "genesis");
 
         let _ = std::fs::remove_file(&path);
     }

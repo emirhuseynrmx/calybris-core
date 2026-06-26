@@ -1,7 +1,7 @@
 //! Allocation-free prescriptive decision kernel.
 //!
 //! This module deliberately contains no HTTP, JSON, UUID, WAL, clock, or floating-point work.
-//! Snapshots may allocate when they are built; [`PolicySnapshot::prescribe`] does not allocate.
+//! Snapshots may allocate when they are built; [`PolicySnapshot::prescribe`](crate::kernel::PolicySnapshot::prescribe) does not allocate.
 //!
 //! # Performance
 //!

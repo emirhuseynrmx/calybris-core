@@ -1,11 +1,11 @@
 //! Fixed-point financial proofs for pre-trade budget and exposure guards.
 //!
 //! Domain-neutral: no exchange adapter, no alpha, no order book. Provides
-//! ledger digest, conservation proof, and [`FinancialCertificate`] binding.
+//! ledger digest, conservation proof, and [`FinancialCertificate`](crate::finance::FinancialCertificate) binding.
 //!
 //! All amounts are `i64` microcents (1 USD cent = 1_000_000 microcents). No `f64`.
 //!
-//! Typical pre-trade path: [`BudgetEngine::try_reserve`] → fill → [`BudgetEngine::commit`].
+//! Typical pre-trade path: [`BudgetEngine::try_reserve`](crate::budget::BudgetEngine::try_reserve) → fill → [`BudgetEngine::commit`](crate::budget::BudgetEngine::commit).
 //! Hot-path reserve/commit uses CAS on `AtomicI64` — no mutex during debit.
 
 use crate::budget::{
@@ -25,7 +25,10 @@ pub fn ledger_digest(snapshot: &BudgetSnapshot) -> [u8; 32] {
     hasher.update(snapshot.version.to_le_bytes());
     hasher.update((snapshot.tenants.len() as u64).to_le_bytes());
     hasher.update((snapshot.active_reservations as u64).to_le_bytes());
-    for ledger in &snapshot.tenants {
+
+    let mut tenants: Vec<&TenantLedger> = snapshot.tenants.iter().collect();
+    tenants.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
+    for ledger in tenants {
         update_ledger(&mut hasher, ledger);
     }
     hasher.finalize().into()
@@ -69,7 +72,7 @@ pub struct ConservationProof {
     pub active_reservations: usize,
     pub total_initial_microcents: i64,
     pub total_committed_microcents: i64,
-    /// `false` when [`snapshot_totals`] cannot represent the sum in `i64` (fields are zero).
+    /// `false` when `snapshot_totals` cannot represent the sum in `i64` (fields are zero).
     pub aggregate_totals_representable: bool,
 }
 
@@ -222,6 +225,36 @@ mod tests {
             ledger_digest(&engine_a.snapshot()),
             ledger_digest(&engine_b.snapshot())
         );
+    }
+
+    #[test]
+    fn ledger_digest_raw_snapshot_tenant_order_independent() {
+        let alpha = TenantLedger {
+            tenant_id: "alpha".into(),
+            initial_microcents: 100_000,
+            remaining_microcents: 90_000,
+            reserved_microcents: 0,
+            committed_microcents: 10_000,
+        };
+        let zulu = TenantLedger {
+            tenant_id: "zulu".into(),
+            initial_microcents: 200_000,
+            remaining_microcents: 180_000,
+            reserved_microcents: 0,
+            committed_microcents: 20_000,
+        };
+        let snapshot_a = BudgetSnapshot {
+            version: 7,
+            tenants: vec![alpha.clone(), zulu.clone()],
+            active_reservations: 0,
+        };
+        let snapshot_b = BudgetSnapshot {
+            version: 7,
+            tenants: vec![zulu, alpha],
+            active_reservations: 0,
+        };
+
+        assert_eq!(ledger_digest(&snapshot_a), ledger_digest(&snapshot_b));
     }
 
     #[test]

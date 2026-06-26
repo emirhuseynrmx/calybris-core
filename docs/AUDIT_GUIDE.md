@@ -56,7 +56,7 @@ See [MIRI.md](MIRI.md) for CI-equivalent `--skip` filters and **why** those test
 | Policy validation | `src/kernel.rs` | 4 unit tests |
 | WAL tamper / chain | `src/wal.rs` | 14+ unit, 2 proptests |
 | Budget concurrency + proptest | `src/budget.rs` | 20+ unit, 2 proptests |
-| Budget Loom model tests | `tests/budget_loom.rs` | 6 Loom tests (`RUSTFLAGS='--cfg loom'`) |
+| Budget Loom model tests | `tests/budget_loom.rs` | 7 Loom tests (`RUSTFLAGS='--cfg loom'`) |
 | Verify / decode hex | `src/verify.rs` | 10+ unit, 1 proptest |
 | Digest sensitivity | `src/digest.rs` | 3+ unit, 1 proptest |
 | Finance conservation | `src/finance.rs` | 5 unit |
@@ -89,7 +89,7 @@ This release is structured for third-party review:
 
 - Documented invariants I1–I8 with test mapping
 - Adversarial WAL/budget/verify tests + 10k proptest CI job
-- Loom budget concurrency (6 scenarios)
+- Loom budget concurrency (7 scenarios)
 - Miri UB pass on lib + E2E audit pipeline
 - `THREAT_MODEL.md`, `SECURITY_INVARIANTS.md`, supply-chain (`cargo audit`, `cargo deny`)
 

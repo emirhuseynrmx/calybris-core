@@ -50,7 +50,7 @@ Mid-operation snapshots are not linearizable — multi-step reserve/commit/relea
 
 **Code:** `src/budget.rs` — `conservation_status_for_snapshot`, `verify_conservation`, `debit_if_available` CAS.
 
-**Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `restore_rejects_ghost_reserved`, `restore_rejects_unbalanced_snapshot`, `ensure_tenant_rejects_negative_budget`, `exposure_limit_blocks_reserve`, `exposure_limit_holds_under_concurrent_reserve`, Loom (`tests/budget_loom.rs`, 6 scenarios).
+**Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `restore_rejects_ghost_reserved`, `restore_rejects_unbalanced_snapshot`, `ensure_tenant_rejects_negative_budget`, `exposure_limit_blocks_reserve`, `exposure_limit_holds_under_concurrent_reserve`, Loom (`tests/budget_loom.rs`, 7 scenarios).
 
 ## I7 — No unsafe in project code
 
