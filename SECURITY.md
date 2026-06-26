@@ -68,7 +68,7 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 ## Dependency Policy
 
 - `Cargo.lock` committed; CI uses `--locked`
-- Weekly `cargo audit` + `cargo deny` (see `.github/workflows/security.yml`)
+- Weekly `cargo audit` + `cargo deny` via `deny.toml` (see `.github/workflows/security.yml`)
 - Dependabot for Cargo and GitHub Actions
 
 ## Full Engine Security

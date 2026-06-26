@@ -34,7 +34,10 @@ jobs:
       - name: Cargo audit
         run: cargo audit
 
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: Cargo deny
+        run: cargo deny check --config deny.toml
 
   adversarial:
     name: Extended adversarial tests

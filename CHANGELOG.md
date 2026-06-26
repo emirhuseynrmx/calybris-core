@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.5] - 2026-06-26
 
+### Fixed
+- `cargo-deny` CI: use `deny.toml` (not `cargo-deny.toml`) with SPDX allow list for MIT/Apache-2.0/Unlicense deps
+
 ### Added
 - Adversarial tests: WAL chain attacks (duplicate sequence, hash mismatch, truncation, JSON reorder), budget conservation proptest, `PolicyError` coverage, `decode_hex32` fuzz, digest sensitivity
 - Integration test `tests/audit_pipeline.rs` — end-to-end prescribe → WAL → replay → conservation
