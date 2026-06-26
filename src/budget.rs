@@ -53,6 +53,7 @@ pub enum TopUpResult {
     },
     MissingTenant,
     InvalidAmount,
+    Overflow,
 }
 
 /// Budget settlement result.
@@ -72,6 +73,9 @@ pub enum BudgetSettlement {
     InvalidAmount,
     MissingReservation,
     MissingTenant,
+    Overflow {
+        remaining_microcents: i64,
+    },
 }
 
 #[derive(Debug)]
@@ -98,6 +102,19 @@ fn debit_if_available(budget: &AtomicI64, amount: i64) -> Result<i64, i64> {
             Ordering::Acquire,
         ) {
             Ok(_) => return Ok(current - amount),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+/// Atomically credit `amount` to `budget` if `current + amount` does not overflow.
+#[inline]
+fn credit_if_no_overflow(budget: &AtomicI64, amount: i64) -> Result<i64, ()> {
+    let mut current = budget.load(Ordering::Acquire);
+    loop {
+        let new = current.checked_add(amount).ok_or(())?;
+        match budget.compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(new),
             Err(actual) => current = actual,
         }
     }
@@ -234,6 +251,8 @@ pub enum RestoreError {
     },
     #[error("snapshot failed conservation: {status}")]
     ConservationViolation { status: ConservationStatus },
+    #[error("duplicate tenant_id in snapshot: {tenant_id}")]
+    DuplicateTenant { tenant_id: String },
 }
 
 fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreError> {
@@ -242,7 +261,13 @@ fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreErr
             count: snap.active_reservations,
         });
     }
+    let mut seen = std::collections::HashSet::new();
     for ledger in &snap.tenants {
+        if !seen.insert(ledger.tenant_id.as_str()) {
+            return Err(RestoreError::DuplicateTenant {
+                tenant_id: ledger.tenant_id.clone(),
+            });
+        }
         if ledger.reserved_microcents != 0 {
             return Err(RestoreError::GhostReservation {
                 tenant_id: ledger.tenant_id.clone(),
@@ -326,7 +351,10 @@ impl BudgetEngine {
     /// Advance certificate baseline from a frozen snapshot total; returns delta since last cert.
     pub(crate) fn rotate_certificate_baseline(&self, snapshot_total_committed: i64) -> i64 {
         let mut baseline = self.last_certified_committed_total.lock().unwrap();
-        let delta = snapshot_total_committed.saturating_sub(*baseline);
+        if snapshot_total_committed <= *baseline {
+            return 0;
+        }
+        let delta = snapshot_total_committed - *baseline;
         *baseline = snapshot_total_committed;
         delta
     }
@@ -407,17 +435,24 @@ impl BudgetEngine {
                 None => return TopUpResult::MissingTenant,
             }
         };
-        let remaining = budget.fetch_add(amount_microcents, Ordering::AcqRel) + amount_microcents;
         let new_initial = {
-            let mut initials = self.initial_microcents.lock().unwrap();
-            match initials.get_mut(&key) {
-                Some(entry) => {
-                    *entry += amount_microcents;
-                    *entry
-                }
+            let initials = self.initial_microcents.lock().unwrap();
+            match initials.get(&key) {
+                Some(current) => match current.checked_add(amount_microcents) {
+                    Some(n) => n,
+                    None => return TopUpResult::Overflow,
+                },
                 None => return TopUpResult::MissingTenant,
             }
         };
+        let remaining = match credit_if_no_overflow(&budget, amount_microcents) {
+            Ok(r) => r,
+            Err(()) => return TopUpResult::Overflow,
+        };
+        {
+            let mut initials = self.initial_microcents.lock().unwrap();
+            *initials.get_mut(&key).expect("tenant exists") = new_initial;
+        }
         TopUpResult::ToppedUp {
             added_microcents: amount_microcents,
             new_initial_microcents: new_initial,
@@ -616,6 +651,18 @@ impl BudgetEngine {
         };
         drop(reservations);
 
+        {
+            let committed = self.committed_microcents.lock().unwrap();
+            let current = committed.get(&reservation.tenant_id).copied().unwrap_or(0);
+            if current.checked_add(actual_microcents).is_none() {
+                let mut reservations = self.reservations.lock().unwrap();
+                reservations.insert(reservation_id, reservation);
+                return BudgetSettlement::Overflow {
+                    remaining_microcents: budget.load(Ordering::Acquire),
+                };
+            }
+        }
+
         let delta: i64 = actual_microcents - reservation.reserved_microcents;
         match delta.cmp(&0) {
             std::cmp::Ordering::Greater => {
@@ -646,9 +693,12 @@ impl BudgetEngine {
 
         {
             let mut committed = self.committed_microcents.lock().unwrap();
-            *committed
+            let entry = committed
                 .entry(Arc::clone(&reservation.tenant_id))
-                .or_insert(0) += actual_microcents;
+                .or_insert(0);
+            *entry = entry
+                .checked_add(actual_microcents)
+                .expect("committed overflow checked before debit");
         }
 
         let remaining = budget.load(Ordering::Acquire);
@@ -976,6 +1026,52 @@ mod tests {
         let engine = BudgetEngine::new();
         engine.ensure_tenant("desk", -1);
         assert_eq!(engine.tenant_count(), 0);
+    }
+
+    #[test]
+    fn certificate_baseline_is_monotonic() {
+        let engine = BudgetEngine::new();
+        assert_eq!(engine.rotate_certificate_baseline(150), 150);
+        assert_eq!(engine.rotate_certificate_baseline(100), 0);
+        assert_eq!(engine.rotate_certificate_baseline(200), 50);
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_tenant() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut snap = engine.snapshot();
+        snap.tenants.push(snap.tenants[0].clone());
+        assert!(matches!(
+            BudgetEngine::new().restore_from_snapshot(snap),
+            Err(RestoreError::DuplicateTenant { .. })
+        ));
+    }
+
+    #[test]
+    fn top_up_rejects_overflow() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", i64::MAX - 10);
+        assert!(matches!(
+            engine.top_up_tenant("desk", 20),
+            TopUpResult::Overflow
+        ));
+    }
+
+    #[test]
+    fn commit_rejects_lifetime_overflow() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", i64::MAX);
+        let (_, id) = engine.try_reserve("desk", 1);
+        assert!(matches!(
+            engine.commit(id.unwrap(), i64::MAX - 1),
+            BudgetSettlement::Committed { .. }
+        ));
+        let (_, id2) = engine.try_reserve("desk", 1);
+        assert!(matches!(
+            engine.commit(id2.unwrap(), 2),
+            BudgetSettlement::Overflow { .. }
+        ));
     }
 
     #[test]

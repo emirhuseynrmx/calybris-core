@@ -487,6 +487,94 @@ impl PolicySnapshot {
         self.prescribe_inner(input).0
     }
 
+    /// Evaluate utility for a **specific** catalog model if it passes all constraint gates.
+    ///
+    /// Unlike [`prescribe`](Self::prescribe), this does not rank candidates — it only
+    /// answers whether `model_id` is eligible and what its utility would be.
+    #[must_use]
+    pub fn utility_for_model(&self, input: KernelInput, model_id: u32) -> Option<i64> {
+        if input.risk_bps >= self.hard_risk_limit_bps {
+            return None;
+        }
+        if input.confidence_bps < self.minimum_confidence_bps {
+            return None;
+        }
+        let model = self.models.iter().find(|m| m.model_id == model_id)?;
+
+        if model.enabled == 0 {
+            return None;
+        }
+        if model.quality_bps < input.minimum_quality_bps {
+            return None;
+        }
+        if input.max_p95_latency_ms > 0 && model.p95_latency_ms > input.max_p95_latency_ms {
+            return None;
+        }
+        if model.capabilities & input.required_capabilities != input.required_capabilities {
+            return None;
+        }
+        if model.provider_id > MAX_PROVIDER_ID {
+            return None;
+        }
+        if input.allowed_provider_mask != ALL_PROVIDERS
+            && input.allowed_provider_mask & (1_u64 << model.provider_id) == 0
+        {
+            return None;
+        }
+        if input.required_region_mask != 0 && model.region_mask & input.required_region_mask == 0 {
+            return None;
+        }
+        if input.risk_bps > model.risk_ceiling_bps {
+            return None;
+        }
+
+        let all_costs_fit = self.all_costs_fit_u64(input.input_tokens, input.output_tokens);
+        let cost = if all_costs_fit {
+            model_cost_fast(model, input.input_tokens, input.output_tokens)
+        } else {
+            model_cost_reference(model, input.input_tokens, input.output_tokens)
+        };
+        if cost > input.budget_limit_microunits {
+            return None;
+        }
+
+        let value = input.business_value_microunits.max(0) as u64;
+        let confidence_bps = u64::from(input.confidence_bps);
+        let quality_prefix = value.checked_mul(confidence_bps).filter(|prefix| {
+            prefix
+                .checked_mul(u64::from(self.max_quality_bps))
+                .is_some()
+        });
+        let risk_penalty = scaled_term_exact(
+            value,
+            u64::from(input.risk_bps),
+            u64::from(self.risk_penalty_multiplier_bps),
+        );
+        let all_latencies_fit = u64::from(self.max_p95_latency_ms)
+            .checked_mul(self.latency_penalty_microunits_per_ms)
+            .is_some();
+        let quality_adjusted = quality_prefix.map_or_else(
+            || scaled_term_reference(value, confidence_bps, u64::from(model.quality_bps)),
+            |prefix| {
+                i128::from(prefix.wrapping_mul(u64::from(model.quality_bps)) / SCALED_BASIS_POINTS)
+            },
+        );
+        let latency_penalty = if all_latencies_fit {
+            i128::from(
+                u64::from(model.p95_latency_ms)
+                    .wrapping_mul(self.latency_penalty_microunits_per_ms),
+            )
+        } else {
+            i128::from(model.p95_latency_ms) * i128::from(self.latency_penalty_microunits_per_ms)
+        };
+        let utility =
+            clamp_i128_to_i64(quality_adjusted - risk_penalty - i128::from(cost) - latency_penalty);
+        if utility <= 0 {
+            return None;
+        }
+        Some(utility)
+    }
+
     fn prescribe_inner(&self, input: KernelInput) -> (KernelDecision, RejectionHistogram) {
         if input.risk_bps >= self.hard_risk_limit_bps {
             return self.reject(input, KernelReason::RiskHardLimit, 0, 0);
@@ -1078,6 +1166,24 @@ mod tests {
             PolicySnapshot::try_new(1, 1, 9_600, 5_500, 3_500, 0, vec![bad_quality]),
             Err(PolicyError::OutOfRangeBps { .. })
         ));
+    }
+
+    #[test]
+    fn utility_for_model_matches_eligible_catalog_entry() {
+        let snap = snapshot();
+        let input = input();
+        let utility = snap.utility_for_model(input, 20);
+        assert!(utility.is_some());
+        assert_eq!(
+            utility,
+            Some(snap.prescribe(input).expected_utility_microunits)
+        );
+    }
+
+    #[test]
+    fn utility_for_model_none_for_missing_id() {
+        let snap = snapshot();
+        assert!(snap.utility_for_model(input(), 999).is_none());
     }
 
     #[test]

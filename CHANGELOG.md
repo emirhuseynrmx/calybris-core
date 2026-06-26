@@ -8,9 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.9] - 2026-06-26
 
 ### Changed
+- `counterfactual_utility` delegates to `PolicySnapshot::utility_for_model` (true per-model evaluation)
 - `docs/MIRI.md`: "Why some tests are skipped" — explicit Miri vs Loom vs proptest division
 
 ### Fixed
+- `rotate_certificate_baseline` monotonic — stale concurrent certs cannot regress baseline
+- `restore_from_snapshot` rejects duplicate `tenant_id` in snapshot
+- `top_up_tenant` / `commit` return `Overflow` on `i64` saturation (checked arithmetic)
 - `THREAT_MODEL` / `SECURITY.md`: Loom/Miri residual risk wording aligned with CI reality
 - `restore_from_snapshot` exclusive-recovery contract + rejects ghost reservations, negatives, unbalanced snapshots
 - `certify_ledger` binds `committed_since_last_certificate` to frozen snapshot total via `rotate_certificate_baseline`

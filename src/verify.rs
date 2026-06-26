@@ -3,7 +3,7 @@
 //! Level 2 proof: policy digest + input digest + full decision digest + replay.
 
 use crate::digest::{decision_digest, digest_to_hex, input_digest, policy_digest};
-use crate::kernel::{KernelDecision, KernelInput, KernelReason, PolicySnapshot};
+use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 
 /// Result of verifying a decision against its inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,34 +176,18 @@ pub fn certify_decision(
     }
 }
 
-/// Counterfactual utility if a specific model had been forced.
+/// Utility for a specific catalog model if it passes all constraint gates.
 ///
-/// Returns `None` if the model is absent, disabled, or fails constraints.
+/// Delegates to [`PolicySnapshot::utility_for_model`] — does **not** infer utility from
+/// [`prescribe`](PolicySnapshot::prescribe) winner/runner-up fields.
+///
+/// Returns `None` if the model is absent, disabled, or fails any gate.
 pub fn counterfactual_utility(
     snapshot: &PolicySnapshot,
     input: KernelInput,
     alt_model_id: u32,
 ) -> Option<i64> {
-    let mut forced = input;
-    forced.requested_model_id = alt_model_id;
-    let decision = snapshot.prescribe(forced);
-    if decision.selected_model_id == alt_model_id
-        && decision.reason != KernelReason::NoEnabledModel
-        && decision.reason != KernelReason::CapabilityConstraint
-        && decision.reason != KernelReason::ProviderConstraint
-        && decision.reason != KernelReason::RegionConstraint
-        && decision.reason != KernelReason::QualityConstraint
-        && decision.reason != KernelReason::LatencyConstraint
-        && decision.reason != KernelReason::BudgetConstraint
-        && decision.reason != KernelReason::RiskCeilingConstraint
-        && decision.reason != KernelReason::NonPositiveUtility
-    {
-        Some(decision.expected_utility_microunits)
-    } else if decision.counterfactual_model_id == alt_model_id {
-        Some(decision.counterfactual_utility_microunits)
-    } else {
-        None
-    }
+    snapshot.utility_for_model(input, alt_model_id)
 }
 
 fn decode_hex32(hex: &str) -> Result<[u8; 32], DigestDecodeError> {

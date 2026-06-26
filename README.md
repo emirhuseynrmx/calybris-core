@@ -127,31 +127,29 @@ prescribe → audit_bundle → append_audited → replay_audited_wal (fail-close
      calypol1 / calyinp1 / calydcn1 digests
 ```
 
-## Financial Layer
+## Financial layer & policy
 
 Fixed-point `i64` microcents (1 cent = 1,000,000). No `f64`.
 
 - `committed_microcents` — **lifetime cumulative spend** (monotonic; never decreases)
 - `reserved_microcents` — active holds awaiting commit/release
 - `top_up_tenant` — add funds without resetting lifetime spend
-- `restore_from_snapshot` — crash recovery from frozen `BudgetSnapshot`
+- `restore_from_snapshot` — exclusive-recovery restore from frozen `BudgetSnapshot`
 - `verify_conservation` — audit/reconciliation path (full snapshot)
-- Loom model tests (`budget_loom`) — CAS concurrency verification under `RUSTFLAGS='--cfg loom'`
+- `PolicySnapshot::utility_for_model` — per-model utility (not prescribe winner/runner-up)
 
 ```rust
 budget.ensure_tenant("desk", 100_000_000);
 budget.top_up_tenant("desk", 50_000_000);
-let proof = prove_conservation(&budget)?; // one frozen snapshot
-let cert = certify_ledger(&budget);     // separate snapshot call — compare conservation, not cross-call version
+let proof = prove_conservation(&budget)?;
+let cert = certify_ledger(&budget);
 assert!(cert.conservation_balanced);
 ```
 
-## Policy API
-
-| API | Use |
-|-----|-----|
+| Policy API | Use |
+|------------|-----|
 | `PolicySnapshot::try_new` | **Production** — validates catalog + BPS (`MAX_BPS`, etc.) |
-| `PolicySnapshot::new_unchecked` | Tests / fuzz only — invalid policy possible; never serve without explicit `validate()` |
+| `PolicySnapshot::new_unchecked` | Tests / fuzz only — never serve without explicit `validate()` |
 | `PolicySnapshot::new` | Deprecated alias for `new_unchecked` |
 
 ## Examples

@@ -66,4 +66,4 @@ Mid-operation snapshots are not linearizable — multi-step reserve/commit/relea
 
 **Code:** `src/finance.rs` — `conservation_status_for_snapshot`, `certify_snapshot`, `BudgetEngine::rotate_certificate_baseline`.
 
-**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `certify_ledger_binds_committed_delta_to_snapshot`, `prove_and_certify_are_internally_consistent`.
+**Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `certify_ledger_binds_committed_delta_to_snapshot`, `certificate_baseline_is_monotonic`, `prove_and_certify_are_internally_consistent`.
