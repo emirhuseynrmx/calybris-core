@@ -228,6 +228,8 @@ pub enum ConservationStatus {
         tenant_id: String,
         delta_microcents: i64,
     },
+    /// Sum of per-tenant ledger totals exceeds `i64::MAX` — aggregate certificate fields cannot be represented.
+    AggregateOverflow,
 }
 
 impl std::fmt::Display for ConservationStatus {
@@ -240,6 +242,10 @@ impl std::fmt::Display for ConservationStatus {
             } => write!(
                 f,
                 "conservation violated for tenant {tenant_id}: delta={delta_microcents} microcents"
+            ),
+            Self::AggregateOverflow => write!(
+                f,
+                "aggregate ledger totals exceed i64::MAX — certificate totals cannot be represented"
             ),
         }
     }
@@ -443,7 +449,9 @@ impl BudgetEngine {
         if amount_microcents <= 0 {
             return TopUpResult::InvalidAmount;
         }
+
         let key: Arc<str> = Arc::from(tenant_id);
+
         let budget = {
             let budgets = self.tenant_budgets.lock().unwrap();
             match budgets.get(&key) {
@@ -451,24 +459,24 @@ impl BudgetEngine {
                 None => return TopUpResult::MissingTenant,
             }
         };
-        let new_initial = {
-            let initials = self.initial_microcents.lock().unwrap();
-            match initials.get(&key) {
-                Some(current) => match current.checked_add(amount_microcents) {
-                    Some(n) => n,
-                    None => return TopUpResult::Overflow,
-                },
-                None => return TopUpResult::MissingTenant,
-            }
+
+        let mut initials = self.initial_microcents.lock().unwrap();
+
+        let Some(current_initial) = initials.get(&key).copied() else {
+            return TopUpResult::MissingTenant;
         };
+
+        let Some(new_initial) = current_initial.checked_add(amount_microcents) else {
+            return TopUpResult::Overflow;
+        };
+
         let remaining = match credit_if_no_overflow(&budget, amount_microcents) {
             Ok(r) => r,
             Err(()) => return TopUpResult::Overflow,
         };
-        {
-            let mut initials = self.initial_microcents.lock().unwrap();
-            *initials.get_mut(&key).expect("tenant exists") = new_initial;
-        }
+
+        *initials.get_mut(&key).expect("tenant exists") = new_initial;
+
         TopUpResult::ToppedUp {
             added_microcents: amount_microcents,
             new_initial_microcents: new_initial,

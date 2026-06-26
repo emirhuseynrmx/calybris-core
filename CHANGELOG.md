@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10] - 2026-06-26
+
+### Fixed
+- `top_up_tenant` holds `initial_microcents` lock through read → credit → write (fixes concurrent lost-update breaking I6)
+- `snapshot_totals` uses `i128` checked sums instead of `saturating_add` — overflow surfaces as `ConservationStatus::AggregateOverflow` / `aggregate_totals_representable: false` on certificates
+
+### Added
+- Loom test `concurrent_two_topups_preserve_conservation_loom`
+- `ConservationProof::aggregate_totals_representable`, `FinancialCertificate::aggregate_totals_representable`
+
 ## [0.3.9] - 2026-06-26
 
 ### Changed

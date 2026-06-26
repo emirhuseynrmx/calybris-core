@@ -127,6 +127,32 @@ mod loom_tests {
     }
 
     #[test]
+    fn concurrent_two_topups_preserve_conservation_loom() {
+        loom::model(|| {
+            let engine = Arc::new(BudgetEngine::new());
+            engine.ensure_tenant("t1", 100_000);
+
+            let a = Arc::clone(&engine);
+            let b = Arc::clone(&engine);
+
+            let t1 = thread::spawn(move || {
+                let _ = a.top_up_tenant("t1", 50_000);
+            });
+
+            let t2 = thread::spawn(move || {
+                let _ = b.top_up_tenant("t1", 50_000);
+            });
+
+            t1.join().unwrap();
+            t2.join().unwrap();
+
+            assert_eq!(engine.initial_microcents("t1"), Some(200_000));
+            assert_eq!(engine.remaining_microcents("t1"), Some(200_000));
+            assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+        });
+    }
+
+    #[test]
     fn snapshot_restore_after_mutation_loom() {
         loom::model(|| {
             let engine = Arc::new(BudgetEngine::new());
