@@ -131,20 +131,21 @@ cargo add calybris-core --no-default-features
 1. **`kernel`** — Integer-only decision kernel (~115ns/decision). `prescribe_with_trace` exposes per-constraint rejection counts.
 2. **`verify`** — Policy + input + decision digests, full replay, `DigestDecodeError` on public API.
 3. **`finance`** — Ledger digest, `FinancialCertificate`, `ConservationProof`, `prove_conservation`, `certify_snapshot`.
-4. **`wal`** — Tamper-evident hash chain, `append_audited`, fail-closed `replay_audited_wal`.
+4. **`wal`** — Tamper-evident hash chain, `append_verified_audited` (fail-closed), `replay_audited_wal`.
 5. **`budget`** — CAS reserve/commit/release. Conservation holds after completed ops: `remaining + reserved + committed_lifetime == initial`. Loom + Miri in CI.
-6. **`config`** — Runtime `EngineConfig` with builder pattern and validation.
-7. **`builder`** — `InputBuilder`, `ModelBuilder`, `PolicyBuilder` — hard to misuse, safe defaults.
-8. **`persistence`** — Atomic snapshot save/load, `checkpoint`, `restore`, crash recovery planning.
-9. **`async_wal`** *(feature `async`)* — Tokio-based non-blocking WAL with HMAC, chain validation, configurable sync.
-10. **`instrument`** *(feature `observability`)* — Structured `tracing` spans for prescribe, verify, budget, WAL.
+6. **`proof`** — `ProofEnvelope`: single struct binding policy + input + decision digests + WAL position + budget proof.
+7. **`config`** — Runtime `EngineConfig` with builder pattern, validation, and budget integration (`ensure_tenant`).
+8. **`builder`** — `InputBuilder`, `ModelBuilder`, `PolicyBuilder` with `BuildError` (config + policy + catalog size enforcement).
+9. **`persistence`** — fsync-backed snapshot save/load, `checkpoint_with_wal`, `recovery_plan` with WAL high-watermark.
+10. **`async_wal`** *(feature `async`)* — Tokio-based non-blocking WAL with HMAC, chain validation, configurable sync.
+11. **`instrument`** *(feature `observability`)* — Structured `tracing` spans for prescribe, verify, budget, WAL.
 
 ## Audit Pipeline
 
 ```
-prescribe → audit_bundle → append_audited → replay_audited_wal (fail-closed)
-                ↓
-     calypol1 / calyinp1 / calydcn1 digests
+prescribe → verify_decision → append_verified_audited → replay_audited_wal (fail-closed)
+                ↓                        ↓
+     calypol1 / calyinp1 / calydcn1    ProofEnvelope (optional)
 ```
 
 ## Financial layer & policy
@@ -217,14 +218,31 @@ let decision = snapshot.prescribe(input);
 ## Persistence & Recovery
 
 ```rust
-use calybris_core::persistence::{checkpoint, restore};
+use calybris_core::persistence::{checkpoint_with_wal, restore, recovery_plan};
 
-// Save engine state atomically
-let snap = checkpoint(&budget, Path::new("budget.json"))?;
+// Checkpoint budget state alongside WAL position (fsync-backed)
+let snap = checkpoint_with_wal(&budget, Path::new("budget.json"), wal.sequence())?;
 
-// After crash: restore from last checkpoint
+// After crash: figure out what needs replay
+let plan = recovery_plan(Path::new("budget.json"), Path::new("wal.jsonl"))?;
+println!("{} WAL entries to replay", plan.entries_to_replay);
+
+// Restore from last checkpoint
 let fresh = BudgetEngine::new();
 restore(&fresh, Path::new("budget.json"))?;
+```
+
+## Proof Envelope
+
+```rust
+use calybris_core::proof::ProofEnvelopeBuilder;
+
+let envelope = ProofEnvelopeBuilder::new(&snapshot, input, &decision)
+    .wal(wal_entry.sequence, wal_entry.entry_hash)
+    .budget(budget_snap.version, ledger_digest_hex)
+    .build();
+
+assert!(envelope.is_complete()); // replay + WAL + budget all present
 ```
 
 ## Examples
@@ -251,7 +269,7 @@ cargo +nightly miri test --lib --all-features   # see docs/MIRI.md for CI filter
 cargo doc --no-deps
 ```
 
-**136 tests passing.** Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri runs on **nightly** in CI (UB detection); 7 Loom exhaustive tests cover budget concurrency interleavings. **91.6% code coverage** (llvm-cov).
+**145 tests passing.** Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri runs on **nightly** in CI (UB detection); 7 Loom exhaustive tests cover budget concurrency interleavings. Feature matrix CI: `default`, `--no-default-features`, `--features async`, `--features full`.
 
 ## Integration contract
 
@@ -261,7 +279,7 @@ Calybris verifies decisions and conservation proofs — it does **not** auto-inv
 prescribe → verify_decision → (optional WAL / prove_conservation)
 ```
 
-Recommended hooks: before `append_audited`, at reconciliation, before exporting a `FinancialCertificate`. Skipping verification is a deployment risk, not a library default. See [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md).
+Use `append_verified_audited` (not `append_audited`) at production boundaries — it verifies before writing. See [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md).
 
 For fail-closed audit boundaries, use the verified helpers:
 
@@ -284,6 +302,17 @@ wal.append_verified_audited(&snapshot, input, decision, "metadata")?;
 ## External audit
 
 Invariant docs, adversarial tests, Loom, Miri, and supply-chain checks are in place for third-party review. A paid external audit is still your responsibility — see [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) §7.
+
+## Security Posture
+
+- `#![forbid(unsafe_code)]` — zero unsafe blocks
+- `cargo-audit` + `cargo-deny` in CI
+- Miri on nightly — UB detection for all lib tests
+- 7 Loom exhaustive concurrency tests for budget operations
+- HMAC-SHA256 keyed tamper-evident WAL with constant-time comparison (`subtle`)
+- Fail-closed `append_verified_audited` — invalid decisions never enter the log
+- fsync-backed snapshot persistence with atomic rename
+- Feature matrix CI: `default`, `no-default-features`, `async`, `full`
 
 ## What This Crate Is Not
 
