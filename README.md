@@ -133,6 +133,11 @@ cargo add calybris-core --no-default-features
 3. **`finance`** — Ledger digest, `FinancialCertificate`, `ConservationProof`, `prove_conservation`, `certify_snapshot`.
 4. **`wal`** — Tamper-evident hash chain, `append_audited`, fail-closed `replay_audited_wal`.
 5. **`budget`** — CAS reserve/commit/release. Conservation holds after completed ops: `remaining + reserved + committed_lifetime == initial`. Loom + Miri in CI.
+6. **`config`** — Runtime `EngineConfig` with builder pattern and validation.
+7. **`builder`** — `InputBuilder`, `ModelBuilder`, `PolicyBuilder` — hard to misuse, safe defaults.
+8. **`persistence`** — Atomic snapshot save/load, `checkpoint`, `restore`, crash recovery planning.
+9. **`async_wal`** *(feature `async`)* — Tokio-based non-blocking WAL with HMAC, chain validation, configurable sync.
+10. **`instrument`** *(feature `observability`)* — Structured `tracing` spans for prescribe, verify, budget, WAL.
 
 ## Audit Pipeline
 
@@ -167,10 +172,66 @@ assert!(cert.conservation_balanced);
 | `PolicySnapshot::new_unchecked` | Tests / fuzz only — never serve without explicit `validate()` |
 | `PolicySnapshot::new` | Deprecated alias for `new_unchecked` |
 
+## Feature Flags
+
+| Feature | What it adds | Dependencies |
+|---------|-------------|--------------|
+| `wal` *(default)* | Hash-chained WAL, HMAC-SHA256, audited append | `serde`, `hmac`, `subtle` |
+| `async` | Tokio-based async WAL | `tokio` |
+| `observability` | Structured tracing spans/events | `tracing` |
+| `full` | All of the above | — |
+
+```bash
+cargo add calybris-core                        # default (wal)
+cargo add calybris-core --features full        # everything
+cargo add calybris-core --no-default-features  # kernel only
+```
+
+## Builder Ergonomics (v0.4.0)
+
+```rust
+use calybris_core::config::EngineConfig;
+use calybris_core::builder::{InputBuilder, ModelBuilder, PolicyBuilder};
+
+let config = EngineConfig::new()
+    .latency_penalty(3)
+    .hard_risk_limit(9_500)
+    .default_exposure_cap(500_000_000);
+
+let snapshot = PolicyBuilder::new(config)
+    .epochs(1, 1)
+    .model(ModelBuilder::new(1, 0).quality(9500).cost(250, 1000).build())
+    .model(ModelBuilder::new(2, 1).quality(7000).cost(25, 125).build())
+    .build()?;
+
+let input = InputBuilder::new(1, 1)
+    .tokens(1000, 500)
+    .business_value(100_000)
+    .risk(1000, 9000)
+    .minimum_quality(5000)
+    .build();
+
+let decision = snapshot.prescribe(input);
+```
+
+## Persistence & Recovery
+
+```rust
+use calybris_core::persistence::{checkpoint, restore};
+
+// Save engine state atomically
+let snap = checkpoint(&budget, Path::new("budget.json"))?;
+
+// After crash: restore from last checkpoint
+let fresh = BudgetEngine::new();
+restore(&fresh, Path::new("budget.json"))?;
+```
+
 ## Examples
 
 ```bash
 cargo run --example quickstart
+cargo run --example production_gateway  # full pipeline: config→build→prescribe→verify→budget→WAL→checkpoint→recovery
 cargo run --example llm_routing
 cargo run --example hft_pretrade_guard
 cargo run --example replay_audit
@@ -190,7 +251,7 @@ cargo +nightly miri test --lib --all-features   # see docs/MIRI.md for CI filter
 cargo doc --no-deps
 ```
 
-Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri runs on **nightly** in CI (UB detection); Loom covers budget concurrency interleavings.
+**136 tests passing.** Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri runs on **nightly** in CI (UB detection); 7 Loom exhaustive tests cover budget concurrency interleavings. **91.6% code coverage** (llvm-cov).
 
 ## Integration contract
 
