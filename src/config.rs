@@ -1,6 +1,6 @@
 //! Runtime configuration for policy tuning and budget limits.
 //!
-//! [`EngineConfig`] centralizes knobs that operators adjust without recompiling:
+//! [`crate::config::EngineConfig`] centralizes knobs that operators adjust without recompiling:
 //! latency penalty, exposure caps, WAL durability, and policy bounds.
 
 use crate::kernel::{MAX_BPS, MAX_RISK_PENALTY_MULTIPLIER_BPS};
@@ -22,7 +22,7 @@ use crate::kernel::{MAX_BPS, MAX_RISK_PENALTY_MULTIPLIER_BPS};
 pub struct EngineConfig {
     /// Latency penalty in microunits per millisecond of p95 latency.
     pub latency_penalty_microunits_per_ms: u64,
-    /// Hard risk limit in basis points (requests above this are rejected).
+    /// Hard risk limit in basis points (requests at or above this are rejected).
     pub hard_risk_limit_bps: u16,
     /// Minimum confidence in basis points (requests below this are rejected).
     pub minimum_confidence_bps: u16,
@@ -153,7 +153,7 @@ impl EngineConfig {
         Ok(())
     }
 
-    /// Initialize a tenant on a [`BudgetEngine`] with config-driven defaults.
+    /// Initialize a tenant on a [`crate::budget::BudgetEngine`] with config-driven defaults.
     ///
     /// Applies `default_exposure_cap_microcents` if set (> 0).
     pub fn ensure_tenant(

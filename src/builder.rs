@@ -1,4 +1,5 @@
-//! Builder ergonomics for [`KernelInput`] and [`PolicySnapshot`].
+//! Builder ergonomics for [`crate::kernel::KernelInput`] and
+//! [`crate::kernel::PolicySnapshot`].
 //!
 //! Makes it hard to forget a required field — the compiler enforces it.
 //! Optional fields have safe defaults.
@@ -236,7 +237,7 @@ pub struct PolicyBuilder {
 }
 
 impl PolicyBuilder {
-    /// Start building a policy from an [`EngineConfig`].
+    /// Start building a policy from an [`crate::config::EngineConfig`].
     #[must_use]
     pub fn new(config: crate::config::EngineConfig) -> Self {
         Self {

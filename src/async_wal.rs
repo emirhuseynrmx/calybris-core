@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -86,6 +87,13 @@ async fn validate_chain_async(
     key: Option<&[u8]>,
 ) -> Result<(u64, String), AsyncWalError> {
     let file = File::open(path).await?;
+    validate_chain_async_reader(file, key).await
+}
+
+async fn validate_chain_async_reader(
+    file: File,
+    key: Option<&[u8]>,
+) -> Result<(u64, String), AsyncWalError> {
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
 
@@ -130,7 +138,12 @@ async fn validate_chain_async(
 
         last_hash = entry.entry_hash;
         last_sequence = entry.sequence;
-        expected_sequence += 1;
+        expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
+            AsyncWalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WAL sequence overflow",
+            ))
+        })?;
         expected_prev_hash = last_hash.clone();
     }
 
@@ -174,17 +187,16 @@ impl<T: Serialize> AsyncWalWriter<T> {
         hmac_key: Option<Vec<u8>>,
         sync_on_append: bool,
     ) -> Result<Self, AsyncWalError> {
-        let (sequence, last_hash) = if path.exists() {
-            validate_chain_async(path, hmac_key.as_deref()).await?
-        } else {
-            (0, "genesis".to_string())
-        };
-
         let file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(path)
             .await?;
+        let mut read_file = file.try_clone().await?;
+        read_file.seek(SeekFrom::Start(0)).await?;
+        let (sequence, last_hash) =
+            validate_chain_async_reader(read_file, hmac_key.as_deref()).await?;
 
         Ok(Self {
             file,

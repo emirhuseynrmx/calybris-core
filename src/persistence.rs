@@ -1,6 +1,6 @@
 //! Snapshot persistence and point-in-time recovery.
 //!
-//! Save [`BudgetSnapshot`] to disk, load it back, and restore engine state.
+//! Save [`crate::budget::BudgetSnapshot`] to disk, load it back, and restore engine state.
 //! Combined with WAL replay, this gives crash recovery and backup/restore.
 //!
 //! Snapshot writes use temp-file + fsync + rename for crash durability.
@@ -165,6 +165,10 @@ mod tests {
     use crate::budget::BudgetEngine;
 
     #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
     fn save_load_roundtrip() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("snapshot.json");
@@ -186,6 +190,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
     fn restore_from_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("snapshot.json");
@@ -204,6 +212,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
     fn atomic_write_no_partial() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("atomic.json");
@@ -217,6 +229,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
     fn checkpoint_with_wal_records_watermark() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("snap-wal.json");
@@ -231,6 +247,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
     fn checkpoint_without_wal_has_no_watermark() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("snap-no-wal.json");
@@ -242,6 +262,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
     #[cfg(feature = "wal")]
     fn recovery_plan_uses_watermark() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -270,6 +294,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
     #[cfg(feature = "wal")]
     fn recovery_plan_no_watermark_replays_all() {
         let dir = tempfile::TempDir::new().unwrap();

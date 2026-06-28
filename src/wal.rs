@@ -15,7 +15,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 use subtle::ConstantTimeEq;
 
@@ -219,13 +219,15 @@ impl<T: Serialize> WalWriter<T> {
     }
 
     fn open_inner(path: &Path, hmac_key: Option<Vec<u8>>) -> Result<Self, WalError> {
-        let (sequence, last_hash) = if path.exists() {
-            validate_chain_inner(path, hmac_key.as_deref())?
-        } else {
-            (0, "genesis".to_string())
-        };
-
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+        let mut read_file = file.try_clone()?;
+        read_file.seek(SeekFrom::Start(0))?;
+        let (sequence, last_hash) =
+            validate_chain_reader(BufReader::new(read_file), hmac_key.as_deref())?;
 
         Ok(Self {
             file,
@@ -321,7 +323,13 @@ impl<T: Serialize> WalWriter<T> {
 fn validate_chain_inner(path: &Path, key: Option<&[u8]>) -> Result<(u64, String), WalError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
+    validate_chain_reader(reader, key)
+}
 
+fn validate_chain_reader<R: BufRead>(
+    reader: R,
+    key: Option<&[u8]>,
+) -> Result<(u64, String), WalError> {
     let mut expected_sequence = 1_u64;
     let mut expected_prev_hash = "genesis".to_string();
     let mut last_hash = "genesis".to_string();
@@ -365,11 +373,78 @@ fn validate_chain_inner(path: &Path, key: Option<&[u8]>) -> Result<(u64, String)
 
         last_hash = entry.entry_hash;
         last_sequence = entry.sequence;
-        expected_sequence += 1;
+        expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
+            WalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WAL sequence overflow",
+            ))
+        })?;
         expected_prev_hash = last_hash.clone();
     }
 
     Ok((last_sequence, last_hash))
+}
+
+fn read_verified_wal_inner<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    key: Option<&[u8]>,
+) -> Result<Vec<WalEntry<T>>, WalError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    let mut expected_sequence = 1_u64;
+    let mut expected_prev_hash = "genesis".to_string();
+    let mut entries = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let value_entry: WalEntry<serde_json::Value> = serde_json::from_str(&line)?;
+
+        if value_entry.sequence != expected_sequence {
+            return Err(WalError::DuplicateSequence(value_entry.sequence));
+        }
+
+        if value_entry.previous_hash != expected_prev_hash {
+            return Err(WalError::ChainBroken {
+                sequence: value_entry.sequence,
+                expected: expected_prev_hash,
+                found: value_entry.previous_hash,
+            });
+        }
+
+        let data_str = serde_json::to_string(&value_entry.data)?;
+        let computed = compute_hash(&value_entry.previous_hash, &data_str, key)?;
+        if computed
+            .as_bytes()
+            .ct_eq(value_entry.entry_hash.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
+            return Err(WalError::ChainBroken {
+                sequence: value_entry.sequence,
+                expected: computed,
+                found: value_entry.entry_hash,
+            });
+        }
+
+        expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
+            WalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WAL sequence overflow",
+            ))
+        })?;
+        expected_prev_hash = value_entry.entry_hash;
+
+        // Parse the typed entry from the already-validated line. This avoids a
+        // validate-then-reopen race while keeping the public API generic over T.
+        entries.push(serde_json::from_str(&line)?);
+    }
+
+    Ok(entries)
 }
 
 /// Read a WAL file **without** chain verification.
@@ -407,8 +482,7 @@ pub fn verify_wal_keyed(path: &Path, key: &[u8]) -> Result<(u64, String), WalErr
 pub fn read_verified_wal<T: for<'de> Deserialize<'de>>(
     path: &Path,
 ) -> Result<Vec<WalEntry<T>>, WalError> {
-    validate_chain_inner(path, None)?;
-    read_wal(path)
+    read_verified_wal_inner(path, None)
 }
 
 /// Read a WAL file AND verify its chain integrity with HMAC key.
@@ -416,8 +490,7 @@ pub fn read_verified_wal_keyed<T: for<'de> Deserialize<'de>>(
     path: &Path,
     key: &[u8],
 ) -> Result<Vec<WalEntry<T>>, WalError> {
-    validate_chain_inner(path, Some(key))?;
-    read_wal(path)
+    read_verified_wal_inner(path, Some(key))
 }
 
 /// Replay-verify every audited entry against `snapshot` (chain + digests + prescribe).
@@ -439,8 +512,7 @@ pub fn replay_audited_wal_keyed<M>(
 where
     M: for<'de> Deserialize<'de>,
 {
-    validate_chain_inner(path, key)?;
-    let entries = read_wal::<AuditedRecord<M>>(path)?;
+    let entries = read_verified_wal_inner::<AuditedRecord<M>>(path, key)?;
     let expected_policy = digest_to_hex(&policy_digest(snapshot));
 
     let mut verdicts = Vec::with_capacity(entries.len());

@@ -35,7 +35,7 @@ The `Security` workflow runs Miri on **nightly** for:
 - `cargo miri test --lib --all-features` (WAL unit tests, proptests, concurrency skipped)
 - `cargo miri test --test audit_pipeline` (WAL E2E on Linux)
 
-Concurrent unit tests are `#[cfg_attr(miri, ignore)]`; use Loom for those scenarios. WAL **unit** tests are skipped under Miri (`--skip wal::`); file I/O is covered by the audit pipeline integration test instead.
+Concurrent unit tests are `#[cfg_attr(miri, ignore)]`; use Loom for those scenarios. WAL **unit** tests are skipped under Miri (`--skip wal::`); file I/O is covered by the audit pipeline integration test instead. On Windows Miri, snapshot persistence tests are ignored because `tempfile` directory creation calls unsupported Windows filesystem APIs under interpretation; normal `cargo test` still covers those paths.
 
 ## Local reproduction
 
@@ -59,9 +59,9 @@ MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --test audit_pipel
 ```
 
 On Windows, Miri may reject the `OpenOptions` mode used by the WAL audit
-pipeline even with isolation disabled. Treat the audit-pipeline Miri run as a
-Linux CI check; use normal `cargo test --test audit_pipeline` locally on
-Windows.
+pipeline even with isolation disabled, and may not support every filesystem
+operation used by `tempfile`. Treat the audit-pipeline Miri run as a Linux CI
+check; use normal `cargo test --test audit_pipeline` locally on Windows.
 
 ## Limits
 
