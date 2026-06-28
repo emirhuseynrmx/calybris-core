@@ -149,24 +149,43 @@ mod tests {
 
     fn test_snapshot() -> PolicySnapshot {
         PolicySnapshot::try_new(
-            1, 1, 9600, 5500, 3500, 2,
+            1,
+            1,
+            9600,
+            5500,
+            3500,
+            2,
             vec![KernelModel {
-                model_id: 1, provider_id: 0, quality_bps: 9000, risk_ceiling_bps: 9500,
-                enabled: 1, p95_latency_ms: 200, capabilities: 0, region_mask: ALL_REGIONS,
+                model_id: 1,
+                provider_id: 0,
+                quality_bps: 9000,
+                risk_ceiling_bps: 9500,
+                enabled: 1,
+                p95_latency_ms: 200,
+                capabilities: 0,
+                region_mask: ALL_REGIONS,
                 input_cost_microunits_per_million_tokens: 250,
                 output_cost_microunits_per_million_tokens: 1000,
             }],
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn test_input() -> KernelInput {
         KernelInput {
-            request_sequence: 1, requested_model_id: 1,
-            input_tokens: 1000, output_tokens: 500,
-            business_value_microunits: 100_000, budget_limit_microunits: 50_000_000,
-            risk_bps: 1000, confidence_bps: 9000, minimum_quality_bps: 5000,
-            max_p95_latency_ms: 1000, required_capabilities: 0,
-            allowed_provider_mask: ALL_PROVIDERS, required_region_mask: 0,
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 1000,
+            output_tokens: 500,
+            business_value_microunits: 100_000,
+            budget_limit_microunits: 50_000_000,
+            risk_bps: 1000,
+            confidence_bps: 9000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 1000,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
         }
     }
 

@@ -301,7 +301,12 @@ mod tests {
         let config = crate::config::EngineConfig::new();
         let snap = PolicyBuilder::new(config)
             .epochs(7, 11)
-            .model(ModelBuilder::new(1, 0).quality(9000).cost(250, 1000).build())
+            .model(
+                ModelBuilder::new(1, 0)
+                    .quality(9000)
+                    .cost(250, 1000)
+                    .build(),
+            )
             .model(ModelBuilder::new(2, 1).quality(7000).cost(25, 125).build())
             .build()
             .unwrap();

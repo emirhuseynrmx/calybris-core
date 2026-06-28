@@ -165,9 +165,11 @@ mod tests {
 
         {
             let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
-            wal.append(serde_json::json!({"action": "reserve"})).unwrap();
+            wal.append(serde_json::json!({"action": "reserve"}))
+                .unwrap();
             wal.append(serde_json::json!({"action": "commit"})).unwrap();
-            wal.append(serde_json::json!({"action": "release"})).unwrap();
+            wal.append(serde_json::json!({"action": "release"}))
+                .unwrap();
         }
 
         let plan = recovery_plan(&snap_path, &wal_path).unwrap();

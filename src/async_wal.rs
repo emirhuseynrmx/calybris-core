@@ -318,7 +318,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("async-wal.jsonl");
 
-        let mut wal = AsyncWalWriter::<serde_json::Value>::open(&path).await.unwrap();
+        let mut wal = AsyncWalWriter::<serde_json::Value>::open(&path)
+            .await
+            .unwrap();
         wal.append(serde_json::json!({"model": "gpt-4o", "cost": 100}))
             .await
             .unwrap();
@@ -340,8 +342,9 @@ mod tests {
         let key = b"async-secret-key";
 
         {
-            let mut wal =
-                AsyncWalWriter::<serde_json::Value>::open_keyed(&path, key).await.unwrap();
+            let mut wal = AsyncWalWriter::<serde_json::Value>::open_keyed(&path, key)
+                .await
+                .unwrap();
             wal.append(serde_json::json!({"x": 1})).await.unwrap();
             wal.flush_and_sync().await.unwrap();
         }
@@ -355,8 +358,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("sync-append.jsonl");
 
-        let mut wal =
-            AsyncWalWriter::<serde_json::Value>::open_with_sync(&path, true).await.unwrap();
+        let mut wal = AsyncWalWriter::<serde_json::Value>::open_with_sync(&path, true)
+            .await
+            .unwrap();
         wal.append(serde_json::json!({"durable": true}))
             .await
             .unwrap();
@@ -371,22 +375,41 @@ mod tests {
         let path = dir.path().join("audited-async.jsonl");
 
         let snapshot = PolicySnapshot::try_new(
-            1, 1, 9600, 5500, 3500, 0,
+            1,
+            1,
+            9600,
+            5500,
+            3500,
+            0,
             vec![KernelModel {
-                model_id: 1, provider_id: 0, quality_bps: 9000, risk_ceiling_bps: 9500,
-                enabled: 1, p95_latency_ms: 200, capabilities: 0, region_mask: ALL_REGIONS,
+                model_id: 1,
+                provider_id: 0,
+                quality_bps: 9000,
+                risk_ceiling_bps: 9500,
+                enabled: 1,
+                p95_latency_ms: 200,
+                capabilities: 0,
+                region_mask: ALL_REGIONS,
                 input_cost_microunits_per_million_tokens: 100,
                 output_cost_microunits_per_million_tokens: 400,
             }],
-        ).unwrap();
+        )
+        .unwrap();
 
         let input = KernelInput {
-            request_sequence: 1, requested_model_id: 1,
-            input_tokens: 500, output_tokens: 200,
-            business_value_microunits: 50_000, budget_limit_microunits: 10_000_000,
-            risk_bps: 500, confidence_bps: 8000, minimum_quality_bps: 5000,
-            max_p95_latency_ms: 0, required_capabilities: 0,
-            allowed_provider_mask: ALL_PROVIDERS, required_region_mask: 0,
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
         };
         let decision = snapshot.prescribe(input);
 

@@ -26,21 +26,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .minimum_confidence(6_000)
         .default_exposure_cap(500_000_000);
     config.validate()?;
-    println!("[config] latency_penalty={}µ/ms, risk_limit={}bps",
-        config.latency_penalty_microunits_per_ms, config.hard_risk_limit_bps);
+    println!(
+        "[config] latency_penalty={}µ/ms, risk_limit={}bps",
+        config.latency_penalty_microunits_per_ms, config.hard_risk_limit_bps
+    );
 
     // ── 2. Build catalog with builders ──
     let snapshot = PolicyBuilder::new(config)
         .epochs(1, 1)
-        .model(ModelBuilder::new(1, 0).quality(9500).latency(450).cost(250, 1000).build())  // gpt-4o
-        .model(ModelBuilder::new(2, 0).quality(7500).latency(120).cost(15, 60).build())     // gpt-4o-mini
-        .model(ModelBuilder::new(3, 1).quality(9200).latency(380).cost(300, 1500).build())  // claude-sonnet
-        .model(ModelBuilder::new(4, 1).quality(7000).latency(90).cost(25, 125).build())     // claude-haiku
-        .model(ModelBuilder::new(5, 2).quality(8800).latency(320).cost(125, 500).build())   // gemini-pro
-        .model(ModelBuilder::new(6, 2).quality(7200).latency(80).cost(8, 30).build())       // gemini-flash
+        .model(
+            ModelBuilder::new(1, 0)
+                .quality(9500)
+                .latency(450)
+                .cost(250, 1000)
+                .build(),
+        ) // gpt-4o
+        .model(
+            ModelBuilder::new(2, 0)
+                .quality(7500)
+                .latency(120)
+                .cost(15, 60)
+                .build(),
+        ) // gpt-4o-mini
+        .model(
+            ModelBuilder::new(3, 1)
+                .quality(9200)
+                .latency(380)
+                .cost(300, 1500)
+                .build(),
+        ) // claude-sonnet
+        .model(
+            ModelBuilder::new(4, 1)
+                .quality(7000)
+                .latency(90)
+                .cost(25, 125)
+                .build(),
+        ) // claude-haiku
+        .model(
+            ModelBuilder::new(5, 2)
+                .quality(8800)
+                .latency(320)
+                .cost(125, 500)
+                .build(),
+        ) // gemini-pro
+        .model(
+            ModelBuilder::new(6, 2)
+                .quality(7200)
+                .latency(80)
+                .cost(8, 30)
+                .build(),
+        ) // gemini-flash
         .build()?;
 
-    let model_names = ["gpt-4o", "gpt-4o-mini", "claude-sonnet", "claude-haiku", "gemini-pro", "gemini-flash"];
+    let model_names = [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "claude-sonnet",
+        "claude-haiku",
+        "gemini-pro",
+        "gemini-flash",
+    ];
     println!("[catalog] {} models loaded\n", snapshot.models().len());
 
     // ── 3. Budget engine with 3 tenants ──
@@ -58,11 +103,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 5. Process requests ──
     let requests = vec![
-        ("team-platform", "compliance review", 1, 1, 4000, 2000, 500_000, 2000, 9000, 9000),
-        ("team-support",  "ticket response",   2, 1, 500,  200,  10_000,  500,  9000, 6000),
-        ("team-platform", "code generation",   3, 3, 2000, 1000, 200_000, 1000, 8500, 8000),
-        ("team-compliance", "audit summary",   4, 1, 8000, 4000, 800_000, 1500, 9500, 9200),
-        ("team-support",  "faq answer",        5, 6, 200,  100,  5_000,   300,  9000, 5000),
+        (
+            "team-platform",
+            "compliance review",
+            1,
+            1,
+            4000,
+            2000,
+            500_000,
+            2000,
+            9000,
+            9000,
+        ),
+        (
+            "team-support",
+            "ticket response",
+            2,
+            1,
+            500,
+            200,
+            10_000,
+            500,
+            9000,
+            6000,
+        ),
+        (
+            "team-platform",
+            "code generation",
+            3,
+            3,
+            2000,
+            1000,
+            200_000,
+            1000,
+            8500,
+            8000,
+        ),
+        (
+            "team-compliance",
+            "audit summary",
+            4,
+            1,
+            8000,
+            4000,
+            800_000,
+            1500,
+            9500,
+            9200,
+        ),
+        (
+            "team-support",
+            "faq answer",
+            5,
+            6,
+            200,
+            100,
+            5_000,
+            300,
+            9000,
+            5000,
+        ),
     ];
 
     for (tenant, scenario, seq, model_id, inp_tok, out_tok, value, risk, conf, min_q) in &requests {
@@ -76,7 +176,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build();
 
         let (decision, trace) = snapshot.prescribe_with_trace(input);
-        assert_eq!(verify_decision(&snapshot, input, &decision), VerifyResult::Valid);
+        assert_eq!(
+            verify_decision(&snapshot, input, &decision),
+            VerifyResult::Valid
+        );
 
         let bundle = audit_bundle(&snapshot, input, &decision);
         assert!(bundle.replay_valid);
@@ -97,13 +200,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         println!("  [{tenant}] {scenario}");
-        println!("    action={}, selected={}, reason={}", decision.action, selected_name, decision.reason);
-        println!("    cost={}µ, utility={}µ, eligible={}/{}",
-            decision.estimated_cost_microunits, decision.expected_utility_microunits,
-            decision.eligible_models, decision.evaluated_models);
+        println!(
+            "    action={}, selected={}, reason={}",
+            decision.action, selected_name, decision.reason
+        );
+        println!(
+            "    cost={}µ, utility={}µ, eligible={}/{}",
+            decision.estimated_cost_microunits,
+            decision.expected_utility_microunits,
+            decision.eligible_models,
+            decision.evaluated_models
+        );
         if trace.rejections.quality > 0 || trace.rejections.budget > 0 {
-            println!("    rejections: quality={} budget={} latency={}",
-                trace.rejections.quality, trace.rejections.budget, trace.rejections.latency);
+            println!(
+                "    rejections: quality={} budget={} latency={}",
+                trace.rejections.quality, trace.rejections.budget, trace.rejections.latency
+            );
         }
         println!();
 
@@ -116,20 +228,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _proof = prove_conservation(&budget)?;
     let cert = certify_ledger(&budget);
     println!("[finance] conservation: balanced");
-    println!("[finance] committed: {} microcents", cert.total_committed_microcents);
+    println!(
+        "[finance] committed: {} microcents",
+        cert.total_committed_microcents
+    );
     println!("[finance] digest: {}…\n", &cert.ledger_digest_hex[..16]);
 
     // ── 7. Checkpoint ──
     let snap_path = std::path::PathBuf::from("production_gateway_snapshot.json");
     let snap = checkpoint(&budget, &snap_path)?;
-    println!("[checkpoint] saved {} tenants to {}", snap.tenants.len(), snap_path.display());
+    println!(
+        "[checkpoint] saved {} tenants to {}",
+        snap.tenants.len(),
+        snap_path.display()
+    );
 
     // ── 8. Simulate crash recovery ──
     let fresh_budget = BudgetEngine::new();
     let restored = restore(&fresh_budget, &snap_path)?;
-    println!("[recovery] restored {} tenants from checkpoint", restored.tenants.len());
+    println!(
+        "[recovery] restored {} tenants from checkpoint",
+        restored.tenants.len()
+    );
     for t in &restored.tenants {
-        println!("  {} → remaining={}, committed={}", t.tenant_id, t.remaining_microcents, t.committed_microcents);
+        println!(
+            "  {} → remaining={}, committed={}",
+            t.tenant_id, t.remaining_microcents, t.committed_microcents
+        );
     }
 
     // Cleanup

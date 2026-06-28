@@ -29,6 +29,9 @@
 
 mod sync;
 
+/// Async hash-chained WAL using Tokio.
+#[cfg(feature = "async")]
+pub mod async_wal;
 /// Per-tenant atomic budget engine with CAS reservation.
 pub mod budget;
 /// Builder ergonomics for inputs, models, and policies.
@@ -39,6 +42,9 @@ pub mod config;
 pub mod digest;
 /// Fixed-point financial layer: ledger digest and conservation proofs.
 pub mod finance;
+/// Structured tracing instrumentation.
+#[cfg(feature = "observability")]
+pub mod instrument;
 /// Allocation-free prescriptive decision kernel.
 pub mod kernel;
 /// Snapshot persistence and crash recovery.
@@ -49,9 +55,3 @@ pub mod verify;
 /// HMAC-SHA256 hash-chained write-ahead log.
 #[cfg(feature = "wal")]
 pub mod wal;
-/// Async hash-chained WAL using Tokio.
-#[cfg(feature = "async")]
-pub mod async_wal;
-/// Structured tracing instrumentation.
-#[cfg(feature = "observability")]
-pub mod instrument;
