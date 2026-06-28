@@ -50,6 +50,8 @@ pub mod kernel;
 /// Snapshot persistence and crash recovery.
 #[cfg(feature = "serde")]
 pub mod persistence;
+/// Single proof envelope binding decision to full evidence chain.
+pub mod proof;
 /// Decision verification, replay, and correctness certificates.
 pub mod verify;
 /// HMAC-SHA256 hash-chained write-ahead log.

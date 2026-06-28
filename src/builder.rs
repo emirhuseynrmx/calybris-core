@@ -202,6 +202,17 @@ impl ModelBuilder {
     }
 }
 
+/// Errors from [`PolicyBuilder::build`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BuildError {
+    #[error("config error: {0}")]
+    Config(#[from] crate::config::ConfigError),
+    #[error("policy error: {0}")]
+    Policy(#[from] crate::kernel::PolicyError),
+    #[error("catalog too large: {len} models exceeds max_catalog_size {max}")]
+    CatalogTooLarge { len: usize, max: usize },
+}
+
 /// Build a [`PolicySnapshot`] from config + models with validation.
 ///
 /// ```
@@ -259,8 +270,18 @@ impl PolicyBuilder {
     }
 
     /// Build and validate the snapshot.
-    pub fn build(self) -> Result<PolicySnapshot, crate::kernel::PolicyError> {
-        PolicySnapshot::try_new(
+    ///
+    /// Validates config, enforces `max_catalog_size`, then delegates to
+    /// [`PolicySnapshot::try_new`] for policy-level validation.
+    pub fn build(self) -> Result<PolicySnapshot, BuildError> {
+        self.config.validate()?;
+        if self.models.len() > self.config.max_catalog_size {
+            return Err(BuildError::CatalogTooLarge {
+                len: self.models.len(),
+                max: self.config.max_catalog_size,
+            });
+        }
+        Ok(PolicySnapshot::try_new(
             self.policy_epoch,
             self.catalog_epoch,
             self.config.hard_risk_limit_bps,
@@ -268,7 +289,7 @@ impl PolicyBuilder {
             self.config.risk_penalty_multiplier_bps,
             self.config.latency_penalty_microunits_per_ms,
             self.models,
-        )
+        )?)
     }
 }
 
@@ -335,6 +356,25 @@ mod tests {
     fn disabled_model_via_builder() {
         let model = ModelBuilder::new(1, 0).enabled(false).build();
         assert_eq!(model.enabled, 0);
+    }
+
+    #[test]
+    fn catalog_too_large_rejected() {
+        let config = crate::config::EngineConfig::new().max_catalog_size(1);
+        let result = PolicyBuilder::new(config)
+            .model(ModelBuilder::new(1, 0).cost(100, 400).build())
+            .model(ModelBuilder::new(2, 1).cost(10, 40).build())
+            .build();
+        assert!(matches!(result, Err(BuildError::CatalogTooLarge { .. })));
+    }
+
+    #[test]
+    fn invalid_config_rejected_at_build() {
+        let config = crate::config::EngineConfig::new().hard_risk_limit(10_001);
+        let result = PolicyBuilder::new(config)
+            .model(ModelBuilder::new(1, 0).cost(100, 400).build())
+            .build();
+        assert!(matches!(result, Err(BuildError::Config(_))));
     }
 
     use proptest::prelude::*;

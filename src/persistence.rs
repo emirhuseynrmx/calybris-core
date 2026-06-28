@@ -2,8 +2,11 @@
 //!
 //! Save [`BudgetSnapshot`] to disk, load it back, and restore engine state.
 //! Combined with WAL replay, this gives crash recovery and backup/restore.
+//!
+//! Snapshot writes use temp-file + fsync + rename for crash durability.
 
 use crate::budget::{BudgetEngine, BudgetSnapshot, RestoreError};
+use std::io::Write;
 use std::path::Path;
 
 /// Persistence error types.
@@ -17,15 +20,31 @@ pub enum PersistenceError {
     Restore(#[from] RestoreError),
 }
 
-/// Save a budget snapshot to a JSON file.
+/// Save a budget snapshot to a JSON file with fsync-backed durability.
 ///
-/// The snapshot is written atomically: data goes to a `.tmp` file first,
-/// then renamed to the target path. This prevents partial writes on crash.
+/// Writes to a `.tmp` file, fsyncs data, renames to target, then fsyncs the
+/// parent directory. This prevents partial writes and ensures the rename is
+/// durable even on power loss.
 pub fn save_snapshot(snapshot: &BudgetSnapshot, path: &Path) -> Result<(), PersistenceError> {
     let json = serde_json::to_string_pretty(snapshot)?;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, json.as_bytes())?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)?;
+    file.write_all(json.as_bytes())?;
+    file.sync_data()?;
+    drop(file);
+
     std::fs::rename(&tmp, path)?;
+
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_data();
+        }
+    }
     Ok(())
 }
 
@@ -36,12 +55,28 @@ pub fn load_snapshot(path: &Path) -> Result<BudgetSnapshot, PersistenceError> {
     Ok(snapshot)
 }
 
-/// Save and restore a budget engine from a snapshot file.
+/// Checkpoint engine state without WAL binding.
 ///
-/// Takes a snapshot of the current engine state, saves it to disk,
-/// and returns the snapshot for further use.
+/// Use [`checkpoint_with_wal`] when you have a WAL writer — it records the
+/// WAL sequence so recovery knows where to start replaying.
 pub fn checkpoint(engine: &BudgetEngine, path: &Path) -> Result<BudgetSnapshot, PersistenceError> {
     let snapshot = engine.snapshot();
+    save_snapshot(&snapshot, path)?;
+    Ok(snapshot)
+}
+
+/// Checkpoint engine state alongside a WAL sequence.
+///
+/// Records the current WAL sequence as [`BudgetSnapshot::wal_high_watermark`]
+/// so that [`recovery_plan`] can determine exactly which WAL entries need
+/// replay after a crash.
+pub fn checkpoint_with_wal(
+    engine: &BudgetEngine,
+    path: &Path,
+    wal_sequence: u64,
+) -> Result<BudgetSnapshot, PersistenceError> {
+    let mut snapshot = engine.snapshot();
+    snapshot.wal_high_watermark = Some(wal_sequence);
     save_snapshot(&snapshot, path)?;
     Ok(snapshot)
 }
@@ -57,10 +92,11 @@ pub fn restore(engine: &BudgetEngine, path: &Path) -> Result<BudgetSnapshot, Per
     Ok(snapshot)
 }
 
-/// Recovery strategy: load snapshot + replay WAL entries since snapshot.
+/// Recovery strategy: load snapshot + count WAL entries that need replay.
 ///
-/// Returns the number of WAL entries that were newer than the snapshot
-/// (and would need to be replayed by the caller's domain logic).
+/// Uses [`BudgetSnapshot::wal_high_watermark`] (set by [`checkpoint_with_wal`])
+/// to determine which WAL entries are newer than the checkpoint. If no watermark
+/// is set, all WAL entries are counted as needing replay.
 #[cfg(feature = "wal")]
 pub fn recovery_plan(
     snapshot_path: &Path,
@@ -71,15 +107,14 @@ pub fn recovery_plan(
     let entries = crate::wal::read_wal::<serde_json::Value>(wal_path)
         .map_err(|e| PersistenceError::Io(std::io::Error::other(e.to_string())))?;
 
-    let wal_entries_after_snapshot = entries
-        .iter()
-        .filter(|e| e.sequence > snapshot.version)
-        .count();
+    let high = snapshot.wal_high_watermark.unwrap_or(0);
+    let entries_to_replay = entries.iter().filter(|e| e.sequence > high).count();
 
     Ok(RecoveryPlan {
         snapshot,
         total_wal_entries: entries.len(),
-        entries_to_replay: wal_entries_after_snapshot,
+        entries_to_replay,
+        wal_high_watermark: high,
     })
 }
 
@@ -91,8 +126,10 @@ pub struct RecoveryPlan {
     pub snapshot: BudgetSnapshot,
     /// Total entries in the WAL file.
     pub total_wal_entries: usize,
-    /// Entries newer than the snapshot that need domain-specific replay.
+    /// Entries newer than the checkpoint that need domain-specific replay.
     pub entries_to_replay: usize,
+    /// The WAL sequence at checkpoint time (0 if not set).
+    pub wal_high_watermark: u64,
 }
 
 #[cfg(test)]
@@ -153,8 +190,61 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_with_wal_records_watermark() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("snap-wal.json");
+
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let snap = checkpoint_with_wal(&engine, &path, 42).unwrap();
+        assert_eq!(snap.wal_high_watermark, Some(42));
+
+        let loaded = load_snapshot(&path).unwrap();
+        assert_eq!(loaded.wal_high_watermark, Some(42));
+    }
+
+    #[test]
+    fn checkpoint_without_wal_has_no_watermark() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("snap-no-wal.json");
+
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let snap = checkpoint(&engine, &path).unwrap();
+        assert_eq!(snap.wal_high_watermark, None);
+    }
+
+    #[test]
     #[cfg(feature = "wal")]
-    fn recovery_plan_counts_entries() {
+    fn recovery_plan_uses_watermark() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let snap_path = dir.path().join("snap.json");
+        let wal_path = dir.path().join("wal.jsonl");
+
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+
+        {
+            let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+            wal.append(serde_json::json!({"action": "reserve"}))
+                .unwrap();
+            wal.append(serde_json::json!({"action": "commit"})).unwrap();
+
+            checkpoint_with_wal(&engine, &snap_path, wal.sequence()).unwrap();
+
+            wal.append(serde_json::json!({"action": "release"}))
+                .unwrap();
+        }
+
+        let plan = recovery_plan(&snap_path, &wal_path).unwrap();
+        assert_eq!(plan.total_wal_entries, 3);
+        assert_eq!(plan.wal_high_watermark, 2);
+        assert_eq!(plan.entries_to_replay, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn recovery_plan_no_watermark_replays_all() {
         let dir = tempfile::TempDir::new().unwrap();
         let snap_path = dir.path().join("snap.json");
         let wal_path = dir.path().join("wal.jsonl");
@@ -165,15 +255,12 @@ mod tests {
 
         {
             let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
-            wal.append(serde_json::json!({"action": "reserve"}))
-                .unwrap();
-            wal.append(serde_json::json!({"action": "commit"})).unwrap();
-            wal.append(serde_json::json!({"action": "release"}))
-                .unwrap();
+            wal.append(serde_json::json!({"a": 1})).unwrap();
+            wal.append(serde_json::json!({"b": 2})).unwrap();
         }
 
         let plan = recovery_plan(&snap_path, &wal_path).unwrap();
-        assert_eq!(plan.total_wal_entries, 3);
-        assert!(plan.entries_to_replay <= 3);
+        assert_eq!(plan.entries_to_replay, 2);
+        assert_eq!(plan.wal_high_watermark, 0);
     }
 }

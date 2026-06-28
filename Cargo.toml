@@ -20,7 +20,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 default = ["wal"]
 serde = ["dep:serde", "dep:serde_json"]
 wal = ["serde", "dep:hmac", "dep:subtle"]
-async = ["dep:tokio"]
+async = ["wal", "dep:tokio"]
 observability = ["dep:tracing"]
 full = ["wal", "async", "observability"]
 

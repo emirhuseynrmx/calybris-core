@@ -247,11 +247,13 @@ mod tests {
             version: 7,
             tenants: vec![alpha.clone(), zulu.clone()],
             active_reservations: 0,
+            wal_high_watermark: None,
         };
         let snapshot_b = BudgetSnapshot {
             version: 7,
             tenants: vec![zulu, alpha],
             active_reservations: 0,
+            wal_high_watermark: None,
         };
 
         assert_eq!(ledger_digest(&snapshot_a), ledger_digest(&snapshot_b));

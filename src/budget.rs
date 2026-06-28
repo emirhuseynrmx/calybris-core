@@ -194,6 +194,10 @@ pub struct BudgetSnapshot {
     pub version: u64,
     pub tenants: Vec<TenantLedger>,
     pub active_reservations: usize,
+    /// WAL sequence at checkpoint time. Used by recovery to determine which
+    /// WAL entries need replay. `None` if snapshot was not taken alongside a WAL.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub wal_high_watermark: Option<u64>,
 }
 
 /// Check conservation invariant on a frozen snapshot (no additional engine reads).
@@ -563,6 +567,7 @@ impl BudgetEngine {
             version,
             tenants,
             active_reservations: reservations.len(),
+            wal_high_watermark: None,
         }
     }
 
@@ -1106,6 +1111,7 @@ mod tests {
                 committed_microcents: 0,
             }],
             active_reservations: 0,
+            wal_high_watermark: None,
         };
         assert_eq!(
             conservation_status_for_snapshot(&snap),

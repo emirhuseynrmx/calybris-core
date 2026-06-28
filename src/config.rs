@@ -152,6 +152,21 @@ impl EngineConfig {
         }
         Ok(())
     }
+
+    /// Initialize a tenant on a [`BudgetEngine`] with config-driven defaults.
+    ///
+    /// Applies `default_exposure_cap_microcents` if set (> 0).
+    pub fn ensure_tenant(
+        &self,
+        budget: &crate::budget::BudgetEngine,
+        tenant_id: &str,
+        initial_microcents: i64,
+    ) {
+        budget.ensure_tenant(tenant_id, initial_microcents);
+        if self.default_exposure_cap_microcents > 0 {
+            budget.set_max_reserved_microcents(tenant_id, self.default_exposure_cap_microcents);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +192,16 @@ mod tests {
         assert_eq!(config.latency_penalty_microunits_per_ms, 10);
         assert_eq!(config.hard_risk_limit_bps, 9_000);
         assert!(config.wal_sync_on_append);
+    }
+
+    #[test]
+    fn ensure_tenant_applies_exposure_cap() {
+        let config = EngineConfig::new().default_exposure_cap(500_000);
+        let budget = crate::budget::BudgetEngine::new();
+        config.ensure_tenant(&budget, "desk", 1_000_000);
+        assert_eq!(budget.remaining_microcents("desk"), Some(1_000_000));
+        let (_, id) = budget.try_reserve("desk", 500_001);
+        assert!(id.is_none());
     }
 
     #[test]
