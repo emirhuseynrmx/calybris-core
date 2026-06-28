@@ -117,6 +117,7 @@ jobs:
           --skip random_ops
           --skip arbitrary_
           --skip digests_stable
+          --skip optimized_
           --skip prescriptive_kernel
         env:
           MIRIFLAGS: -Zmiri-disable-isolation

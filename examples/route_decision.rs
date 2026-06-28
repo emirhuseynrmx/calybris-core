@@ -104,7 +104,7 @@ fn main() {
         input_tokens: 8000,
         output_tokens: 4000,
         business_value_microunits: 100_000,
-        budget_limit_microunits: 10, // almost no budget
+        budget_limit_microunits: 1, // below every eligible model's rounded cost
         risk_bps: 1000,
         confidence_bps: 9000,
         minimum_quality_bps: 5000,
@@ -113,13 +113,7 @@ fn main() {
         allowed_provider_mask: ALL_PROVIDERS,
         required_region_mask: 0,
     });
-    print_and_log(
-        &decision,
-        3,
-        &names,
-        "Budget exhausted ($0.00001 left)",
-        &mut wal,
-    );
+    print_and_log(&decision, 3, &names, "Budget exhausted (reject)", &mut wal);
 
     // Scenario 4: Risk too high — blocked
     let decision = snapshot.prescribe(KernelInput {

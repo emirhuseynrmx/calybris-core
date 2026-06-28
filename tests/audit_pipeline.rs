@@ -9,12 +9,10 @@ use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
 use calybris_core::wal::{replay_audited_wal_keyed, WalWriter};
 use std::path::PathBuf;
 
-fn temp_path(name: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "target/test-audit-pipeline-{}-{}.jsonl",
-        name,
-        std::process::id()
-    ))
+fn temp_wal(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join(format!("{name}.jsonl"));
+    (dir, path)
 }
 
 fn snapshot() -> PolicySnapshot {
@@ -92,8 +90,7 @@ fn full_audit_pipeline_with_budget_and_keyed_wal() {
     let proof = prove_conservation(&engine).expect("balanced ledger");
     assert_eq!(proof.ledger_digest_hex.len(), 64);
 
-    let path = temp_path("e2e");
-    let _ = std::fs::remove_file(&path);
+    let (_dir, path) = temp_wal("e2e");
     let key = b"audit-pipeline-key-2026";
 
     {
@@ -109,6 +106,4 @@ fn full_audit_pipeline_with_budget_and_keyed_wal() {
     assert!(verdicts[0].policy_digest_match);
     assert!(verdicts[0].input_digest_match);
     assert!(verdicts[0].decision_digest_match);
-
-    let _ = std::fs::remove_file(&path);
 }

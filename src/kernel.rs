@@ -237,6 +237,12 @@ pub struct PolicySnapshot {
     pub hard_risk_limit_bps: u16,
     pub minimum_confidence_bps: u16,
     pub risk_penalty_multiplier_bps: u16,
+    /// Cost penalty per millisecond of p95 latency, in microunits.
+    ///
+    /// No static upper bound — overflow is dynamically guarded by
+    /// `all_latencies_fit` which falls back to `i128` arithmetic when
+    /// `max_p95_latency_ms * latency_penalty_microunits_per_ms` would
+    /// overflow `u64`.
     pub latency_penalty_microunits_per_ms: u64,
     max_quality_bps: u16,
     max_p95_latency_ms: u32,
@@ -782,6 +788,9 @@ impl PolicySnapshot {
             .is_some_and(|(input, output)| input.checked_add(output).is_some())
     }
 
+    /// Build a rejection decision. Returns a default (all-zero) histogram because
+    /// hard-limit rejections (risk, confidence) exit before model evaluation — no
+    /// per-model constraint counts are available.
     fn reject(
         &self,
         input: KernelInput,

@@ -479,12 +479,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn temp_path(name: &str) -> PathBuf {
-        PathBuf::from(format!(
-            "target/test-wal-{}-{}.jsonl",
-            name,
-            std::process::id()
-        ))
+    fn temp_wal(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(format!("{name}.jsonl"));
+        (dir, path)
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -495,8 +493,7 @@ mod tests {
 
     #[test]
     fn append_and_read() {
-        let path = temp_path("append");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("append");
 
         let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
         wal.append(TestDecision {
@@ -518,8 +515,6 @@ mod tests {
         assert_eq!(entries[0].data.model, "gpt-4o");
         assert_eq!(entries[1].data.model, "mini");
         assert_eq!(entries[1].previous_hash, entries[0].entry_hash);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     struct FailingSerialize;
@@ -535,21 +530,17 @@ mod tests {
 
     #[test]
     fn append_serialize_error_does_not_advance_writer_state() {
-        let path = temp_path("append_serialize_error");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("append_serialize_error");
 
         let mut wal = WalWriter::<FailingSerialize>::open(&path).unwrap();
         assert!(wal.append(FailingSerialize).is_err());
         assert_eq!(wal.sequence(), 0);
         assert_eq!(wal.last_hash(), "genesis");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn chain_validates_on_reopen() {
-        let path = temp_path("reopen");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("reopen");
 
         {
             let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
@@ -573,14 +564,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(wal.sequence(), 3);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn tampered_entry_detected() {
-        let path = temp_path("tamper");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("tamper");
 
         {
             let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
@@ -602,14 +590,11 @@ mod tests {
 
         let result = WalWriter::<TestDecision>::open(&path);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn empty_file_starts_fresh() {
-        let path = temp_path("empty");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("empty");
 
         let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
         assert_eq!(wal.sequence(), 0);
@@ -622,8 +607,6 @@ mod tests {
         .unwrap();
         assert_eq!(wal.sequence(), 1);
         assert_ne!(wal.last_hash(), "genesis");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -677,8 +660,7 @@ mod tests {
 
     #[test]
     fn hmac_keyed_chain_validates() {
-        let path = temp_path("hmac-basic");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("hmac-basic");
         let key = b"calybris-secret-key-2026";
 
         {
@@ -696,21 +678,16 @@ mod tests {
             wal.sync().unwrap();
         }
 
-        // Reopen with same key succeeds
         let wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
         assert_eq!(wal.sequence(), 2);
 
-        // verify_wal_keyed also works
         let (count, _) = verify_wal_keyed(&path, key).unwrap();
         assert_eq!(count, 2);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn hmac_wrong_key_rejects() {
-        let path = temp_path("hmac-wrongkey");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("hmac-wrongkey");
 
         {
             let mut wal = WalWriter::<TestDecision>::open_keyed(&path, b"correct-key").unwrap();
@@ -721,21 +698,16 @@ mod tests {
             .unwrap();
         }
 
-        // Wrong key → chain broken
         let result = WalWriter::<TestDecision>::open_keyed(&path, b"wrong-key");
         assert!(result.is_err());
 
-        // No key → also fails (HMAC hash != plain SHA-256 hash)
         let result = WalWriter::<TestDecision>::open(&path);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn hmac_tamper_detected() {
-        let path = temp_path("hmac-tamper");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("hmac-tamper");
         let key = b"audit-key";
 
         {
@@ -752,16 +724,12 @@ mod tests {
             .unwrap();
         }
 
-        // Tamper data
         let content = std::fs::read_to_string(&path).unwrap();
         let tampered = content.replacen("\"cost\":2", "\"cost\":999", 1);
         std::fs::write(&path, tampered).unwrap();
 
-        // Even with the correct key, tamper is detected
         let result = verify_wal_keyed(&path, key);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -776,8 +744,7 @@ mod tests {
 
     #[test]
     fn read_verified_keyed_works() {
-        let path = temp_path("hmac-read-verified");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("hmac-read-verified");
         let key = b"read-key";
 
         {
@@ -792,16 +759,13 @@ mod tests {
         let entries = read_verified_wal_keyed::<TestDecision>(&path, key).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].data.model, "x");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn audited_append_replay_roundtrip() {
         use crate::kernel::*;
 
-        let path = temp_path("audited-replay");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("audited-replay");
 
         let models = vec![KernelModel {
             model_id: 1,
@@ -843,16 +807,13 @@ mod tests {
         let verdicts = replay_audited_wal(&path, &snapshot).unwrap();
         assert_eq!(verdicts.len(), 1);
         assert!(verdicts[0].replay_valid);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn verified_audited_append_replay_roundtrip() {
         use crate::kernel::*;
 
-        let path = temp_path("verified-audited-replay");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("verified-audited-replay");
 
         let models = vec![KernelModel {
             model_id: 1,
@@ -894,16 +855,13 @@ mod tests {
         let verdicts = replay_audited_wal(&path, &snapshot).unwrap();
         assert_eq!(verdicts.len(), 1);
         assert!(verdicts[0].replay_valid);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn verified_audited_append_rejects_tampered_decision_without_advancing() {
         use crate::kernel::*;
 
-        let path = temp_path("verified-audited-tamper");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("verified-audited-tamper");
 
         let models = vec![KernelModel {
             model_id: 1,
@@ -947,16 +905,13 @@ mod tests {
 
         let entries = read_wal::<AuditedRecord<()>>(&path).unwrap();
         assert!(entries.is_empty());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn audited_replay_fails_on_input_digest_mismatch() {
         use crate::kernel::*;
 
-        let path = temp_path("audited-input-tamper");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("audited-input-tamper");
 
         let models = vec![KernelModel {
             model_id: 1,
@@ -1004,14 +959,11 @@ mod tests {
 
         let result = replay_audited_wal(&path, &snapshot);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn duplicate_sequence_rejected() {
-        let path = temp_path("dup-seq");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("dup-seq");
 
         {
             let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
@@ -1033,14 +985,11 @@ mod tests {
 
         let result = verify_wal(&path);
         assert!(matches!(result, Err(WalError::DuplicateSequence(1))));
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn previous_hash_mismatch_rejected() {
-        let path = temp_path("prev-hash");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("prev-hash");
 
         {
             let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
@@ -1067,14 +1016,11 @@ mod tests {
 
         let result = verify_wal(&path);
         assert!(matches!(result, Err(WalError::ChainBroken { .. })));
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn truncated_last_line_rejected() {
-        let path = temp_path("truncated");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("truncated");
 
         {
             let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
@@ -1094,26 +1040,21 @@ mod tests {
 
         let result = verify_wal(&path);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn malformed_json_line_rejected() {
-        let path = temp_path("malformed");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("malformed");
         std::fs::write(&path, "not valid json\n").unwrap();
         let result = verify_wal(&path);
         assert!(matches!(result, Err(WalError::Json(_))));
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn audited_replay_fails_on_policy_digest_mismatch() {
         use crate::kernel::*;
 
-        let path = temp_path("audited-policy-tamper");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("audited-policy-tamper");
 
         let models = vec![KernelModel {
             model_id: 1,
@@ -1161,16 +1102,13 @@ mod tests {
 
         let result = replay_audited_wal(&path, &snapshot);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn audited_replay_fails_on_decision_digest_mismatch() {
         use crate::kernel::*;
 
-        let path = temp_path("audited-decision-tamper");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("audited-decision-tamper");
 
         let models = vec![KernelModel {
             model_id: 1,
@@ -1218,14 +1156,11 @@ mod tests {
 
         let result = replay_audited_wal(&path, &snapshot);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn json_field_reorder_breaks_chain() {
-        let path = temp_path("json-reorder");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = temp_wal("json-reorder");
 
         {
             let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
@@ -1243,11 +1178,8 @@ mod tests {
         std::fs::write(&path, reordered).unwrap();
         let result = verify_wal(&path);
         assert!(result.is_err());
-
-        let _ = std::fs::remove_file(&path);
     }
 
-    // Fuzz-like proptest: random data, random sequence lengths
     use proptest::prelude::*;
 
     proptest! {
@@ -1256,8 +1188,7 @@ mod tests {
             key in prop::array::uniform16(any::<u8>()),
             count in 1_usize..30,
         ) {
-            let path = temp_path(&format!("keyed-{count}"));
-            let _ = std::fs::remove_file(&path);
+            let (_dir, path) = temp_wal(&format!("keyed-{count}"));
 
             {
                 let mut wal = WalWriter::<TestDecision>::open_keyed(&path, &key).unwrap();
@@ -1271,8 +1202,6 @@ mod tests {
 
             let entries = read_verified_wal_keyed::<TestDecision>(&path, &key).unwrap();
             prop_assert_eq!(entries.len(), count);
-
-            let _ = std::fs::remove_file(&path);
         }
 
         #[test]
@@ -1281,8 +1210,7 @@ mod tests {
             cost in any::<i64>(),
             count in 1_usize..50,
         ) {
-            let path = temp_path(&format!("fuzz-{}-{}", cost, count));
-            let _ = std::fs::remove_file(&path);
+            let (_dir, path) = temp_wal(&format!("fuzz-{cost}-{count}"));
 
             {
                 let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
@@ -1294,14 +1222,11 @@ mod tests {
                 }
             }
 
-            // Reopen validates chain
             let wal = WalWriter::<TestDecision>::open(&path).unwrap();
             prop_assert_eq!(wal.sequence() as usize, count);
 
             let entries = read_verified_wal::<TestDecision>(&path).unwrap();
             prop_assert_eq!(entries.len(), count);
-
-            let _ = std::fs::remove_file(&path);
         }
     }
 }

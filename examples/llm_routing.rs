@@ -99,14 +99,14 @@ fn main() {
     run_scenario(
         &snapshot,
         &names,
-        "Budget exhausted",
+        "Budget exhausted (reject)",
         KernelInput {
             request_sequence: 3,
             requested_model_id: 3,
             input_tokens: 8000,
             output_tokens: 4000,
             business_value_microunits: 100_000,
-            budget_limit_microunits: 10,
+            budget_limit_microunits: 1,
             risk_bps: 1000,
             confidence_bps: 9000,
             minimum_quality_bps: 5000,

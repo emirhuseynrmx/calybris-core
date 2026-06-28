@@ -20,8 +20,8 @@ Miri CI deliberately runs a **subset** of the test suite. Skips are intentional 
 | Skipped under Miri | Reason | Covered elsewhere |
 |--------------------|--------|-------------------|
 | `wal::` unit tests | Real file I/O (`CreateFileW` / temp files) — Miri support is limited on some platforms | `audit_pipeline` integration test (E2E WAL under Miri on Linux CI) |
-| Proptests (`aggressive_mixed`, `random_ops`, `arbitrary_*`, `digests_stable`) | Slow under MIR interpretation; property coverage is not Miri’s strength | `PROPTEST_CASES=10000` job in `security.yml` |
-| Concurrent budget tests | Miri is not designed for exhaustive thread interleaving | Loom (`budget_loom`, 6 scenarios) + `cargo test` stress tests |
+| Proptests (`aggressive_mixed`, `random_ops`, `arbitrary_*`, `digests_stable`, `optimized_*`) | Slow under MIR interpretation; property coverage is not Miri’s strength | `PROPTEST_CASES=10000` job in `security.yml` |
+| Concurrent budget tests | Miri is not designed for exhaustive thread interleaving | Loom (`budget_loom`, 7 scenarios) + `cargo test` stress tests |
 | `prescriptive_kernel_latency_guard` | Release-only timing benchmark, not a correctness property | Ignored in normal `cargo test` too |
 
 WAL **hash-chain logic** that does not touch the filesystem still runs indirectly via `audit_pipeline`. Expanding Miri to every `wal::` unit test would duplicate that path with little extra assurance.
@@ -51,11 +51,17 @@ cargo +nightly miri test --lib --all-features -- \
   --skip random_ops \
   --skip arbitrary_ \
   --skip digests_stable \
+  --skip optimized_ \
   --skip prescriptive_kernel
 
-# E2E audit path (temp files; needs isolation disabled)
+# E2E audit path (Linux CI path; temp files need isolation disabled)
 MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --test audit_pipeline
 ```
+
+On Windows, Miri may reject the `OpenOptions` mode used by the WAL audit
+pipeline even with isolation disabled. Treat the audit-pipeline Miri run as a
+Linux CI check; use normal `cargo test --test audit_pipeline` locally on
+Windows.
 
 ## Limits
 

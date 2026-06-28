@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.12] - 2026-06-28
+
+### Changed
+- WAL and audit pipeline tests use `tempfile` crate instead of PID-based paths in `target/`
+- Documented `latency_penalty_microunits_per_ms` dynamic overflow guard (i128 fallback via `all_latencies_fit`)
+- Documented `reject()` intentionally empty `RejectionHistogram` on hard-limit rejections
+
+### Added
+- `tempfile` dev-dependency for proper test isolation
+
 ## [0.3.11] - 2026-06-28
 
 ### Added
