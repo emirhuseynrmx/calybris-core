@@ -1,4 +1,4 @@
-//! README Quick Start — copy-paste runnable demo
+//! README Quick Start - copy-paste runnable demo
 //!
 //! ```bash
 //! cargo run --example quickstart

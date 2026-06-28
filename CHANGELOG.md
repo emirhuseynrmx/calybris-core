@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- README now includes a short "when to use it" section to make the crate boundary clearer on crates.io.
+- GitHub Actions now use `actions/checkout@v7` and `actions/cache@v6`.
+- Quickstart example header now uses ASCII punctuation for cleaner rustdoc rendering across terminals.
+
 ## [0.3.10] - 2026-06-27
 
 ### Fixed

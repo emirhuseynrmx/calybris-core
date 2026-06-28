@@ -32,6 +32,17 @@ candidate + policy constraints → decision + digests + optional WAL + budget pr
 
 Calybris is **not** an exchange, market data feed, colocation stack, or alpha engine. It is a **deterministic pre-trade decision kernel** — integer-only constraints, replay verification, and fixed-point conservation proofs.
 
+## When to use it
+
+Use Calybris when a service has to make the same decision twice and prove it got the same answer:
+
+- route an LLM request under budget, latency, provider, and quality constraints
+- reject or substitute a candidate action before it crosses a risk boundary
+- write an auditable decision record to a tamper-evident WAL
+- reconcile budget state with fixed-point conservation proofs
+
+Do not use it as a hosted API, trading strategy, exchange adapter, web framework, or model orchestration platform. Calybris is the deterministic core you put behind those systems.
+
 ## Try it locally
 
 ```bash
