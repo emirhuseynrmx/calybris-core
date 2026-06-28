@@ -1,7 +1,9 @@
 //! Production-like LLM gateway simulation
 //!
-//! Demonstrates: config → builder → prescribe → verify → budget → WAL → checkpoint
-//! in a realistic multi-tenant scenario with 6 models and 3 tenants.
+//! This example is intentionally boring: every boundary verifies before writing.
+//!
+//! Demonstrates the safe path:
+//! config → builder → prescribe → verify → budget → verified WAL → checkpoint_with_wal → recovery
 //!
 //! ```bash
 //! cargo run --example production_gateway --features wal
@@ -11,8 +13,8 @@ use calybris_core::budget::BudgetEngine;
 use calybris_core::builder::{InputBuilder, ModelBuilder, PolicyBuilder};
 use calybris_core::config::EngineConfig;
 use calybris_core::finance::{certify_ledger, prove_conservation};
-use calybris_core::persistence::{checkpoint, restore};
-use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
+use calybris_core::persistence::{checkpoint_with_wal, recovery_plan, restore};
+use calybris_core::verify::{verify_decision, VerifyResult};
 use calybris_core::wal::WalWriter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,15 +26,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .latency_penalty(3)
         .hard_risk_limit(9_500)
         .minimum_confidence(6_000)
-        .default_exposure_cap(500_000_000);
+        .default_exposure_cap(10_000_000);
     config.validate()?;
     println!(
-        "[config] latency_penalty={}µ/ms, risk_limit={}bps",
-        config.latency_penalty_microunits_per_ms, config.hard_risk_limit_bps
+        "[config] latency_penalty={}µ/ms, risk_limit={}bps, exposure_cap={}µ",
+        config.latency_penalty_microunits_per_ms,
+        config.hard_risk_limit_bps,
+        config.default_exposure_cap_microcents
     );
 
     // ── 2. Build catalog with builders ──
-    let snapshot = PolicyBuilder::new(config)
+    let snapshot = PolicyBuilder::new(config.clone())
         .epochs(1, 1)
         .model(
             ModelBuilder::new(1, 0)
@@ -40,42 +44,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .latency(450)
                 .cost(250, 1000)
                 .build(),
-        ) // gpt-4o
+        )
         .model(
             ModelBuilder::new(2, 0)
                 .quality(7500)
                 .latency(120)
                 .cost(15, 60)
                 .build(),
-        ) // gpt-4o-mini
+        )
         .model(
             ModelBuilder::new(3, 1)
                 .quality(9200)
                 .latency(380)
                 .cost(300, 1500)
                 .build(),
-        ) // claude-sonnet
+        )
         .model(
             ModelBuilder::new(4, 1)
                 .quality(7000)
                 .latency(90)
                 .cost(25, 125)
                 .build(),
-        ) // claude-haiku
+        )
         .model(
             ModelBuilder::new(5, 2)
                 .quality(8800)
                 .latency(320)
                 .cost(125, 500)
                 .build(),
-        ) // gemini-pro
+        )
         .model(
             ModelBuilder::new(6, 2)
                 .quality(7200)
                 .latency(80)
                 .cost(8, 30)
                 .build(),
-        ) // gemini-flash
+        )
         .build()?;
 
     let model_names = [
@@ -88,13 +92,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     println!("[catalog] {} models loaded\n", snapshot.models().len());
 
-    // ── 3. Budget engine with 3 tenants ──
+    // ── 3. Budget engine with config-driven tenant init ──
     let budget = BudgetEngine::new();
-    budget.ensure_tenant("team-platform", 100_000_000);
-    budget.ensure_tenant("team-support", 50_000_000);
-    budget.ensure_tenant("team-compliance", 200_000_000);
-    budget.set_max_reserved_microcents("team-support", 10_000_000);
-    println!("[budget] 3 tenants initialized\n");
+    config.ensure_tenant(&budget, "team-platform", 100_000_000);
+    config.ensure_tenant(&budget, "team-support", 50_000_000);
+    config.ensure_tenant(&budget, "team-compliance", 200_000_000);
+    println!("[budget] 3 tenants initialized (exposure cap from config)\n");
 
     // ── 4. WAL ──
     let wal_path = std::path::PathBuf::from("production_gateway_demo.jsonl");
@@ -106,14 +109,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (
             "team-platform",
             "compliance review",
-            1,
-            1,
-            4000,
-            2000,
-            500_000,
-            2000,
-            9000,
-            9000,
+            1u64,
+            1u32,
+            4000u32,
+            2000u32,
+            500_000i64,
+            2000u16,
+            9000u16,
+            9000u16,
         ),
         (
             "team-support",
@@ -176,13 +179,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build();
 
         let (decision, trace) = snapshot.prescribe_with_trace(input);
+
+        // Verify before anything else
         assert_eq!(
             verify_decision(&snapshot, input, &decision),
             VerifyResult::Valid
         );
-
-        let bundle = audit_bundle(&snapshot, input, &decision);
-        assert!(bundle.replay_valid);
 
         // Budget reservation
         let cost = decision.estimated_cost_microunits as i64;
@@ -219,7 +221,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!();
 
-        wal.append_audited(&snapshot, input, decision, scenario.to_string())?;
+        // Fail-closed WAL append — invalid decisions never enter the log
+        wal.append_verified_audited(&snapshot, input, decision, scenario.to_string())?;
     }
     wal.flush_and_sync()?;
     println!("[wal] {} entries written\n", wal.sequence());
@@ -234,16 +237,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("[finance] digest: {}…\n", &cert.ledger_digest_hex[..16]);
 
-    // ── 7. Checkpoint ──
+    // ── 7. Checkpoint with WAL high-watermark ──
     let snap_path = std::path::PathBuf::from("production_gateway_snapshot.json");
-    let snap = checkpoint(&budget, &snap_path)?;
+    let snap = checkpoint_with_wal(&budget, &snap_path, wal.sequence())?;
     println!(
-        "[checkpoint] saved {} tenants to {}",
+        "[checkpoint] saved {} tenants, wal_watermark={} to {}",
         snap.tenants.len(),
+        snap.wal_high_watermark.unwrap_or(0),
         snap_path.display()
     );
 
     // ── 8. Simulate crash recovery ──
+    let plan = recovery_plan(&snap_path, &wal_path)?;
+    println!(
+        "[recovery] plan: {} total WAL entries, {} to replay (watermark={})",
+        plan.total_wal_entries, plan.entries_to_replay, plan.wal_high_watermark
+    );
+
     let fresh_budget = BudgetEngine::new();
     let restored = restore(&fresh_budget, &snap_path)?;
     println!(
@@ -252,7 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     for t in &restored.tenants {
         println!(
-            "  {} → remaining={}, committed={}",
+            "  {} -> remaining={}, committed={}",
             t.tenant_id, t.remaining_microcents, t.committed_microcents
         );
     }
@@ -261,6 +271,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(&wal_path);
     let _ = std::fs::remove_file(&snap_path);
 
-    println!("\n✓ Full pipeline: config → build → prescribe → verify → budget → WAL → checkpoint → recovery");
+    println!("\nFull pipeline: config -> build -> prescribe -> verify -> budget -> verified WAL -> checkpoint_with_wal -> recovery");
     Ok(())
 }

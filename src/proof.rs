@@ -102,10 +102,14 @@ impl ProofEnvelopeBuilder {
 }
 
 impl ProofEnvelope {
-    /// Whether all evidence fields are populated (WAL + budget + replay).
+    /// Whether all evidence fields are populated (replay + WAL position + WAL hash + budget version + ledger digest).
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.replay_valid && self.wal_sequence.is_some() && self.budget_snapshot_version.is_some()
+        self.replay_valid
+            && self.wal_sequence.is_some()
+            && self.wal_entry_hash.is_some()
+            && self.budget_snapshot_version.is_some()
+            && self.ledger_digest_hex.is_some()
     }
 }
 

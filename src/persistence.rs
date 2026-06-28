@@ -98,14 +98,19 @@ pub fn restore(engine: &BudgetEngine, path: &Path) -> Result<BudgetSnapshot, Per
 /// to determine which WAL entries are newer than the checkpoint. If no watermark
 /// is set, all WAL entries are counted as needing replay.
 #[cfg(feature = "wal")]
-pub fn recovery_plan(
+fn recovery_plan_inner(
     snapshot_path: &Path,
     wal_path: &Path,
+    key: Option<&[u8]>,
 ) -> Result<RecoveryPlan, PersistenceError> {
     let snapshot = load_snapshot(snapshot_path)?;
 
-    let entries = crate::wal::read_wal::<serde_json::Value>(wal_path)
-        .map_err(|e| PersistenceError::Io(std::io::Error::other(e.to_string())))?;
+    let entries = if let Some(k) = key {
+        crate::wal::read_verified_wal_keyed::<serde_json::Value>(wal_path, k)
+    } else {
+        crate::wal::read_verified_wal::<serde_json::Value>(wal_path)
+    }
+    .map_err(|e| PersistenceError::Io(std::io::Error::other(e.to_string())))?;
 
     let high = snapshot.wal_high_watermark.unwrap_or(0);
     let entries_to_replay = entries.iter().filter(|e| e.sequence > high).count();
@@ -116,6 +121,28 @@ pub fn recovery_plan(
         entries_to_replay,
         wal_high_watermark: high,
     })
+}
+
+/// Recovery plan with chain-verified WAL read (unkeyed).
+///
+/// Verifies the WAL hash chain before counting entries. Use
+/// [`recovery_plan_keyed`] for HMAC-keyed WAL files.
+#[cfg(feature = "wal")]
+pub fn recovery_plan(
+    snapshot_path: &Path,
+    wal_path: &Path,
+) -> Result<RecoveryPlan, PersistenceError> {
+    recovery_plan_inner(snapshot_path, wal_path, None)
+}
+
+/// Recovery plan with chain-verified WAL read (HMAC-keyed).
+#[cfg(feature = "wal")]
+pub fn recovery_plan_keyed(
+    snapshot_path: &Path,
+    wal_path: &Path,
+    key: &[u8],
+) -> Result<RecoveryPlan, PersistenceError> {
+    recovery_plan_inner(snapshot_path, wal_path, Some(key))
 }
 
 /// A recovery plan describing what needs to happen to restore state.

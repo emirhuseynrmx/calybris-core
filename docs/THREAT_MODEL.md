@@ -1,6 +1,6 @@
 # Threat Model — Calybris Core (OSS)
 
-**Scope:** `calybris-core` crate v0.3.x — deterministic decision kernel, digest binding, optional WAL, CAS budget engine.
+**Scope:** `calybris-core` crate v0.4.x — deterministic decision kernel, digest binding, optional WAL, CAS budget engine, persistence, async WAL, proof envelope.
 
 **Out of scope:** Network transport, authentication, provider credentials, deployment hardening (see proprietary engine).
 
