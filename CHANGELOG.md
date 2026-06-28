@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature flags: `async` (tokio WAL), `observability` (tracing), `full` (wal + async + observability)
 - `production_gateway` example: full pipeline demo with 6 models, 3 tenants, config, builders, WAL, checkpoint, crash recovery
 - Proptest coverage for config validation and builder→prescribe roundtrips
-- 136 tests passing (was 106)
+- 145+ tests passing (was 106)
 
 ### Changed
 - Version bump to 0.4.0 (new public modules = minor version)

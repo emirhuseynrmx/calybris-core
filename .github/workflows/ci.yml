@@ -46,6 +46,12 @@ jobs:
       - name: Test (no default features)
         run: cargo test --locked --no-default-features
 
+      - name: Test (async feature only)
+        run: cargo check --locked --no-default-features --features async
+
+      - name: Test (full features)
+        run: cargo test --locked --features full
+
       - name: Integration audit pipeline
         run: cargo test --locked --test audit_pipeline
 
@@ -107,3 +113,4 @@ jobs:
           cargo run --locked --example finance_hft
           cargo run --locked --example simple_kernel
           cargo run --locked --example verify_wal
+          cargo run --locked --example production_gateway

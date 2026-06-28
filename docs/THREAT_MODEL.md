@@ -19,7 +19,7 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Your application (trusted caller)                      │
-│    prescribe / reserve / append_audited                 │
+│    prescribe / reserve / append_verified_audited                 │
 └──────────────────────────┬──────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────┐
@@ -32,7 +32,7 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **Trusted:** Code that calls `prescribe`, `try_reserve`, `append_audited` with honest inputs.
+- **Trusted:** Code that calls `prescribe`, `try_reserve`, `append_verified_audited` with honest inputs.
 - **Untrusted:** WAL files at rest (assume attacker can edit bytes unless HMAC key is secret).
 - **Assumed honest:** Callers do not invoke `read_wal` on attacker-controlled files and treat output as verified.
 

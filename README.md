@@ -178,7 +178,7 @@ assert!(cert.conservation_balanced);
 | Feature | What it adds | Dependencies |
 |---------|-------------|--------------|
 | `wal` *(default)* | Hash-chained WAL, HMAC-SHA256, audited append | `serde`, `hmac`, `subtle` |
-| `async` | Tokio-based async WAL | `tokio` |
+| `async` | Tokio-based async WAL | `wal` + `tokio` |
 | `observability` | Structured tracing spans/events | `tracing` |
 | `full` | All of the above | — |
 
@@ -269,7 +269,7 @@ cargo +nightly miri test --lib --all-features   # see docs/MIRI.md for CI filter
 cargo doc --no-deps
 ```
 
-**145 tests passing.** Tested on **Rust 1.85.0** (MSRV) and **stable**. Miri runs on **nightly** in CI (UB detection); 7 Loom exhaustive tests cover budget concurrency interleavings. Feature matrix CI: `default`, `--no-default-features`, `--features async`, `--features full`.
+Extensive test coverage across unit, property-based (proptest), 7 Loom exhaustive concurrency, and Miri UB detection targets. Feature matrix CI: `default`, `no-default-features`, `async`, `full`. See CI for the current test count.
 
 ## Integration contract
 

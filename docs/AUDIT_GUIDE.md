@@ -43,7 +43,9 @@ See [MIRI.md](MIRI.md) for CI-equivalent `--skip` filters and **why** those test
 |--------|---------------|------------|
 | `kernel` | Decision logic | `prescribe`, `PolicySnapshot::validate` |
 | `digest` | Canonical hashing | `policy_digest`, `input_digest`, `decision_digest` |
-| `verify` | Replay + certificates | `verify_decision`, `audit_bundle` |
+| `verify` | Replay + certificates | `verify_decision`, `verified_audit_bundle` |
+| `proof` | Evidence packaging | `ProofEnvelope`, `seal` |
+| `persistence` | Crash recovery | `checkpoint_with_wal`, `recovery_plan`, `restore` |
 | `wal` | Tamper-evident log | `validate_chain_inner`, `replay_audited_wal_keyed` |
 | `budget` | CAS conservation | `debit_if_available`, `verify_conservation`, `restore_from_snapshot` |
 | `finance` | Ledger binding | `prove_conservation`, `ConservationProof`, `certify_snapshot`, `ledger_digest` |
@@ -79,7 +81,10 @@ Calybris does **not** call `verify_decision` inside `prescribe` or budget hot pa
 
 1. `prescribe` → obtain `KernelDecision`
 2. **`verify_decision`** at audit boundary (before WAL append, before external export)
-3. Optional: `audit_bundle` + `append_audited` + `prove_conservation` / `certify_ledger`
+3. **`append_verified_audited`** — fail-closed WAL write (verifies before writing)
+4. Optional: `prove_conservation` / `certify_ledger` / `ProofEnvelope`
+
+Use `append_verified_audited` at production boundaries. `append_audited` (unverified) is an escape hatch for tests and pre-verified internal paths — not for production audit boundaries.
 
 Skipping step 2 is a deployment choice, not a library default — document it in your threat model.
 
