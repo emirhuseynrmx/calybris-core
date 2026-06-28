@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-29
+
+### Added
+- `config` module: `EngineConfig` with builder pattern, validation, and safe defaults for latency penalty, risk limits, exposure caps, WAL sync, catalog size
+- `builder` module: `InputBuilder`, `ModelBuilder`, `PolicyBuilder` — hard-to-misuse constructors with safe defaults
+- `async_wal` module (feature `async`): Tokio-based non-blocking WAL with HMAC-SHA256, chain validation, configurable sync-on-append
+- `persistence` module: atomic snapshot save/load (`checkpoint`, `restore`), crash `recovery_plan` with WAL entry counting
+- `instrument` module (feature `observability`): structured `tracing` spans for `prescribe`, `verify`, budget ops, WAL; `EngineMetrics` struct for Prometheus/OTel export
+- Feature flags: `async` (tokio WAL), `observability` (tracing), `full` (wal + async + observability)
+- `production_gateway` example: full pipeline demo with 6 models, 3 tenants, config, builders, WAL, checkpoint, crash recovery
+- Proptest coverage for config validation and builder→prescribe roundtrips
+- 136 tests passing (was 106)
+
+### Changed
+- Version bump to 0.4.0 (new public modules = minor version)
+- README: feature flag table, builder ergonomics section, persistence/recovery docs, 136 test count, 91.6% coverage
+
 ## [0.3.12] - 2026-06-28
 
 ### Changed
