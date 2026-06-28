@@ -10,7 +10,7 @@
 
 use crate::digest::{bytes_to_hex, digest_to_hex, policy_digest};
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
-use crate::verify::{audit_bundle, verify_decision, VerifyResult};
+use crate::verify::{audit_bundle, verified_audit_bundle, verify_decision, VerifyResult};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,6 +93,33 @@ where
         };
         self.append(record)
     }
+
+    /// Verify and append an audited decision record.
+    ///
+    /// Unlike [`append_audited`](Self::append_audited), this method fails closed
+    /// before writing when `decision` does not exactly replay from
+    /// `snapshot.prescribe(input)`.
+    pub fn append_verified_audited(
+        &mut self,
+        snapshot: &PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        metadata: M,
+    ) -> Result<WalEntry<AuditedRecord<M>>, WalError> {
+        let audit = verified_audit_bundle(snapshot, input, &decision).map_err(|result| {
+            WalError::AuditFailed {
+                sequence: self.sequence.saturating_add(1),
+                reason: format!("verify_decision failed: {result:?}"),
+            }
+        })?;
+        let record = AuditedRecord {
+            audit,
+            input,
+            decision,
+            metadata,
+        };
+        self.append(record)
+    }
 }
 
 /// Append an audited record to any WAL writer.
@@ -107,6 +134,23 @@ where
     M: Serialize,
 {
     wal.append_audited(snapshot, input, decision, metadata)
+}
+
+/// Verify and append an audited record to any audited WAL writer.
+///
+/// This is the fail-closed convenience function for deployment boundaries where
+/// an invalid decision must not enter the WAL.
+pub fn append_verified_audited<M>(
+    wal: &mut WalWriter<AuditedRecord<M>>,
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: KernelDecision,
+    metadata: M,
+) -> Result<WalEntry<AuditedRecord<M>>, WalError>
+where
+    M: Serialize,
+{
+    wal.append_verified_audited(snapshot, input, decision, metadata)
 }
 
 fn compute_hash(
@@ -799,6 +843,110 @@ mod tests {
         let verdicts = replay_audited_wal(&path, &snapshot).unwrap();
         assert_eq!(verdicts.len(), 1);
         assert!(verdicts[0].replay_valid);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn verified_audited_append_replay_roundtrip() {
+        use crate::kernel::*;
+
+        let path = temp_path("verified-audited-replay");
+        let _ = std::fs::remove_file(&path);
+
+        let models = vec![KernelModel {
+            model_id: 1,
+            provider_id: 0,
+            quality_bps: 9000,
+            risk_ceiling_bps: 9500,
+            enabled: 1,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }];
+        let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models).unwrap();
+        let input = KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        let decision = snapshot.prescribe(input);
+
+        {
+            let mut wal = WalWriter::open(&path).unwrap();
+            append_verified_audited(&mut wal, &snapshot, input, decision, "meta".to_string())
+                .unwrap();
+            wal.sync().unwrap();
+        }
+
+        let verdicts = replay_audited_wal(&path, &snapshot).unwrap();
+        assert_eq!(verdicts.len(), 1);
+        assert!(verdicts[0].replay_valid);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn verified_audited_append_rejects_tampered_decision_without_advancing() {
+        use crate::kernel::*;
+
+        let path = temp_path("verified-audited-tamper");
+        let _ = std::fs::remove_file(&path);
+
+        let models = vec![KernelModel {
+            model_id: 1,
+            provider_id: 0,
+            quality_bps: 9000,
+            risk_ceiling_bps: 9500,
+            enabled: 1,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }];
+        let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models).unwrap();
+        let input = KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        let mut decision = snapshot.prescribe(input);
+        decision.selected_model_id = 999;
+
+        let mut wal = WalWriter::open(&path).unwrap();
+        let result = wal.append_verified_audited(&snapshot, input, decision, ());
+        assert!(matches!(
+            result,
+            Err(WalError::AuditFailed { sequence: 1, .. })
+        ));
+        assert_eq!(wal.sequence(), 0);
+        assert_eq!(wal.last_hash(), "genesis");
+
+        let entries = read_wal::<AuditedRecord<()>>(&path).unwrap();
+        assert!(entries.is_empty());
 
         let _ = std::fs::remove_file(&path);
     }

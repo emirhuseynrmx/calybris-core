@@ -47,6 +47,45 @@ impl std::fmt::Display for DigestDecodeError {
 
 impl std::error::Error for DigestDecodeError {}
 
+/// Error returned by fail-closed verification helpers.
+///
+/// This wrapper keeps `Result<_, VerifyError>` compact while preserving the
+/// full [`VerifyResult`] for diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifyError {
+    result: Box<VerifyResult>,
+}
+
+impl VerifyError {
+    /// Create a verification error from a non-valid [`VerifyResult`].
+    #[must_use]
+    pub fn new(result: VerifyResult) -> Self {
+        Self {
+            result: Box::new(result),
+        }
+    }
+
+    /// Inspect the underlying verification result.
+    #[must_use]
+    pub fn result(&self) -> &VerifyResult {
+        &self.result
+    }
+
+    /// Consume the wrapper and return the underlying verification result.
+    #[must_use]
+    pub fn into_result(self) -> VerifyResult {
+        *self.result
+    }
+}
+
+impl std::fmt::Display for VerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "decision verification failed: {:?}", self.result)
+    }
+}
+
+impl std::error::Error for VerifyError {}
+
 /// Binds a decision to its policy and input via canonical SHA-256 digests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -93,6 +132,22 @@ pub fn audit_bundle(
         input_digest_hex: digest_to_hex(&input_d),
         decision_digest_hex: digest_to_hex(&decision_d),
         replay_valid: replayed == *decision,
+    }
+}
+
+/// Verify a decision and return its [`AuditBundle`] only if it replays exactly.
+///
+/// This is the recommended helper at audit boundaries where a caller wants a
+/// fail-closed proof package rather than an [`AuditBundle`] with
+/// `replay_valid == false`.
+pub fn verified_audit_bundle(
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: &KernelDecision,
+) -> Result<AuditBundle, VerifyError> {
+    match verify_decision(snapshot, input, decision) {
+        VerifyResult::Valid => Ok(audit_bundle(snapshot, input, decision)),
+        error => Err(VerifyError::new(error)),
     }
 }
 
@@ -312,6 +367,32 @@ mod tests {
         assert_eq!(bundle.policy_digest_hex.len(), 64);
         assert_eq!(bundle.input_digest_hex.len(), 64);
         assert_eq!(bundle.decision_digest_hex.len(), 64);
+    }
+
+    #[test]
+    fn verified_audit_bundle_returns_bundle_for_valid_decision() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        let bundle = verified_audit_bundle(&snap, input, &decision).unwrap();
+        assert!(bundle.replay_valid);
+        assert_eq!(bundle.policy_digest_hex.len(), 64);
+        assert_eq!(bundle.input_digest_hex.len(), 64);
+        assert_eq!(bundle.decision_digest_hex.len(), 64);
+    }
+
+    #[test]
+    fn verified_audit_bundle_rejects_tampered_decision() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let mut decision = snap.prescribe(input);
+        decision.selected_model_id = 999;
+        let result = verified_audit_bundle(&snap, input, &decision);
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error.result(),
+            VerifyResult::DigestMismatch { .. } | VerifyResult::Mismatch { .. }
+        ));
     }
 
     #[test]

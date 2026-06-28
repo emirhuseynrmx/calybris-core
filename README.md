@@ -202,6 +202,24 @@ prescribe → verify_decision → (optional WAL / prove_conservation)
 
 Recommended hooks: before `append_audited`, at reconciliation, before exporting a `FinancialCertificate`. Skipping verification is a deployment risk, not a library default. See [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md).
 
+For fail-closed audit boundaries, use the verified helpers:
+
+```rust
+use calybris_core::verify::verified_audit_bundle;
+
+let bundle = verified_audit_bundle(&snapshot, input, &decision)?;
+assert!(bundle.replay_valid);
+```
+
+With the `wal` feature enabled, `append_verified_audited` verifies before writing. Invalid or tampered decisions do not enter the log:
+
+```rust
+use calybris_core::wal::WalWriter;
+
+let mut wal = WalWriter::open(std::path::Path::new("decisions.jsonl"))?;
+wal.append_verified_audited(&snapshot, input, decision, "metadata")?;
+```
+
 ## External audit
 
 Invariant docs, adversarial tests, Loom, Miri, and supply-chain checks are in place for third-party review. A paid external audit is still your responsibility — see [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) §7.

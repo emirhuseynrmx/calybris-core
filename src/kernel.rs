@@ -196,6 +196,35 @@ pub struct KernelDecision {
     pub catalog_epoch: u64,
 }
 
+impl KernelDecision {
+    /// Returns `true` when the decision selected a model that may be executed.
+    #[must_use]
+    pub const fn is_executable(&self) -> bool {
+        matches!(
+            self.action,
+            KernelAction::ExecuteRequested | KernelAction::Substitute
+        )
+    }
+
+    /// Returns `true` when the requested model was selected.
+    #[must_use]
+    pub const fn is_requested_execution(&self) -> bool {
+        matches!(self.action, KernelAction::ExecuteRequested)
+    }
+
+    /// Returns `true` when a different eligible model was selected.
+    #[must_use]
+    pub const fn is_substitution(&self) -> bool {
+        matches!(self.action, KernelAction::Substitute)
+    }
+
+    /// Returns `true` when the request failed closed and no model was selected.
+    #[must_use]
+    pub const fn is_rejected(&self) -> bool {
+        matches!(self.action, KernelAction::Reject)
+    }
+}
+
 /// An immutable snapshot of the decision policy and model catalog.
 ///
 /// Create with [`PolicySnapshot::try_new`] (validated) or [`PolicySnapshot::new_unchecked`],
@@ -1073,6 +1102,31 @@ mod tests {
         let decision = snapshot().prescribe(request);
         assert_eq!(decision.action, KernelAction::Substitute);
         assert_eq!(decision.selected_model_id, 10);
+    }
+
+    #[test]
+    fn decision_action_helpers_match_action() {
+        let requested = snapshot().prescribe(input());
+        assert!(requested.is_executable());
+        assert!(requested.is_requested_execution());
+        assert!(!requested.is_substitution());
+        assert!(!requested.is_rejected());
+
+        let mut substitute_input = input();
+        substitute_input.budget_limit_microunits = 1_000;
+        let substitute = snapshot().prescribe(substitute_input);
+        assert!(substitute.is_executable());
+        assert!(!substitute.is_requested_execution());
+        assert!(substitute.is_substitution());
+        assert!(!substitute.is_rejected());
+
+        let mut rejected_input = input();
+        rejected_input.risk_bps = 9_900;
+        let rejected = snapshot().prescribe(rejected_input);
+        assert!(!rejected.is_executable());
+        assert!(!rejected.is_requested_execution());
+        assert!(!rejected.is_substitution());
+        assert!(rejected.is_rejected());
     }
 
     fn base_model(model_id: u32, enabled: u8) -> KernelModel {

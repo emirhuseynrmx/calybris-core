@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.11] - 2026-06-28
+
+### Added
+- `KernelDecision::{is_executable,is_requested_execution,is_substitution,is_rejected}` helpers.
+- `verify::VerifyError` compact error wrapper for fail-closed verification helpers.
+- `verify::verified_audit_bundle`, which returns an audit bundle only after exact replay verification.
+- `wal::WalWriter::append_verified_audited` and `wal::append_verified_audited`, fail-closed WAL append helpers for audited deployments.
 
 ### Changed
 - README now includes a short "when to use it" section to make the crate boundary clearer on crates.io.
