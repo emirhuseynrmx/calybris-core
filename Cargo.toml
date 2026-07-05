@@ -38,8 +38,8 @@ tracing = { version = "0.1", optional = true }
 loom = { version = "0.7", features = ["checkpoint"] }
 
 [dev-dependencies]
+criterion = { version = "5.0.1", package = "codspeed-criterion-compat", features = ["html_reports"] }
 proptest = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "fs", "io-util", "sync"] }
 
