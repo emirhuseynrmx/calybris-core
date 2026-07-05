@@ -45,7 +45,8 @@ examples/
   simple_kernel.rs
   route_decision.rs
   replay_audit.rs
-  finance_hft.rs
+  budget_guard.rs
+  pretrade_guard.rs
   verify_wal.rs
 ```
 

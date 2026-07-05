@@ -1,0 +1,23 @@
+[package]
+name = "calybris-core-python"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Python bindings for the Calybris deterministic decision kernel"
+publish = false
+
+[lib]
+name = "calybris_core"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+calybris-core-rs = { package = "calybris-core", path = "../..", version = "0.5.0", default-features = false }
+# abi3-py310: build against the CPython stable ABI so ONE wheel per platform
+# covers Python 3.10+ — turns a 16-wheel matrix into ~4 and works on future
+# CPython releases with no rebuild.
+pyo3 = { version = "0.29", features = ["auto-initialize", "abi3-py310"] }

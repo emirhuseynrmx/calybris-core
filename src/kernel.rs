@@ -5,7 +5,8 @@
 //!
 //! # Performance
 //!
-//! 8.6M decisions/sec on a single core (115ns per decision, 22-model catalog).
+//! ~8.6M decisions/sec on CodSpeed CI (Linux x86_64, release, ~115ns/decision,
+//! 22-model synthetic catalog). Hardware and workload dependent — see `benches/kernel_bench.rs`.
 //! All arithmetic is `u64`/`i64`/`i128` — no `f64` anywhere in the hot path.
 //!
 //! # Safety
@@ -85,6 +86,48 @@ pub struct KernelInput {
     pub allowed_provider_mask: u64,
     /// Required region bitmask (0 = no constraint).
     pub required_region_mask: u64,
+}
+
+/// Input boundary validation errors.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InputError {
+    #[error("{field} must be <= {max}, got {value}")]
+    OutOfRangeBps {
+        field: &'static str,
+        value: u16,
+        max: u16,
+    },
+}
+
+impl KernelInput {
+    /// Validate basis-point fields before the hot prescribe path.
+    ///
+    /// Call at API boundaries (Python bindings, HTTP gateways, builders) so
+    /// out-of-range values cannot silently truncate via `u16` casts.
+    pub fn validate(&self) -> Result<(), InputError> {
+        if self.risk_bps > MAX_BPS {
+            return Err(InputError::OutOfRangeBps {
+                field: "risk_bps",
+                value: self.risk_bps,
+                max: MAX_BPS,
+            });
+        }
+        if self.confidence_bps > MAX_BPS {
+            return Err(InputError::OutOfRangeBps {
+                field: "confidence_bps",
+                value: self.confidence_bps,
+                max: MAX_BPS,
+            });
+        }
+        if self.minimum_quality_bps > MAX_BPS {
+            return Err(InputError::OutOfRangeBps {
+                field: "minimum_quality_bps",
+                value: self.minimum_quality_bps,
+                max: MAX_BPS,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// The action the kernel decided to take.
@@ -1151,6 +1194,29 @@ mod tests {
             input_cost_microunits_per_million_tokens: 100,
             output_cost_microunits_per_million_tokens: 400,
         }
+    }
+
+    #[test]
+    fn input_validate_rejects_out_of_range_bps() {
+        let mut request = input();
+        request.confidence_bps = 10_001;
+        assert_eq!(
+            request.validate(),
+            Err(InputError::OutOfRangeBps {
+                field: "confidence_bps",
+                value: 10_001,
+                max: MAX_BPS,
+            })
+        );
+    }
+
+    #[test]
+    fn input_validate_accepts_boundary_bps() {
+        let mut request = input();
+        request.risk_bps = MAX_BPS;
+        request.confidence_bps = MAX_BPS;
+        request.minimum_quality_bps = MAX_BPS;
+        assert!(request.validate().is_ok());
     }
 
     #[test]

@@ -1,17 +1,24 @@
 [package]
 name = "calybris-core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "Deterministic proof-carrying decision core with replay verification, WAL, and fixed-point budget proofs"
 repository = "https://github.com/emirhuseynrmx/calybris-core"
-homepage = "https://emirhuseyin.tech/engine"
+homepage = "https://github.com/emirhuseynrmx/calybris-core"
 documentation = "https://docs.rs/calybris-core"
 readme = "README.md"
 keywords = ["decision-engine", "proof-carrying", "write-ahead-log", "budget-engine", "deterministic"]
 categories = ["algorithms", "finance"]
-exclude = ["assets/", ".github/"]
+# Published crate is kernel-only: the Python wrapper source and its build
+# config live in the repo but do not belong in the crates.io artifact.
+exclude = ["assets/", ".github/", "python/", "pyproject.toml"]
+
+[workspace]
+members = [".", "bindings/python"]
+default-members = ["."]
+resolver = "2"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
@@ -22,14 +29,16 @@ serde = ["dep:serde", "dep:serde_json"]
 wal = ["serde", "dep:hmac", "dep:subtle"]
 async = ["wal", "dep:tokio"]
 observability = ["dep:tracing"]
-full = ["wal", "async", "observability"]
+provenance = ["dep:ed25519-dalek"]
+full = ["wal", "async", "observability", "provenance"]
 
 [dependencies]
 sha2 = "0.11"
 hmac = { version = "0.13", optional = true }
 subtle = { version = "2.6", optional = true }
+ed25519-dalek = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", features = ["preserve_order"], optional = true }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"], optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "sync"], optional = true }
 tracing = { version = "0.1", optional = true }
@@ -38,10 +47,30 @@ tracing = { version = "0.1", optional = true }
 loom = { version = "0.7", features = ["checkpoint"] }
 
 [dev-dependencies]
-criterion = { version = "5.0.1", package = "codspeed-criterion-compat", features = ["html_reports"] }
 proptest = "1"
+criterion = { version = "5.0.1", package = "codspeed-criterion-compat", features = ["html_reports"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "fs", "io-util", "sync"] }
+
+[[bin]]
+name = "calybris-verify"
+path = "src/bin/calybris_verify.rs"
+required-features = ["wal"]
+
+[[example]]
+name = "gen_golden_vectors"
+path = "examples/gen_golden_vectors.rs"
+required-features = ["wal"]
+
+[[example]]
+name = "gen_conformance_vectors"
+path = "examples/gen_conformance_vectors.rs"
+required-features = ["wal"]
+
+[[example]]
+name = "gen_proof_surface_vectors"
+path = "examples/gen_proof_surface_vectors.rs"
+required-features = ["wal", "provenance"]
 
 [[example]]
 name = "quickstart"
@@ -62,8 +91,8 @@ path = "examples/llm_routing.rs"
 required-features = ["wal"]
 
 [[example]]
-name = "hft_pretrade_guard"
-path = "examples/hft_pretrade_guard.rs"
+name = "pretrade_guard"
+path = "examples/pretrade_guard.rs"
 
 [[example]]
 name = "route_decision"
@@ -76,8 +105,8 @@ path = "examples/replay_audit.rs"
 required-features = ["wal"]
 
 [[example]]
-name = "finance_hft"
-path = "examples/finance_hft.rs"
+name = "budget_guard"
+path = "examples/budget_guard.rs"
 
 [[bench]]
 name = "kernel_bench"
@@ -87,6 +116,11 @@ harness = false
 name = "audit_pipeline"
 path = "tests/audit_pipeline.rs"
 required-features = ["wal"]
+
+[[test]]
+name = "conformance_proof_surfaces"
+path = "tests/conformance_proof_surfaces.rs"
+required-features = ["wal", "provenance"]
 
 [[test]]
 name = "budget_loom"
@@ -100,6 +134,11 @@ required-features = ["wal"]
 [[bench]]
 name = "budget_bench"
 harness = false
+
+[[bench]]
+name = "proof_bench"
+harness = false
+required-features = ["wal", "provenance"]
 
 [profile.release]
 lto = true

@@ -1,0 +1,67 @@
+{
+  "spec": "CALY-PROOF v1 conformance suite",
+  "comment": "One shared policy, many inputs exercising each decision outcome. Any conforming implementation MUST reproduce every digest and decision field. A mismatch is a breaking proof-format change requiring a new digest tag.",
+  "policy_digest_hex": "b24bcc619cd4ad0631bfa7a02ed72a5365abe336ce588c27ba7b7a1634542e71",
+  "cases": [
+    {
+      "label": "execute_requested",
+      "request_sequence": 1,
+      "input_digest_hex": "c30c3b1bba5b740e55e23d58862ec0ae841eab999ae1db413a0ba16010b7b3c5",
+      "decision_digest_hex": "fcadcf252eb835c2acad8d1430f208404091ed47831e24f990e2d864e2ff1dfa",
+      "reason": "requested_model_maximizes_utility",
+      "selected_model_id": 1,
+      "estimated_cost_microunits": 2,
+      "expected_utility_microunits": 77098
+    },
+    {
+      "label": "substitute",
+      "request_sequence": 2,
+      "input_digest_hex": "e48fc6d772349323127bcd5dfda375dce57d5990b6a9e54c920381de2f445792",
+      "decision_digest_hex": "6831fd76e5bb216062d84293eaa48a034ca5ce90a99a3867995c5766ef3a59f3",
+      "reason": "alternative_maximizes_utility",
+      "selected_model_id": 1,
+      "estimated_cost_microunits": 2,
+      "expected_utility_microunits": 3874598
+    },
+    {
+      "label": "reject_risk_hard_limit",
+      "request_sequence": 3,
+      "input_digest_hex": "91ba0c0cf8e0828d546ee98457792f7a56227f43bd0da3d914b99c112e39faab",
+      "decision_digest_hex": "854381db977c0775cff3b8fb6f6606f4bc9fe79876f8ebfcf39e34a3642bbe14",
+      "reason": "risk_hard_limit",
+      "selected_model_id": 0,
+      "estimated_cost_microunits": 0,
+      "expected_utility_microunits": 0
+    },
+    {
+      "label": "reject_confidence_hard_limit",
+      "request_sequence": 4,
+      "input_digest_hex": "6d7749865548b364a52e4fc7839ed694981bc9764a68bd229d3e4efcdb51a05e",
+      "decision_digest_hex": "dc8bc02a6c52197013bfc7973b663e4a913929d15472fe74c97cfe21ec36102c",
+      "reason": "confidence_hard_limit",
+      "selected_model_id": 0,
+      "estimated_cost_microunits": 0,
+      "expected_utility_microunits": 0
+    },
+    {
+      "label": "reject_quality_constraint",
+      "request_sequence": 5,
+      "input_digest_hex": "8c4da843efa126e00ea60d7768062826c9258dc527471eed17a55fa0ca1fdc2d",
+      "decision_digest_hex": "bae39f9df30456761342985d001e11e180a1d336d7c775ed4c21fd68390002c4",
+      "reason": "quality_constraint",
+      "selected_model_id": 0,
+      "estimated_cost_microunits": 0,
+      "expected_utility_microunits": 0
+    },
+    {
+      "label": "reject_budget_constraint",
+      "request_sequence": 6,
+      "input_digest_hex": "9fa81a491f7f55a448d9ac334adc389587cdfc39dddc32f7985911332f6cc3bc",
+      "decision_digest_hex": "fd42dca82dc64052d3e29405214fe3bf0a4d07438c2da7a3b1fcf28c339ac00a",
+      "reason": "budget_constraint",
+      "selected_model_id": 0,
+      "estimated_cost_microunits": 0,
+      "expected_utility_microunits": 0
+    }
+  ]
+}

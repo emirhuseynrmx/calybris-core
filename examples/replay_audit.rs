@@ -4,7 +4,7 @@
 /// cargo run --example replay_audit
 /// ```
 use calybris_core::kernel::*;
-use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
+use calybris_core::verify::{verified_audit_bundle, verify_decision, VerifyResult};
 use calybris_core::wal::{replay_audited_wal, WalWriter};
 use std::path::PathBuf;
 
@@ -72,10 +72,11 @@ fn main() {
             verify_decision(&snapshot, input, &decision),
             VerifyResult::Valid
         );
-        let bundle = audit_bundle(&snapshot, input, &decision);
+        let bundle = verified_audit_bundle(&snapshot, input, &decision)
+            .expect("decision must replay to be audited");
         assert!(bundle.replay_valid);
 
-        wal.append_audited(
+        wal.append_verified_audited(
             &snapshot,
             input,
             decision,

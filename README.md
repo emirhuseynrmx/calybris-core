@@ -7,321 +7,197 @@
 # Calybris Core
 
 [![CI](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/emirhuseynrmx/calybris-core/graph/badge.svg)](https://codecov.io/gh/emirhuseynrmx/calybris-core)
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/emirhuseynrmx/calybris-core?utm_source=badge)
+[![codecov](https://codecov.io/gh/emirhuseynrmx/calybris-core/graph/badge.svg)](https://codecov.io/gh/emirhuseynrmx/calybris-core)
 [![Crates.io](https://img.shields.io/crates/v/calybris-core)](https://crates.io/crates/calybris-core)
 [![docs.rs](https://img.shields.io/docsrs/calybris-core)](https://docs.rs/calybris-core)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
 
-**Deterministic proof-carrying decision core** for systems that must explain and replay why an action was allowed, substituted, or rejected.
+**Deterministic, auditable decision primitive for high-stakes routing & guardrails.**
 
-Not an LLM framework. Not an exchange or strategy engine. A domain-neutral primitive:
+Given a frozen catalog, a policy snapshot, and a typed request, Calybris returns
+one action plus an audit bundle that replays to the same answer.
 
+```text
+catalog + policy + request  ->  decision + audit bundle
 ```
-candidate + policy constraints → decision + digests + optional WAL + budget proof
-```
 
-`#![forbid(unsafe_code)]` · unit/proptest/Loom/Miri coverage · Apache-2.0
+Integer-only Rust hot path. No hosted dependency. No `unsafe` in project code.
 
-## Two Reference Use Cases
+## What is this?
 
-| Use case | What Calybris does |
-|----------|-------------------|
-| **LLM routing** | Select / substitute / reject models under budget, risk, quality, latency |
-| **Pre-trade guard** | Admit / reject candidate orders under exposure, risk, and latency limits |
+Calybris is a **proof-carrying decision kernel**: not an OMS, not an LLM gateway,
+not a matching engine. You bring the catalog (suppliers, models, venues); the
+kernel evaluates hard constraints, picks the best eligible candidate, and emits
+digests you can replay and verify offline.
 
-Calybris is **not** an exchange, market data feed, colocation stack, or alpha engine. It is a **deterministic pre-trade decision kernel** — integer-only constraints, replay verification, and fixed-point conservation proofs.
+Same primitive, different adapters: supplier routing, model routing, and
+pre-trade admission are **reference mappings** onto one API, not three products.
 
-## When to use it
+## When to use / when not to
 
-Use Calybris when a service has to make the same decision twice and prove it got the same answer:
+| Use Calybris when... | Do **not** use it for... |
+|----------------------|--------------------------|
+| Decisions must be deterministic and replay-auditable | Inventory, WMS, label printing, carrier booking |
+| You need hard gates (budget, risk, latency, region, capability) in your control plane | A hosted routing API or managed decision service |
+| Post-mortems and compliance need proof bundles, not log grep | Live market data, order matching, exchange connectivity |
 
-- route an LLM request under budget, latency, provider, and quality constraints
-- reject or substitute a candidate action before it crosses a risk boundary
-- write an auditable decision record to a tamper-evident WAL
-- reconcile budget state with fixed-point conservation proofs
+## Stability model
 
-Do not use it as a hosted API, trading strategy, exchange adapter, web framework, or model orchestration platform. Calybris is the deterministic core you put behind those systems.
+| Layer | Status | Notes |
+|-------|--------|-------|
+| **`calybris-core` (Rust)** | **Stable** | crates.io: this is the contract |
+| **`calybris` (Python)** | Experimental / pre-1.0 | PyO3 + Pydantic **convenience wrapper** around the kernel |
+| **`calybris_commerce` (Python)** | Experimental / pre-1.0 | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
 
-## Try it locally
+Rust owns correctness and replay semantics. Python packages are ergonomic entry
+points for integration and demos; mature them in your stack before treating them
+as production infrastructure.
+
+## Quickstart (~5 minutes)
 
 ```bash
-git clone https://github.com/emirhuseynrmx/calybris-core
+git clone https://github.com/emirhuseynrmx/calybris-core.git
 cd calybris-core
 cargo run --example quickstart
-cargo run --example llm_routing
-cargo run --example replay_audit
 ```
 
-## Use as a dependency
+That example builds a two-model policy, prescribes one request, verifies replay,
+and prints an audit bundle. For Python:
 
 ```bash
+pip install maturin pydantic
+maturin develop --release
+python bindings/python/examples/quickstart.py
+```
+
+## What gets proved
+
+Calybris can bind the full decision path:
+
+```text
+policy digest + input digest + decision digest + replay result
+```
+
+Since 0.5.0 the proof format is a written contract, not an implementation
+detail: [docs/CALY_PROOF.md](docs/CALY_PROOF.md) specifies every digest and
+chain byte-exactly, golden vectors pin them across versions and platforms, and
+the bundled **`calybris-verify`** CLI lets an auditor check a decision trail:
+chain integrity, digests, and full kernel replay against a policy artifact
+without running your engine.
+
+```bash
+cargo install calybris-core   # ships the calybris-verify binary
+calybris-verify chain decisions.wal.jsonl
+calybris-verify audit decisions.wal.jsonl --policy policy.json
+```
+
+0.5.0 adds:
+
+- `state` — record `state_digest_before/after` per decision; `verify_trajectory`
+  rejects dropped, reordered, or forged transitions in a sequence.
+- `provenance` (feature) — bind a policy digest to an Ed25519 signer and
+  timestamp, non-transferable across policies.
+- `certificate` — bind the audit bundle, state trajectory, WAL position, and
+  signer into one fail-closed envelope.
+- Golden and conformance vectors pin the byte-exact contract, so an independent
+  reimplementation can prove itself against a fixed reference.
+
+The verification path builds for `wasm32-unknown-unknown`
+(`--no-default-features`).
+
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) is explicit about scope: the system
+proves trail *integrity*, not confidentiality, policy quality, or input truth.
+
+## Architecture at a glance
+
+| Module | Role |
+|--------|------|
+| `kernel` | Integer-only decision kernel (~115 ns/decision); `prescribe`, `prescribe_with_trace` for per-constraint rejection counts |
+| `digest` | Canonical tagged byte digests — policy / input / decision / ledger / state |
+| `verify` | Full replay verification and audit bundles; fail-closed `verified_audit_bundle` |
+| `certificate` | One fail-closed envelope binding audit bundle + state + WAL position + signer *(0.5.0)* |
+| `state` | Domain-state digest trajectories; `verify_trajectory` rejects dropped/reordered/forged steps *(0.5.0)* |
+| `provenance` | Ed25519-signed policies, domain-separated *(0.5.0, feature)* |
+| `wal` | Hash-chained tamper-evident WAL; `append_verified_audited`; optional keyed HMAC |
+| `budget` | CAS reserve/commit/release; `remaining + reserved + committed == initial` (Loom + Miri) |
+| `finance` | Ledger digests, conservation proofs and certificates |
+| `proof` | `ProofEnvelope`: policy + input + decision digests + WAL position + budget proof |
+| `builder` / `config` | Hard-to-misuse constructors with validation |
+| `persistence` | fsync-backed snapshot save/load, crash `recovery_plan` |
+| `async_wal` / `instrument` | Tokio WAL *(feature `async`)*, tracing spans *(feature `observability`)* |
+
+Ships a `calybris-verify` auditor CLI (`chain` / `audit` / `policy`, `--json`) so a
+third party can verify a decision trail without running your engine.
+
+## Install
+
+```bash
+# Rust (stable surface)
 cargo add calybris-core
+
+# Python (experimental wrappers)
+pip install calybris
 ```
 
-```rust
-use calybris_core::budget::BudgetEngine;
-use calybris_core::finance::{prove_conservation, ConservationProof};
-use calybris_core::kernel::*;
-use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
+Local Python build: `maturin develop --release` or see [docs/PYTHON.md](docs/PYTHON.md).
 
-let models = vec![
-    KernelModel {
-        model_id: 1,
-        provider_id: 0,
-        quality_bps: 9000,
-        risk_ceiling_bps: 9500,
-        enabled: 1,
-        p95_latency_ms: 200,
-        capabilities: 0,
-        region_mask: ALL_REGIONS,
-        input_cost_microunits_per_million_tokens: 250,
-        output_cost_microunits_per_million_tokens: 1000,
-    },
-    KernelModel {
-        model_id: 2,
-        provider_id: 1,
-        quality_bps: 7000,
-        risk_ceiling_bps: 9500,
-        enabled: 1,
-        p95_latency_ms: 90,
-        capabilities: 0,
-        region_mask: ALL_REGIONS,
-        input_cost_microunits_per_million_tokens: 25,
-        output_cost_microunits_per_million_tokens: 125,
-    },
-];
+## Examples & adapters
 
-let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models)?;
+Reference integrations that map domain objects onto the kernel:
 
-let input = KernelInput {
-    request_sequence: 1,
-    requested_model_id: 1,
-    input_tokens: 1000,
-    output_tokens: 500,
-    business_value_microunits: 100_000,
-    budget_limit_microunits: 50_000_000,
-    risk_bps: 1000,
-    confidence_bps: 9000,
-    minimum_quality_bps: 5000,
-    max_p95_latency_ms: 1000,
-    required_capabilities: 0,
-    allowed_provider_mask: ALL_PROVIDERS,
-    required_region_mask: 0,
-};
+| Question | Rust | Python |
+|----------|------|--------|
+| Which model/provider? | `cargo run --example llm_routing` | `quickstart.py`, `batch_routing.py` |
+| Which venue admits an order? | `cargo run --example pretrade_guard` | `pretrade_budget_guard.py` |
+| Which supplier fulfills? | - | `orion_market.py`, `novamart_benchmark.py` |
 
-let decision = snapshot.prescribe(input);
-assert_eq!(verify_decision(&snapshot, input, &decision), VerifyResult::Valid);
-assert!(audit_bundle(&snapshot, input, &decision).replay_valid);
+Full command list and code samples: **[docs/ADAPTERS.md](docs/ADAPTERS.md)**
 
-let budget = BudgetEngine::new();
-budget.ensure_tenant("desk-1", 100_000_000);
-let proof: ConservationProof = prove_conservation(&budget)?;
-assert_eq!(proof.ledger_digest_hex.len(), 64);
-```
+## Performance
 
-Kernel-only (no WAL):
+CodSpeed CI (Linux x86_64, release): ~**8.6M** `prescribe`/sec, ~115 ns/decision,
+22-model synthetic catalog. Hardware and workload dependent — provenance and a
+reproduction recipe are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); run
+`cargo bench --bench kernel_bench` on your own hardware.
 
-```bash
-cargo add calybris-core --no-default-features
-```
+## Security posture
 
-## Architecture
+- `#![forbid(unsafe_code)]` — no `unsafe` in project code.
+- Fail-closed audit boundaries: `verified_audit_bundle` / `append_verified_audited`
+  refuse to emit or log a decision that does not replay exactly.
+- Tamper-evident WAL: SHA-256 hash chain, optional HMAC-SHA256 with constant-time
+  comparison (`subtle`).
+- Ed25519-signed policy provenance, domain-separated so a signature is
+  non-transferable across policies, signers, and timestamps *(0.5.0)*.
+- Byte-exact proof contract ([docs/CALY_PROOF.md](docs/CALY_PROOF.md)) locked by
+  golden + conformance vectors and cross-checked in Rust and Python *(0.5.0)*.
+- Concurrency and UB: 7 Loom exhaustive interleavings on budget ops; Miri on
+  nightly for the library tests.
+- Supply chain: `cargo-audit` + `cargo-deny` in CI; feature-matrix CI
+  (default / no-default / async / full).
+- Documented boundaries: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (what it does
+  **not** guarantee) and [docs/KEY_MANAGEMENT.md](docs/KEY_MANAGEMENT.md) (key
+  custody and rotation).
 
-1. **`kernel`** — Integer-only decision kernel (~115ns/decision). `prescribe_with_trace` exposes per-constraint rejection counts.
-2. **`verify`** — Policy + input + decision digests, full replay, `DigestDecodeError` on public API.
-3. **`finance`** — Ledger digest, `FinancialCertificate`, `ConservationProof`, `prove_conservation`, `certify_snapshot`.
-4. **`wal`** — Tamper-evident hash chain, `append_verified_audited` (fail-closed), `replay_audited_wal`.
-5. **`budget`** — CAS reserve/commit/release. Conservation holds after completed ops: `remaining + reserved + committed_lifetime == initial`. Loom + Miri in CI.
-6. **`proof`** — `ProofEnvelope`: single struct binding policy + input + decision digests + WAL position + budget proof.
-7. **`config`** — Runtime `EngineConfig` with builder pattern, validation, and budget integration (`ensure_tenant`).
-8. **`builder`** — `InputBuilder`, `ModelBuilder`, `PolicyBuilder` with `BuildError` (config + policy + catalog size enforcement).
-9. **`persistence`** — fsync-backed snapshot save/load, `checkpoint_with_wal`, `recovery_plan` with WAL high-watermark.
-10. **`async_wal`** *(feature `async`)* — Tokio-based non-blocking WAL with HMAC, chain validation, configurable sync.
-11. **`instrument`** *(feature `observability`)* — Structured `tracing` spans for prescribe, verify, budget, WAL.
+Deployment security remains the caller's job: key storage, tenant isolation,
+inventory/capacity freshness, and an external audit.
 
-## Audit Pipeline
+## Deep dive
 
-```
-prescribe → verify_decision → append_verified_audited → replay_audited_wal (fail-closed)
-                ↓                        ↓
-     calypol1 / calyinp1 / calydcn1    ProofEnvelope (optional)
-```
-
-## Financial layer & policy
-
-Fixed-point `i64` microcents (1 cent = 1,000,000). No `f64`.
-
-- `committed_microcents` — **lifetime cumulative spend** (monotonic; never decreases)
-- `reserved_microcents` — active holds awaiting commit/release
-- `top_up_tenant` — add funds without resetting lifetime spend
-- `restore_from_snapshot` — exclusive-recovery restore from frozen `BudgetSnapshot`
-- `verify_conservation` — audit/reconciliation path (full snapshot)
-- `PolicySnapshot::utility_for_model` — per-model utility (not prescribe winner/runner-up)
-
-```rust
-budget.ensure_tenant("desk", 100_000_000);
-budget.top_up_tenant("desk", 50_000_000);
-let proof = prove_conservation(&budget)?;
-let cert = certify_ledger(&budget);
-assert!(cert.conservation_balanced);
-```
-
-| Policy API | Use |
-|------------|-----|
-| `PolicySnapshot::try_new` | **Production** — validates catalog + BPS (`MAX_BPS`, etc.) |
-| `PolicySnapshot::new_unchecked` | Tests / fuzz only — never serve without explicit `validate()` |
-| `PolicySnapshot::new` | Deprecated alias for `new_unchecked` |
-
-## Feature Flags
-
-| Feature | What it adds | Dependencies |
-|---------|-------------|--------------|
-| `wal` *(default)* | Hash-chained WAL, HMAC-SHA256, audited append | `serde`, `hmac`, `subtle` |
-| `async` | Tokio-based async WAL | `wal` + `tokio` |
-| `observability` | Structured tracing spans/events | `tracing` |
-| `full` | All of the above | — |
-
-```bash
-cargo add calybris-core                        # default (wal)
-cargo add calybris-core --features full        # everything
-cargo add calybris-core --no-default-features  # kernel only
-```
-
-## Builder Ergonomics (v0.4.0)
-
-```rust
-use calybris_core::config::EngineConfig;
-use calybris_core::builder::{InputBuilder, ModelBuilder, PolicyBuilder};
-
-let config = EngineConfig::new()
-    .latency_penalty(3)
-    .hard_risk_limit(9_500)
-    .default_exposure_cap(500_000_000);
-
-let snapshot = PolicyBuilder::new(config)
-    .epochs(1, 1)
-    .model(ModelBuilder::new(1, 0).quality(9500).cost(250, 1000).build())
-    .model(ModelBuilder::new(2, 1).quality(7000).cost(25, 125).build())
-    .build()?;
-
-let input = InputBuilder::new(1, 1)
-    .tokens(1000, 500)
-    .business_value(100_000)
-    .risk(1000, 9000)
-    .minimum_quality(5000)
-    .build();
-
-let decision = snapshot.prescribe(input);
-```
-
-## Persistence & Recovery
-
-```rust
-use calybris_core::persistence::{checkpoint_with_wal, restore, recovery_plan};
-
-// Checkpoint budget state alongside WAL position (fsync-backed)
-let snap = checkpoint_with_wal(&budget, Path::new("budget.json"), wal.sequence())?;
-
-// After crash: figure out what needs replay
-let plan = recovery_plan(Path::new("budget.json"), Path::new("wal.jsonl"))?;
-println!("{} WAL entries to replay", plan.entries_to_replay);
-
-// Restore from last checkpoint
-let fresh = BudgetEngine::new();
-restore(&fresh, Path::new("budget.json"))?;
-```
-
-## Proof Envelope
-
-```rust
-use calybris_core::proof::ProofEnvelopeBuilder;
-
-let envelope = ProofEnvelopeBuilder::new(&snapshot, input, &decision)
-    .wal(wal_entry.sequence, wal_entry.entry_hash)
-    .budget(budget_snap.version, ledger_digest_hex)
-    .build();
-
-assert!(envelope.is_complete()); // replay + WAL + budget all present
-```
-
-## Examples
-
-```bash
-cargo run --example quickstart
-cargo run --example production_gateway  # full pipeline: config→build→prescribe→verify→budget→WAL→checkpoint→recovery
-cargo run --example llm_routing
-cargo run --example hft_pretrade_guard
-cargo run --example replay_audit
-cargo run --example finance_hft       # throughput benchmark
-cargo run --example route_decision    # legacy alias
-```
-
-## Tests & CI
-
-```
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-features
-cargo test --no-default-features
-RUSTFLAGS='--cfg loom' LOOM_MAX_PREEMPTIONS=3 cargo test --test budget_loom
-cargo +nightly miri test --lib --all-features   # see docs/MIRI.md for CI filters
-cargo doc --no-deps
-```
-
-Extensive test coverage across unit, property-based (proptest), 7 Loom exhaustive concurrency, and Miri UB detection targets. Feature matrix CI: `default`, `no-default-features`, `async`, `full`. See CI for the current test count.
-
-## Integration contract
-
-Calybris verifies decisions and conservation proofs — it does **not** auto-invoke `verify_decision` in your hot path. **You** must call it at audit boundaries:
-
-```
-prescribe → verify_decision → (optional WAL / prove_conservation)
-```
-
-Use `append_verified_audited` (not `append_audited`) at production boundaries — it verifies before writing. See [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md).
-
-For fail-closed audit boundaries, use the verified helpers:
-
-```rust
-use calybris_core::verify::verified_audit_bundle;
-
-let bundle = verified_audit_bundle(&snapshot, input, &decision)?;
-assert!(bundle.replay_valid);
-```
-
-With the `wal` feature enabled, `append_verified_audited` verifies before writing. Invalid or tampered decisions do not enter the log:
-
-```rust
-use calybris_core::wal::WalWriter;
-
-let mut wal = WalWriter::open(std::path::Path::new("decisions.jsonl"))?;
-wal.append_verified_audited(&snapshot, input, decision, "metadata")?;
-```
-
-## External audit
-
-Invariant docs, adversarial tests, Loom, Miri, and supply-chain checks are in place for third-party review. A paid external audit is still your responsibility — see [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) §7.
-
-## Security Posture
-
-- `#![forbid(unsafe_code)]` — zero unsafe blocks
-- `cargo-audit` + `cargo-deny` in CI
-- Miri on nightly — UB detection for all lib tests
-- 7 Loom exhaustive concurrency tests for budget operations
-- HMAC-SHA256 keyed tamper-evident WAL with constant-time comparison (`subtle`)
-- Fail-closed `append_verified_audited` — invalid decisions never enter the log
-- fsync-backed snapshot persistence with atomic rename
-- Feature matrix CI: `default`, `no-default-features`, `async`, `full`
-
-## What This Crate Is Not
-
-- Exchange gateway, market data, or order lifecycle
-- Thompson Sampling / adaptive routing
-- HTTP API server
-
-See [emirhuseyin.tech/engine](https://emirhuseyin.tech/engine) for the full proprietary stack.
+| Doc | Contents |
+|-----|----------|
+| [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) | Module map, audit commands, external review checklist |
+| [docs/CALY_PROOF.md](docs/CALY_PROOF.md) | CALY-PROOF v1 digest and proof contract |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, trust boundaries, attackers |
+| [docs/KEY_MANAGEMENT.md](docs/KEY_MANAGEMENT.md) | HMAC / Ed25519 key custody and rotation |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Throughput provenance and reproduction |
+| [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) | Invariants I1-I8 and test mapping |
+| [docs/MIRI.md](docs/MIRI.md) | UB detection scope in CI |
+| [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting, supported versions |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, test gate, PR expectations |
 
 ## License
 

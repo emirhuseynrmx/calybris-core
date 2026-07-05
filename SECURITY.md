@@ -21,16 +21,15 @@ Please include: affected version, reproduction steps, impact on invariants I1–
 |-----------|----------|-------|
 | `calybris-core` on crates.io | Yes | This repository |
 | Examples / benches | Yes | Same repo |
-| Proprietary full engine | No | Separate disclosure channel |
 | Your application integration | No | How you call `read_wal`, key storage, etc. |
 
 ## Supported Versions
 
 | Version | Supported |
 |---------|-----------|
-| 0.3.5+  | Yes |
-| 0.3.x   | Best effort |
-| < 0.3   | No |
+| 0.5.x   | Yes |
+| 0.4.x   | Best effort |
+| < 0.4   | No |
 
 ## Security Properties (OSS)
 
@@ -71,6 +70,6 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 - Weekly `cargo audit` + `cargo deny` via `deny.toml` (see `.github/workflows/security.yml`)
 - Dependabot for Cargo and GitHub Actions
 
-## Full Engine Security
+## Deployment Security
 
-The proprietary engine adds API-plane separation, deployment hardening (read-only containers, no-new-privileges), provider credential isolation, and additional adversarial tests. Contact the maintainer for that scope.
+Production deployments should add API-plane separation, deployment hardening (read-only containers, no-new-privileges), provider credential isolation, and additional adversarial tests around the service boundary.

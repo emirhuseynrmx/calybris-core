@@ -1,0 +1,20 @@
+{
+  "spec": "CALY-PROOF v1",
+  "comment": "Byte-exact golden vectors. Any version of calybris-core, on any platform, and any independent implementation MUST reproduce these values from the fixture policy/input defined in tests/golden_caly_proof.rs. A mismatch is a breaking change requiring a new digest tag — never re-pin silently.",
+  "policy_digest_hex": "b24bcc619cd4ad0631bfa7a02ed72a5365abe336ce588c27ba7b7a1634542e71",
+  "input_digest_hex": "4e45641f11b850abd0c3f0480e7deec1dec74206ed454ebf1b7aedabec0c3a45",
+  "decision_digest_hex": "cf24f40decffe7c3479038f947cc564d27a2e8e1993a29c395de68b8b8cbe754",
+  "decision": {
+    "action": "ExecuteRequested",
+    "reason": "RequestedModelMaximizesUtility",
+    "selected_model_id": 1,
+    "estimated_cost_microunits": 2,
+    "expected_utility_microunits": 77098
+  },
+  "wal": {
+    "payload_1": {"k": 1, "v": "alpha"},
+    "payload_2": {"k": 2, "v": "beta"},
+    "entry_1_hash": "a7acef39aa56cd6e769a5ebae74a7c9dcd30d9d8c15e391773d55334848117f4",
+    "entry_2_hash": "32330ff6107c82b689e701f24e9099d1559f2d112fa026196705eadcff3a807f"
+  }
+}

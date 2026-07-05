@@ -728,8 +728,6 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-    // ── HMAC tests ──
-
     #[test]
     fn hmac_keyed_chain_validates() {
         let (_dir, path) = temp_wal("hmac-basic");

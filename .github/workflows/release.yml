@@ -1,0 +1,90 @@
+# Build the Python wheel matrix and publish to PyPI.
+#
+# Thanks to the abi3 (stable-ABI) build, ONE wheel per platform covers
+# CPython 3.10+, so the matrix is five builds instead of ~sixteen. Triggered
+# by a `v*` tag; `workflow_dispatch` builds without publishing for a dry run.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC) — no token in secrets. One-time
+# setup on PyPI: project `calybris` -> Publishing -> add a GitHub publisher with
+#   owner: emirhuseynrmx, repo: calybris-core,
+#   workflow: release.yml, environment: pypi
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist
+
+  wheels:
+    name: wheel ${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { runner: windows-latest, target: x64 }
+          - { runner: macos-13, target: x86_64 }
+          - { runner: macos-14, target: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      # abi3-py310 is a Cargo feature, so maturin emits a single cp310-abi3
+      # wheel that runs on every CPython 3.10+ for this platform.
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    needs: [sdist, wheels]
+    runs-on: ubuntu-latest
+    # Only the canonical public repo publishes, and only on a tag — a tag
+    # pushed to a fork or the private test mirror can never reach PyPI.
+    if: startsWith(github.ref, 'refs/tags/') && github.repository == 'emirhuseynrmx/calybris-core'
+    environment: pypi
+    permissions:
+      id-token: write # OIDC for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

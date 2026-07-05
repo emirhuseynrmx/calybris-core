@@ -3,7 +3,7 @@
 //! Deterministic proof-carrying decision kernel, HMAC-SHA256 hash-chained
 //! write-ahead log, CAS atomic budget engine, and fixed-point financial proofs.
 //!
-//! - **`kernel`**: Allocation-free integer decision kernel (8.6M decisions/sec)
+//! - **`kernel`**: Allocation-free integer decision kernel (~8.6M prescribe/sec on CodSpeed CI)
 //! - **`verify`**: Canonical digests, replay verification, correctness certificates
 //! - **`finance`**: Ledger snapshots and fixed-point conservation proofs for pre-trade guard primitives
 //! - **`wal`**: Generic tamper-evident hash-chained WAL with optional HMAC keying
@@ -36,6 +36,9 @@ pub mod async_wal;
 pub mod budget;
 /// Builder ergonomics for inputs, models, and policies.
 pub mod builder;
+/// Single proof envelope binding decision to full evidence chain.
+#[cfg(feature = "serde")]
+pub mod certificate;
 /// Runtime configuration and validation.
 pub mod config;
 /// Canonical SHA-256 digests for audit binding.
@@ -50,8 +53,13 @@ pub mod kernel;
 /// Snapshot persistence and crash recovery.
 #[cfg(feature = "serde")]
 pub mod persistence;
-/// Single proof envelope binding decision to full evidence chain.
+
 pub mod proof;
+
+#[cfg(feature = "provenance")]
+pub mod provenance;
+
+pub mod state;
 /// Decision verification, replay, and correctness certificates.
 pub mod verify;
 /// HMAC-SHA256 hash-chained write-ahead log.

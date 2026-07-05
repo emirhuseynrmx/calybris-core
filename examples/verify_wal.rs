@@ -10,7 +10,6 @@ struct Decision {
 }
 
 fn main() {
-    // ── Unkeyed WAL (detects accidental corruption) ──
     let path = PathBuf::from("example_wal.jsonl");
 
     {
@@ -49,7 +48,6 @@ fn main() {
     println!("\nReopened: seq={}, chain valid", wal.sequence());
     let _ = std::fs::remove_file(&path);
 
-    // ── HMAC-keyed WAL (tamper-evident against attackers) ──
     let keyed_path = PathBuf::from("example_wal_keyed.jsonl");
     let key = b"my-secret-audit-key";
 

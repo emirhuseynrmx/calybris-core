@@ -20,7 +20,7 @@ Miri CI deliberately runs a **subset** of the test suite. Skips are intentional 
 | Skipped under Miri | Reason | Covered elsewhere |
 |--------------------|--------|-------------------|
 | `wal::` unit tests | Real file I/O (`CreateFileW` / temp files) — Miri support is limited on some platforms | `audit_pipeline` integration test (E2E WAL under Miri on Linux CI) |
-| Proptests (`aggressive_mixed`, `random_ops`, `arbitrary_*`, `digests_stable`, `optimized_*`) | Slow under MIR interpretation; property coverage is not Miri’s strength | `PROPTEST_CASES=10000` job in `security.yml` |
+| Proptests (`aggressive_mixed_ops_maintain_conservation`, `random_ops_maintain_conservation`, `builder_prescribe_never_panics`, `arbitrary_valid_configs_always_validate`, `config_roundtrips_through_builder`, `digests_stable_under_repeat`, `optimized_*`, `arbitrary_inputs_never_bypass_provider_fence`, `decode_hex32_rejects_non_hex_strings`) | Slow under MIR interpretation; property coverage is not Miri’s strength | `PROPTEST_CASES=10000` job in `security.yml` |
 | Concurrent budget tests | Miri is not designed for exhaustive thread interleaving | Loom (`budget_loom`, 7 scenarios) + `cargo test` stress tests |
 | `prescriptive_kernel_latency_guard` | Release-only timing benchmark, not a correctness property | Ignored in normal `cargo test` too |
 
@@ -47,11 +47,17 @@ cargo +nightly miri setup
 # Library (matches CI filters)
 cargo +nightly miri test --lib --all-features -- \
   --skip wal:: \
-  --skip aggressive_mixed \
-  --skip random_ops \
-  --skip arbitrary_ \
-  --skip digests_stable \
-  --skip optimized_ \
+  --skip aggressive_mixed_ops_maintain_conservation \
+  --skip random_ops_maintain_conservation \
+  --skip builder_prescribe_never_panics \
+  --skip arbitrary_valid_configs_always_validate \
+  --skip config_roundtrips_through_builder \
+  --skip digests_stable_under_repeat \
+  --skip optimized_scaled_term_matches_i128_reference \
+  --skip optimized_cost_matches_u128_reference_when_guard_admits \
+  --skip optimized_kernel_matches_reference_decision \
+  --skip arbitrary_inputs_never_bypass_provider_fence \
+  --skip decode_hex32_rejects_non_hex_strings \
   --skip prescriptive_kernel
 
 # E2E audit path (Linux CI path; temp files need isolation disabled)

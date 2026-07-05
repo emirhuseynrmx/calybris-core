@@ -6,7 +6,7 @@
 use calybris_core::budget::BudgetEngine;
 use calybris_core::finance::prove_conservation;
 use calybris_core::kernel::*;
-use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
+use calybris_core::verify::{verified_audit_bundle, verify_decision, VerifyResult};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let models = vec![
@@ -59,7 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         verify_decision(&snapshot, input, &decision),
         VerifyResult::Valid
     );
-    let bundle = audit_bundle(&snapshot, input, &decision);
+    // Fail-closed: verified_audit_bundle returns a bundle only after the
+    // decision replays exactly. Prefer it over the bare audit_bundle, which
+    // returns a bundle with replay_valid=false rather than refusing.
+    let bundle = verified_audit_bundle(&snapshot, input, &decision)
+        .expect("decision must replay to be audited");
     assert!(bundle.replay_valid);
 
     let budget = BudgetEngine::new();

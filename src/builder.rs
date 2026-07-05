@@ -107,10 +107,22 @@ impl InputBuilder {
         self
     }
 
-    /// Consume the builder and return a [`KernelInput`].
+    /// Consume the builder and return a validated [`KernelInput`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`KernelInput::validate`] fails. Prefer [`Self::try_build`]
+    /// at API boundaries that must surface validation errors to callers.
     #[must_use]
     pub fn build(self) -> KernelInput {
-        self.input
+        self.try_build()
+            .expect("KernelInput validation failed — use try_build() for fallible construction")
+    }
+
+    /// Consume the builder and return a validated [`KernelInput`], or an error.
+    pub fn try_build(self) -> Result<KernelInput, InputError> {
+        self.input.validate()?;
+        Ok(self.input)
     }
 }
 
@@ -388,8 +400,8 @@ mod tests {
             input_tokens in any::<u32>(),
             output_tokens in any::<u32>(),
             value in any::<i64>(),
-            risk in any::<u16>(),
-            confidence in any::<u16>(),
+            risk in 0_u16..=MAX_BPS,
+            confidence in 0_u16..=MAX_BPS,
         ) {
             let config = crate::config::EngineConfig::new();
             let snap = PolicyBuilder::new(config)
@@ -401,7 +413,8 @@ mod tests {
                 .tokens(input_tokens, output_tokens)
                 .business_value(value)
                 .risk(risk, confidence)
-                .build();
+                .try_build()
+                .expect("valid bounded bps");
             let _ = snap.prescribe(input);
         }
     }

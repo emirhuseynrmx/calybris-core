@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-04
+
+### Added
+- **CALY-PROOF v1 specification** (`docs/CALY_PROOF.md`): byte-exact contract for every
+  digest (policy/input/decision/ledger/state), the audit bundle binding, and the
+  hash-chained WAL (unkeyed and HMAC-keyed) — so independent implementations can verify
+  Calybris decision trails without running Calybris.
+- **Golden vectors** (`tests/fixtures/caly_proof_v1.json` + `tests/golden_caly_proof.rs`):
+  pinned byte-exact digests and WAL chain hashes. A vector mismatch is a breaking
+  proof-format change requiring a new digest tag, never a silent re-pin.
+- **`calybris-verify` auditor CLI** (`cargo install calybris-core --features wal`):
+  `chain` (tamper/truncation detection), `audit` (per-entry digest checks; with
+  `--policy` a full kernel replay of every decision), `policy` (canonical digest of a
+  policy artifact). Exit codes 0/1/2; end-to-end tests cover tamper and wrong-policy
+  rejection.
+- **Stateful decision proofs** (`state` module): `StateChain` tracks a domain-state
+  digest trajectory; `stateful_audit_bundle` (fail-closed) records
+  `state_digest_before/after` per decision; `verify_trajectory` rejects dropped,
+  reordered, or forged transitions. New `calystt1\0` digest tag.
+- **Signed policy provenance** (`provenance` feature, Ed25519): `sign_policy` /
+  `verify_signed_policy` / `verify_signed_policy_with_key` bind a policy digest to an
+  accountable signer and timestamp with domain separation (`calysig1\0`); signatures are
+  non-transferable across policies, signers, and timestamps.
+- WASM portability: the verification path compiles for `wasm32-unknown-unknown` with
+  `--no-default-features`.
+- **Python cross-language golden test** (`python/tests/test_golden_caly_proof.py`): the binding
+  reads the *same* `tests/fixtures/caly_proof_v1.json` and reproduces the Rust reference's
+  policy/input/decision digests byte for byte through the PyO3 surface — a runnable trust artifact
+  that also catches field-marshalling bugs in the binding.
+- **Conformance vector suite** (`tests/fixtures/caly_proof_conformance_v1.json`): one shared policy
+  with inputs exercising every decision outcome (execute, substitute, and each rejection reason),
+  pinned byte-exactly and asserted by both the Rust (`tests/conformance_caly_proof.rs`) and Python
+  (`python/tests/test_conformance_caly_proof.py`) suites — the contract a third-party
+  reimplementation (Go, TypeScript, browser) proves itself against.
+- **Decision certificates** (`certificate` module): bind an audit bundle + optional state
+  trajectory + WAL position + Ed25519 signer into one canonically-serializable, fail-closed
+  envelope — the notarized receipt for a single decision. `issue_certificate` /
+  `verify_certificate` (digests + replay, always available, incl. wasm) and
+  `verify_certificate_signature` (feature `provenance`).
+- **`calybris-verify --json`**: one-line machine-readable verdict on every verb for CI/compliance
+  pipelines.
+- **THREAT_MODEL.md**: documented what the proof system guarantees and — explicitly — what it does
+  not (no confidentiality, does not prove the policy was good, cannot vouch for unseen inputs,
+  caller key custody, caller-supplied timestamps), plus the certificate/signature-splicer attacker.
+
+### Python packaging
+- **abi3 wheels** (`abi3-py310`): the binding builds against the CPython stable ABI, so one
+  wheel per platform covers Python 3.10+ — the release matrix drops from ~16 wheels to 5 and
+  survives future CPython releases without a rebuild.
+- **Type stubs** (`python/calybris/_core.pyi`): full signatures for the PyO3 classes
+  (`KernelModel`, `KernelInput`, `KernelDecision`, `PolicySnapshot`, `BudgetEngine`) and module
+  constants, so mypy and IDEs see the Rust-backed types. Writing the stubs surfaced and fixed two
+  real type-precision gaps (`prescribe_with_trace` returns a tuple; `verify_status` returns a
+  `Literal`).
+- **Release workflow** (`.github/workflows/release.yml`): `maturin-action` builds the abi3 wheel
+  matrix (Linux x86_64/aarch64, macOS x86_64/arm64, Windows) plus an sdist and publishes to PyPI
+  via Trusted Publishing (OIDC, no token); a repository guard ensures only the canonical public
+  repo can publish.
+- Kernel-only crate artifact: `python/` and `pyproject.toml` are excluded from the crates.io
+  package (78 → 59 files).
+
+### Fixed
+- CALY-PROOF §4 now shows the audit bundle `schema_version` exactly as the code emits it
+  (`calybris.audit.v1`); the spec and implementation must not disagree on a proof contract.
+- `SECURITY.md`, `.github/SECURITY.md`, and `docs/AUDIT_GUIDE.md` updated to the 0.5.x support line
+  (was stale at 0.4.x / 0.4.5).
+- Examples (`quickstart`, `llm_routing`, `pretrade_guard`, `replay_audit`) now use the fail-closed
+  `verified_audit_bundle` / `append_verified_audited` path; the non-verifying `audit_bundle` is
+  documented as the escape hatch, not the demonstrated default.
+- Miri CI skips `async_wal::` (Tokio + filesystem tests are outside Miri's UB-detection scope).
+- Added `docs/BENCHMARKS.md`: provenance and a reproduction recipe for the throughput figure,
+  plus measured proof-surface costs (digests, certificates, Ed25519) via a new `proof_bench`.
+- Added `docs/KEY_MANAGEMENT.md`: custody and rotation guidance for the HMAC WAL key and the
+  Ed25519 policy signing key (the library holds neither).
+- Golden-locked the two remaining proof tags: `tests/conformance_proof_surfaces.rs` pins the
+  `calystt1` state digest and the `calysig1` Ed25519 signature — the signature vector doubles as a
+  cross-platform determinism check.
+
+### Changed
+- `serde_json` now enables `float_roundtrip`: WAL chain verification re-serializes
+  parsed payloads, and default f64 parsing can lose the final ulp on 17-significant-digit
+  values, breaking byte-stable hashing for float-bearing payloads (CALY-PROOF §5.1).
+- `full` feature now includes `provenance`.
+- Version 0.5.0 (new public modules and binary).
+
+## [0.4.5] - 2026-07-01
+
+### Added
+- Python bindings under `bindings/python`, built with PyO3 and maturin.
+- Python API for `KernelModel`, `KernelInput`, `PolicySnapshot`, `KernelDecision`, batch prescription, replay verification, audit bundles, and policy fingerprints.
+- `calybris_commerce` preview adapter for deterministic supplier / fulfillment routing.
+- Typed commerce models: `SupplierSpec`, `OrderInput`, `RouteResult`, and `SupplierPolicy`.
+- Batch commerce routing with optional audit bundles (`EcomEngine.route_batch`).
+- `BatchRouteResult` wrapper for batch routing results with optional batch-level `rejection_histogram`.
+- `trace_mode="summary"` for batch-level rejection reason counts (`trace_mode="compact"` is the default).
+- Commerce property tests for determinism, budget safety, risk gates, SLA gates, and tamper detection.
+- Workspace-level packaging metadata (`pyproject.toml`) so the binding can be built as a Python wheel without moving the Rust kernel.
+- CI coverage for the Python binding crate.
+
+### Changed
+- `calybris_commerce.EcomEngine.route_batch` now returns `BatchRouteResult` instead of `list[RouteResult]`.
+- Added `trace_mode="compact" | "summary"` for batch routing.
+- Default compact mode keeps `rejection_histogram` empty and exposes only the primary rejection reason per rejected order.
+- Renamed examples `hft_pretrade_guard` → `pretrade_guard`, `finance_hft` → `budget_guard` (no HFT positioning).
+- README slimmed to quickstart + deep-dive links; adapter/Python detail moved to `docs/ADAPTERS.md` and `docs/PYTHON.md`.
+- README reframed around the proof-carrying kernel; commerce/LLM/pre-trade documented as adapters.
+- Security docs aligned (`0.4.x` supported); audit guide updated to 0.4.5.
+- Core crate stays the default workspace member and keeps `#![forbid(unsafe_code)]`; PyO3 lives in a separate adapter crate.
+- Version bump to 0.4.5.
+
 ## [0.4.0] - 2026-06-29
 
 ### Added

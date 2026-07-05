@@ -1,179 +1,210 @@
-//! Use case 1: LLM routing / cost governance
+//! LLM routing and cost governance.
 //!
-//! Given candidate models and hard constraints (budget, risk, quality, latency),
-//! Calybris deterministically selects, substitutes, or rejects — then records
-//! an auditable WAL trail.
+//! The example models a gateway choosing among premium, fast, and budget
+//! providers under quality, latency, risk, provider, and budget constraints.
+//! Every decision is verified before entering the audited WAL.
 //!
 //! ```bash
 //! cargo run --example llm_routing
 //! ```
+
 use calybris_core::kernel::*;
-use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
-use calybris_core::wal::WalWriter;
+use calybris_core::verify::{verified_audit_bundle, verify_decision, VerifyResult};
+use calybris_core::wal::{AuditedRecord, WalWriter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RoutingRecord {
     scenario: String,
-    action: String,
     requested_model: String,
     selected_model: String,
+    action: String,
     reason: String,
+    estimated_cost_microunits: u64,
+    eligible_models: u16,
 }
 
 fn main() {
     let models = vec![
-        model(1, 0, 9500, 250, 1000, 450),
-        model(2, 0, 7500, 15, 60, 120),
-        model(3, 1, 9200, 300, 1500, 380),
-        model(4, 1, 7000, 25, 125, 90),
-        model(5, 2, 8800, 125, 500, 320),
-        model(6, 2, 7200, 8, 30, 80),
+        model(1, 0, 9_600, 9_500, 2_500_000, 10_000_000, 420),
+        model(2, 0, 8_200, 9_200, 150_000, 600_000, 130),
+        model(3, 1, 9_300, 9_500, 2_200_000, 8_500_000, 360),
+        model(4, 1, 7_600, 9_000, 80_000, 300_000, 90),
+        model(5, 2, 8_900, 9_300, 700_000, 2_000_000, 210),
+        model(6, 2, 7_200, 8_800, 40_000, 120_000, 70),
     ];
     let names = [
-        ("gpt-4o", 1),
-        ("gpt-4o-mini", 2),
-        ("claude-sonnet", 3),
-        ("claude-haiku", 4),
-        ("gemini-pro", 5),
-        ("gemini-flash", 6),
+        (1, "gpt-4o"),
+        (2, "gpt-4o-mini"),
+        (3, "claude-sonnet"),
+        (4, "claude-haiku"),
+        (5, "gemini-pro"),
+        (6, "gemini-flash"),
     ];
 
-    let snapshot =
-        PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models).expect("valid catalog");
+    let snapshot = PolicySnapshot::try_new(3, 17, 9_600, 5_500, 3_500, 2, models)
+        .expect("valid model catalog");
 
     let wal_path = PathBuf::from("llm_routing_demo.jsonl");
     let _ = std::fs::remove_file(&wal_path);
-    let mut wal = WalWriter::<RoutingRecord>::open(&wal_path).unwrap();
+    let mut wal: WalWriter<AuditedRecord<RoutingRecord>> = WalWriter::open(&wal_path).unwrap();
 
-    println!("Calybris — LLM Routing");
+    println!("Calybris - LLM Routing");
     println!("======================\n");
 
-    run_scenario(
-        &snapshot,
-        &names,
-        "Compliance review (quality floor 0.90)",
-        KernelInput {
-            request_sequence: 1,
-            requested_model_id: 1,
-            input_tokens: 4000,
-            output_tokens: 2000,
-            business_value_microunits: 500_000,
-            budget_limit_microunits: 50_000_000,
-            risk_bps: 2000,
-            confidence_bps: 9000,
-            minimum_quality_bps: 9000,
-            max_p95_latency_ms: 1000,
-            required_capabilities: 0,
-            allowed_provider_mask: ALL_PROVIDERS,
-            required_region_mask: 0,
-        },
-        1,
-        &mut wal,
-    );
+    let scenarios = [
+        (
+            "Legal review: premium quality required",
+            KernelInput {
+                request_sequence: 1,
+                requested_model_id: 1,
+                input_tokens: 12_000,
+                output_tokens: 4_000,
+                business_value_microunits: 2_000_000,
+                budget_limit_microunits: 120_000,
+                risk_bps: 1_800,
+                confidence_bps: 9_300,
+                minimum_quality_bps: 9_200,
+                max_p95_latency_ms: 700,
+                required_capabilities: 0,
+                allowed_provider_mask: ALL_PROVIDERS,
+                required_region_mask: 0,
+            },
+        ),
+        (
+            "Support macro: substitute away from premium",
+            KernelInput {
+                request_sequence: 2,
+                requested_model_id: 1,
+                input_tokens: 800,
+                output_tokens: 200,
+                business_value_microunits: 35_000,
+                budget_limit_microunits: 1_000,
+                risk_bps: 500,
+                confidence_bps: 9_100,
+                minimum_quality_bps: 7_000,
+                max_p95_latency_ms: 300,
+                required_capabilities: 0,
+                allowed_provider_mask: ALL_PROVIDERS,
+                required_region_mask: 0,
+            },
+        ),
+        (
+            "Realtime chat: latency cap dominates",
+            KernelInput {
+                request_sequence: 3,
+                requested_model_id: 3,
+                input_tokens: 1_200,
+                output_tokens: 500,
+                business_value_microunits: 60_000,
+                budget_limit_microunits: 10_000,
+                risk_bps: 700,
+                confidence_bps: 9_000,
+                minimum_quality_bps: 7_000,
+                max_p95_latency_ms: 100,
+                required_capabilities: 0,
+                allowed_provider_mask: ALL_PROVIDERS,
+                required_region_mask: 0,
+            },
+        ),
+        (
+            "Abuse review: hard risk reject",
+            KernelInput {
+                request_sequence: 4,
+                requested_model_id: 1,
+                input_tokens: 2_000,
+                output_tokens: 1_000,
+                business_value_microunits: 100_000,
+                budget_limit_microunits: 100_000,
+                risk_bps: 9_800,
+                confidence_bps: 8_500,
+                minimum_quality_bps: 7_000,
+                max_p95_latency_ms: 0,
+                required_capabilities: 0,
+                allowed_provider_mask: ALL_PROVIDERS,
+                required_region_mask: 0,
+            },
+        ),
+    ];
 
-    run_scenario(
-        &snapshot,
-        &names,
-        "Support ticket (downgrade OK)",
-        KernelInput {
-            request_sequence: 2,
-            requested_model_id: 1,
-            input_tokens: 500,
-            output_tokens: 200,
-            business_value_microunits: 10_000,
-            budget_limit_microunits: 50_000_000,
-            risk_bps: 500,
-            confidence_bps: 9000,
-            minimum_quality_bps: 6000,
-            max_p95_latency_ms: 500,
-            required_capabilities: 0,
-            allowed_provider_mask: ALL_PROVIDERS,
-            required_region_mask: 0,
-        },
-        1,
-        &mut wal,
-    );
-
-    run_scenario(
-        &snapshot,
-        &names,
-        "Budget exhausted (reject)",
-        KernelInput {
-            request_sequence: 3,
-            requested_model_id: 3,
-            input_tokens: 8000,
-            output_tokens: 4000,
-            business_value_microunits: 100_000,
-            budget_limit_microunits: 1,
-            risk_bps: 1000,
-            confidence_bps: 9000,
-            minimum_quality_bps: 5000,
-            max_p95_latency_ms: 0,
-            required_capabilities: 0,
-            allowed_provider_mask: ALL_PROVIDERS,
-            required_region_mask: 0,
-        },
-        3,
-        &mut wal,
-    );
+    for (scenario, input) in scenarios {
+        route(&snapshot, &names, scenario, input, &mut wal);
+    }
 
     wal.flush_and_sync().unwrap();
-    println!("WAL: {} entries → {}", wal.sequence(), wal_path.display());
+    println!("WAL entries: {} -> {}", wal.sequence(), wal_path.display());
     let _ = std::fs::remove_file(&wal_path);
 }
 
-fn run_scenario(
+fn route(
     snapshot: &PolicySnapshot,
-    names: &[(&str, u32)],
+    names: &[(u32, &'static str)],
     scenario: &str,
     input: KernelInput,
-    requested_id: u32,
-    wal: &mut WalWriter<RoutingRecord>,
+    wal: &mut WalWriter<AuditedRecord<RoutingRecord>>,
 ) {
     let (decision, trace) = snapshot.prescribe_with_trace(input);
     assert_eq!(
         verify_decision(snapshot, input, &decision),
         VerifyResult::Valid
     );
-    assert!(audit_bundle(snapshot, input, &decision).replay_valid);
+    assert!(verified_audit_bundle(snapshot, input, &decision).is_ok());
 
-    println!("  {scenario}");
-    println!("    action:   {}", decision.action);
-    println!("    requested: {}", name_of(requested_id, names));
+    println!("{scenario}");
+    println!("  action:    {}", decision.action);
+    println!("  requested: {}", name_of(input.requested_model_id, names));
     println!(
-        "    selected:  {}",
+        "  selected:  {}",
         name_of(decision.selected_model_id, names)
     );
-    println!("    reason:   {}", decision.reason);
+    println!("  reason:    {}", decision.reason);
     println!(
-        "    rejections: quality={} budget={} utility={}",
-        trace.rejections.quality, trace.rejections.budget, trace.rejections.utility
+        "  cost:      {} microunits",
+        decision.estimated_cost_microunits
     );
-    println!();
+    println!(
+        "  rejects:   latency={} quality={} budget={} utility={} risk_ceiling={}",
+        trace.rejections.latency,
+        trace.rejections.quality,
+        trace.rejections.budget,
+        trace.rejections.utility,
+        trace.rejections.risk_ceiling
+    );
+    println!(
+        "  eligible:  {}/{}\n",
+        trace.eligible_models, trace.evaluated_models
+    );
 
-    wal.append(RoutingRecord {
-        scenario: scenario.into(),
-        action: decision.action.to_string(),
-        requested_model: name_of(requested_id, names).into(),
-        selected_model: name_of(decision.selected_model_id, names).into(),
-        reason: decision.reason.to_string(),
-    })
-    .expect("WAL append must succeed");
+    wal.append_verified_audited(
+        snapshot,
+        input,
+        decision,
+        RoutingRecord {
+            scenario: scenario.into(),
+            requested_model: name_of(input.requested_model_id, names).into(),
+            selected_model: name_of(decision.selected_model_id, names).into(),
+            action: decision.action.to_string(),
+            reason: decision.reason.to_string(),
+            estimated_cost_microunits: decision.estimated_cost_microunits,
+            eligible_models: trace.eligible_models,
+        },
+    )
+    .expect("verified WAL append");
 }
 
-fn name_of<'a>(id: u32, names: &'a [(&'a str, u32)]) -> &'a str {
+fn name_of(id: u32, names: &[(u32, &'static str)]) -> &'static str {
     names
         .iter()
-        .find(|(_, mid)| *mid == id)
-        .map_or("unknown", |(n, _)| n)
+        .find(|(model_id, _)| *model_id == id)
+        .map_or("none", |(_, name)| *name)
 }
 
 fn model(
     id: u32,
     provider: u16,
     quality: u16,
+    risk_ceiling: u16,
     input_cost: u64,
     output_cost: u64,
     latency: u32,
@@ -182,7 +213,7 @@ fn model(
         model_id: id,
         provider_id: provider,
         quality_bps: quality,
-        risk_ceiling_bps: 9500,
+        risk_ceiling_bps: risk_ceiling,
         enabled: 1,
         p95_latency_ms: latency,
         capabilities: 0,

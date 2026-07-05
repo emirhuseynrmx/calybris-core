@@ -15,7 +15,7 @@ jobs:
     name: MSRV (1.85.0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -23,7 +23,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/
@@ -35,7 +35,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features --exclude calybris-core-python -- -D warnings
 
       - name: Build
         run: cargo build --locked --release
@@ -52,6 +52,9 @@ jobs:
       - name: Test (full features)
         run: cargo test --locked --features full
 
+      - name: Test (workspace, all targets)
+        run: cargo test --locked --workspace --all-targets --all-features --exclude calybris-core-python
+
       - name: Integration audit pipeline
         run: cargo test --locked --test audit_pipeline
 
@@ -59,7 +62,11 @@ jobs:
     name: Stable
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -67,7 +74,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/
@@ -79,22 +86,22 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features --exclude calybris-core-python -- -D warnings
 
       - name: Build
         run: cargo build --locked --release
 
       - name: Test
-        run: cargo test --locked --all-features
+        run: cargo test --locked --workspace --all-targets --all-features --exclude calybris-core-python
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Test with coverage
-        run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
@@ -107,10 +114,91 @@ jobs:
         run: |
           cargo run --locked --example quickstart
           cargo run --locked --example llm_routing
-          cargo run --locked --example hft_pretrade_guard
+          cargo run --locked --example pretrade_guard
           cargo run --locked --example route_decision
           cargo run --locked --example replay_audit
-          cargo run --locked --example finance_hft
+          cargo run --locked --example budget_guard
           cargo run --locked --example simple_kernel
           cargo run --locked --example verify_wal
           cargo run --locked --example production_gateway
+
+  python-binding:
+    name: Python binding (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Test binding crate
+        run: cargo test --locked -p calybris-core-python
+
+      - name: Clippy binding crate
+        run: cargo clippy --locked -p calybris-core-python --all-targets -- -D warnings
+
+      - name: Install Python test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest hypothesis pydantic
+
+      - name: Build wheel
+        run: python -m maturin build --release --out dist
+
+      - name: Install built wheel
+        shell: bash
+        run: python -m pip install dist/calybris-*.whl --force-reinstall
+
+      - name: Import smoke test
+        run: |
+          python -c "import calybris; import calybris_commerce; import calybris_core; print(calybris.__version__)"
+
+      - name: Python tests
+        run: pytest python/tests -q
+
+  python-quality:
+    name: Python lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest hypothesis pydantic ruff mypy
+
+      - name: Build and install wheel
+        run: |
+          python -m maturin build --release --out dist
+          python -m pip install dist/calybris-*.whl --force-reinstall
+
+      - name: Ruff
+        run: ruff check python/calybris python/calybris_commerce python/tests
+
+      - name: Mypy
+        run: mypy python/calybris python/calybris_commerce
+
+      - name: Example smoke tests
+        run: |
+          python bindings/python/examples/orion_market.py
+          python bindings/python/examples/swiftbite_routing.py
+          python bindings/python/examples/novamart_benchmark.py --orders 1000

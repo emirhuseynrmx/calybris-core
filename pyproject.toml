@@ -1,0 +1,84 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "calybris"
+dynamic = ["version"]
+description = "Python bindings for Calybris Core — experimental/pre-1.0; Rust kernel is the stable surface"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Emir Huseyn", email = "emirhuseynrmx@gmail.com" },
+]
+maintainers = [
+  { name = "Emir Huseyn", email = "emirhuseynrmx@gmail.com" },
+]
+keywords = ["commerce", "routing", "deterministic", "audit", "llm", "finance", "policy"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Rust",
+  "Topic :: Software Engineering :: Libraries",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+dependencies = [
+  "pydantic>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/emirhuseynrmx/calybris-core"
+Repository = "https://github.com/emirhuseynrmx/calybris-core"
+Issues = "https://github.com/emirhuseynrmx/calybris-core/issues"
+Changelog = "https://github.com/emirhuseynrmx/calybris-core/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/emirhuseynrmx/calybris-core#readme"
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0",
+  "hypothesis[cli]>=6.100",
+]
+dev = [
+  "pytest>=8.0",
+  "hypothesis[cli]>=6.100",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+
+[tool.maturin]
+manifest-path = "bindings/python/Cargo.toml"
+python-source = "python"
+python-packages = ["calybris", "calybris_commerce", "calybris_core"]
+module-name = "calybris._core"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+addopts = "-v"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"python/calybris/types.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+packages = ["calybris", "calybris_commerce"]
+
+[[tool.mypy.overrides]]
+module = "calybris._core"
+ignore_missing_imports = true

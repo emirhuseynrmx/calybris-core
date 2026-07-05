@@ -1,0 +1,322 @@
+//! Decision certificates — one verifiable envelope per decision.
+//!
+//! 0.5.0 introduced three proof surfaces separately: the audit bundle
+//! (policy/input/decision digests + replay), the state trajectory
+//! (`state`), and signed policy provenance (`provenance`). A decision
+//! certificate binds them into a **single canonically-serializable object**
+//! that an auditor verifies in one call and that a system stores per
+//! decision — the notarized receipt for "this decision, under this policy,
+//! from this state, signed by this officer."
+//!
+//! Certificates are fail-closed: [`crate::certificate::issue_certificate`] returns one only when
+//! the decision replays exactly. Verification recomputes every digest from
+//! the disclosed policy/input/decision — the certificate never asks to be
+//! trusted on its word.
+//!
+//! Signature verification lives behind the `provenance` feature; digest,
+//! replay, and state-linkage verification are always available (including on
+//! `wasm32`).
+
+use crate::digest::{decision_digest, digest_to_hex, input_digest, policy_digest};
+use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
+use crate::verify::{verify_decision, VerifyError, VerifyResult};
+
+/// Certificate schema tag for long-term storage.
+pub const CERTIFICATE_SCHEMA: &str = "calybris-certificate-v1";
+
+/// State-trajectory anchor carried in a certificate (see `state` module).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CertificateState {
+    pub step: u64,
+    pub state_digest_before_hex: String,
+    pub state_digest_after_hex: String,
+}
+
+/// WAL anchor carried in a certificate: where the decision was durably logged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CertificateWal {
+    pub sequence: u64,
+    pub entry_hash: String,
+}
+
+/// Accountable-signer fields (mirror of `provenance::SignedPolicy`, flattened
+/// so the base certificate needs no Ed25519 dependency).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CertificateSignature {
+    pub signer_id: String,
+    pub signed_at_epoch_ms: u64,
+    pub public_key_hex: String,
+    pub signature_hex: String,
+}
+
+/// A single decision bound to its policy, input, state, log position, and
+/// (optionally) an accountable signer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DecisionCertificate {
+    pub schema_version: String,
+    pub policy_epoch: u64,
+    pub catalog_epoch: u64,
+    pub policy_digest_hex: String,
+    pub input_digest_hex: String,
+    pub decision_digest_hex: String,
+    pub replay_valid: bool,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub state: Option<CertificateState>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub wal: Option<CertificateWal>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub signature: Option<CertificateSignature>,
+}
+
+/// Optional anchors to attach when issuing a certificate.
+#[derive(Clone, Debug, Default)]
+pub struct CertificateAnchors {
+    pub state: Option<CertificateState>,
+    pub wal: Option<CertificateWal>,
+    pub signature: Option<CertificateSignature>,
+}
+
+/// Issue a fail-closed certificate: returns `Err` unless the decision is the
+/// exact output of `snapshot.prescribe(input)`.
+pub fn issue_certificate(
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: &KernelDecision,
+    anchors: CertificateAnchors,
+) -> Result<DecisionCertificate, VerifyError> {
+    match verify_decision(snapshot, input, decision) {
+        VerifyResult::Valid => {}
+        error => return Err(VerifyError::new(error)),
+    }
+    Ok(DecisionCertificate {
+        schema_version: CERTIFICATE_SCHEMA.to_string(),
+        policy_epoch: decision.policy_epoch,
+        catalog_epoch: decision.catalog_epoch,
+        policy_digest_hex: digest_to_hex(&policy_digest(snapshot)),
+        input_digest_hex: digest_to_hex(&input_digest(&input)),
+        decision_digest_hex: digest_to_hex(&decision_digest(decision)),
+        replay_valid: true,
+        state: anchors.state,
+        wal: anchors.wal,
+        signature: anchors.signature,
+    })
+}
+
+/// Why a certificate failed verification.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CertificateError {
+    #[error("unknown certificate schema: {0}")]
+    UnknownSchema(String),
+    #[error("policy digest mismatch")]
+    PolicyDigestMismatch,
+    #[error("input digest mismatch")]
+    InputDigestMismatch,
+    #[error("decision digest mismatch")]
+    DecisionDigestMismatch,
+    #[error("decision does not replay under the disclosed policy")]
+    ReplayInvalid,
+    #[error("certificate asserts replay_valid=false")]
+    ReplayFlagFalse,
+}
+
+/// Verify a certificate against the disclosed policy, input, and decision:
+/// recomputes all three digests, confirms the decision replays, and checks
+/// the stored `replay_valid` flag. Signature verification is separate (see
+/// `verify_certificate_signature`.
+pub fn verify_certificate(
+    certificate: &DecisionCertificate,
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: &KernelDecision,
+) -> Result<(), CertificateError> {
+    if certificate.schema_version != CERTIFICATE_SCHEMA {
+        return Err(CertificateError::UnknownSchema(
+            certificate.schema_version.clone(),
+        ));
+    }
+    if !certificate.replay_valid {
+        return Err(CertificateError::ReplayFlagFalse);
+    }
+    if certificate.policy_digest_hex != digest_to_hex(&policy_digest(snapshot)) {
+        return Err(CertificateError::PolicyDigestMismatch);
+    }
+    if certificate.input_digest_hex != digest_to_hex(&input_digest(&input)) {
+        return Err(CertificateError::InputDigestMismatch);
+    }
+    if certificate.decision_digest_hex != digest_to_hex(&decision_digest(decision)) {
+        return Err(CertificateError::DecisionDigestMismatch);
+    }
+    if verify_decision(snapshot, input, decision) != VerifyResult::Valid {
+        return Err(CertificateError::ReplayInvalid);
+    }
+    Ok(())
+}
+
+/// Verify the accountable-signer signature on a certificate (feature
+/// `provenance`). Reconstructs the [`crate::provenance::SignedPolicy`] from
+/// the certificate's flattened fields and checks it against the disclosed
+/// policy; `trusted_key`, when supplied, pins the signer to a trust anchor.
+#[cfg(feature = "provenance")]
+pub fn verify_certificate_signature(
+    certificate: &DecisionCertificate,
+    snapshot: &PolicySnapshot,
+    trusted_key: Option<&ed25519_dalek::VerifyingKey>,
+) -> Result<(), crate::provenance::ProvenanceError> {
+    use crate::provenance::{
+        verify_signed_policy, verify_signed_policy_with_key, ProvenanceError, SignedPolicy,
+    };
+    let Some(signature) = &certificate.signature else {
+        return Err(ProvenanceError::BadSignature);
+    };
+    let signed = SignedPolicy {
+        policy_digest_hex: certificate.policy_digest_hex.clone(),
+        signer_id: signature.signer_id.clone(),
+        signed_at_epoch_ms: signature.signed_at_epoch_ms,
+        public_key_hex: signature.public_key_hex.clone(),
+        signature_hex: signature.signature_hex.clone(),
+    };
+    match trusted_key {
+        Some(key) => verify_signed_policy_with_key(snapshot, &signed, key),
+        None => verify_signed_policy(snapshot, &signed),
+    }
+}
+
+#[cfg(feature = "provenance")]
+impl CertificateSignature {
+    /// Build certificate signature fields from a signed policy.
+    pub fn from_signed_policy(signed: &crate::provenance::SignedPolicy) -> Self {
+        Self {
+            signer_id: signed.signer_id.clone(),
+            signed_at_epoch_ms: signed.signed_at_epoch_ms,
+            public_key_hex: signed.public_key_hex.clone(),
+            signature_hex: signed.signature_hex.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::{KernelModel, ALL_PROVIDERS, ALL_REGIONS};
+
+    fn policy() -> PolicySnapshot {
+        PolicySnapshot::try_new(
+            7,
+            42,
+            9_600,
+            5_500,
+            3_500,
+            2,
+            vec![KernelModel {
+                model_id: 1,
+                provider_id: 0,
+                quality_bps: 9_000,
+                risk_ceiling_bps: 9_500,
+                enabled: 1,
+                p95_latency_ms: 200,
+                capabilities: 0,
+                region_mask: ALL_REGIONS,
+                input_cost_microunits_per_million_tokens: 250,
+                output_cost_microunits_per_million_tokens: 1_000,
+            }],
+        )
+        .unwrap()
+    }
+
+    fn input() -> KernelInput {
+        KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1,
+            input_tokens: 1_000,
+            output_tokens: 500,
+            business_value_microunits: 100_000,
+            budget_limit_microunits: 50_000_000,
+            risk_bps: 1_000,
+            confidence_bps: 9_000,
+            minimum_quality_bps: 5_000,
+            max_p95_latency_ms: 1_000,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        }
+    }
+
+    #[test]
+    fn issued_certificate_verifies() {
+        let policy = policy();
+        let request = input();
+        let decision = policy.prescribe(request);
+        let cert =
+            issue_certificate(&policy, request, &decision, CertificateAnchors::default()).unwrap();
+        verify_certificate(&cert, &policy, request, &decision).unwrap();
+    }
+
+    #[test]
+    fn tampered_decision_digest_is_rejected() {
+        let policy = policy();
+        let request = input();
+        let decision = policy.prescribe(request);
+        let mut cert =
+            issue_certificate(&policy, request, &decision, CertificateAnchors::default()).unwrap();
+        cert.decision_digest_hex = "0".repeat(64);
+        assert_eq!(
+            verify_certificate(&cert, &policy, request, &decision),
+            Err(CertificateError::DecisionDigestMismatch)
+        );
+    }
+
+    #[test]
+    fn certificate_bound_to_wrong_policy_is_rejected() {
+        let policy = policy();
+        let request = input();
+        let decision = policy.prescribe(request);
+        let cert =
+            issue_certificate(&policy, request, &decision, CertificateAnchors::default()).unwrap();
+
+        let other = PolicySnapshot::try_new(
+            8, // different epoch → different policy digest
+            42,
+            9_600,
+            5_500,
+            3_500,
+            2,
+            policy.models().to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_certificate(&cert, &other, request, &decision),
+            Err(CertificateError::PolicyDigestMismatch)
+        );
+    }
+
+    #[cfg(feature = "provenance")]
+    #[test]
+    fn signed_certificate_verifies_and_rejects_wrong_key() {
+        use crate::provenance::sign_policy;
+        use ed25519_dalek::SigningKey;
+
+        let policy = policy();
+        let request = input();
+        let decision = policy.prescribe(request);
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let signed = sign_policy(&policy, &key, "risk-officer:ayse", 1_783_000_000_000);
+
+        let anchors = CertificateAnchors {
+            signature: Some(CertificateSignature::from_signed_policy(&signed)),
+            ..CertificateAnchors::default()
+        };
+        let cert = issue_certificate(&policy, request, &decision, anchors).unwrap();
+
+        verify_certificate(&cert, &policy, request, &decision).unwrap();
+        verify_certificate_signature(&cert, &policy, Some(&key.verifying_key())).unwrap();
+
+        let wrong = SigningKey::from_bytes(&[1u8; 32]);
+        assert!(
+            verify_certificate_signature(&cert, &policy, Some(&wrong.verifying_key())).is_err()
+        );
+    }
+}

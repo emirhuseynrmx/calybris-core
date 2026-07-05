@@ -21,7 +21,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Calybris — Production Gateway Simulation");
     println!("=========================================\n");
 
-    // ── 1. Config ──
     let config = EngineConfig::new()
         .latency_penalty(3)
         .hard_risk_limit(9_500)
@@ -35,7 +34,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.default_exposure_cap_microcents
     );
 
-    // ── 2. Build catalog with builders ──
     let snapshot = PolicyBuilder::new(config.clone())
         .epochs(1, 1)
         .model(
@@ -92,19 +90,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     println!("[catalog] {} models loaded\n", snapshot.models().len());
 
-    // ── 3. Budget engine with config-driven tenant init ──
     let budget = BudgetEngine::new();
     config.ensure_tenant(&budget, "team-platform", 100_000_000);
     config.ensure_tenant(&budget, "team-support", 50_000_000);
     config.ensure_tenant(&budget, "team-compliance", 200_000_000);
     println!("[budget] 3 tenants initialized (exposure cap from config)\n");
 
-    // ── 4. WAL ──
     let wal_path = std::path::PathBuf::from("production_gateway_demo.jsonl");
     let _ = std::fs::remove_file(&wal_path);
     let mut wal = WalWriter::open(&wal_path)?;
 
-    // ── 5. Process requests ──
     let requests = vec![
         (
             "team-platform",
@@ -227,7 +222,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wal.flush_and_sync()?;
     println!("[wal] {} entries written\n", wal.sequence());
 
-    // ── 6. Financial proof ──
     let _proof = prove_conservation(&budget)?;
     let cert = certify_ledger(&budget);
     println!("[finance] conservation: balanced");
@@ -237,7 +231,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("[finance] digest: {}…\n", &cert.ledger_digest_hex[..16]);
 
-    // ── 7. Checkpoint with WAL high-watermark ──
     let snap_path = std::path::PathBuf::from("production_gateway_snapshot.json");
     let snap = checkpoint_with_wal(&budget, &snap_path, wal.sequence())?;
     println!(
@@ -247,7 +240,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snap_path.display()
     );
 
-    // ── 8. Simulate crash recovery ──
     let plan = recovery_plan(&snap_path, &wal_path)?;
     println!(
         "[recovery] plan: {} total WAL entries, {} to replay (watermark={})",

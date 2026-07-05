@@ -16,12 +16,12 @@ jobs:
     name: Supply chain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/
@@ -43,12 +43,12 @@ jobs:
     name: Extended adversarial tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/
@@ -68,12 +68,12 @@ jobs:
     name: Loom budget concurrency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/
@@ -91,14 +91,14 @@ jobs:
     name: Miri (UB detection)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/
@@ -113,11 +113,18 @@ jobs:
         run: >
           cargo miri test --locked --lib --all-features --
           --skip wal::
-          --skip aggressive_mixed
-          --skip random_ops
-          --skip arbitrary_
-          --skip digests_stable
-          --skip optimized_
+          --skip async_wal::
+          --skip aggressive_mixed_ops_maintain_conservation
+          --skip random_ops_maintain_conservation
+          --skip builder_prescribe_never_panics
+          --skip arbitrary_valid_configs_always_validate
+          --skip config_roundtrips_through_builder
+          --skip digests_stable_under_repeat
+          --skip optimized_scaled_term_matches_i128_reference
+          --skip optimized_cost_matches_u128_reference_when_guard_admits
+          --skip optimized_kernel_matches_reference_decision
+          --skip arbitrary_inputs_never_bypass_provider_fence
+          --skip decode_hex32_rejects_non_hex_strings
           --skip prescriptive_kernel
         env:
           MIRIFLAGS: -Zmiri-disable-isolation

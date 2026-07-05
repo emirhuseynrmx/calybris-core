@@ -88,7 +88,7 @@ Use `append_verified_audited` at production boundaries. `append_audited` (unveri
 
 Skipping step 2 is a deployment choice, not a library default — document it in your threat model.
 
-## 7. External audit readiness (0.4.0)
+## 7. External audit readiness (0.5.0)
 
 This release is structured for third-party review:
 

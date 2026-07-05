@@ -86,10 +86,31 @@ impl std::fmt::Display for VerifyError {
 
 impl std::error::Error for VerifyError {}
 
+/// Audit bundle schema identifier (stable across releases).
+pub const AUDIT_SCHEMA_VERSION: &str = "calybris.audit.v1";
+/// Digest algorithm used for all bundle fields.
+pub const AUDIT_DIGEST_ALGORITHM: &str = "sha256";
+/// Proof envelope version carried alongside digests.
+pub const AUDIT_PROOF_VERSION: u16 = 1;
+/// Producer label for externally stored audit artifacts.
+pub const AUDIT_CREATED_BY: &str = "calybris";
+
 /// Binds a decision to its policy and input via canonical SHA-256 digests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AuditBundle {
+    /// Stable schema tag for long-term audit storage.
+    pub schema_version: String,
+    /// Digest algorithm (always SHA-256 for current releases).
+    pub digest_algorithm: String,
+    /// Proof format version.
+    pub proof_version: u16,
+    /// Policy epoch at decision time.
+    pub policy_epoch: u64,
+    /// Catalog epoch at decision time.
+    pub catalog_epoch: u64,
+    /// Producer label (`calybris` for kernel-generated bundles).
+    pub created_by: String,
     /// Hex-encoded canonical policy digest.
     pub policy_digest_hex: String,
     /// Hex-encoded canonical input digest.
@@ -128,6 +149,12 @@ pub fn audit_bundle(
     let decision_d = decision_digest(decision);
     let replayed = snapshot.prescribe(input);
     AuditBundle {
+        schema_version: AUDIT_SCHEMA_VERSION.to_string(),
+        digest_algorithm: AUDIT_DIGEST_ALGORITHM.to_string(),
+        proof_version: AUDIT_PROOF_VERSION,
+        policy_epoch: snapshot.policy_epoch,
+        catalog_epoch: snapshot.catalog_epoch,
+        created_by: AUDIT_CREATED_BY.to_string(),
         policy_digest_hex: digest_to_hex(&policy),
         input_digest_hex: digest_to_hex(&input_d),
         decision_digest_hex: digest_to_hex(&decision_d),
@@ -153,31 +180,30 @@ pub fn verified_audit_bundle(
 
 /// Verify that `decision` is the correct output of `snapshot.prescribe(input)`.
 ///
-/// Checks full structural equality and canonical decision digest binding.
+/// Checks full structural equality first (human-readable mismatch on failure),
+/// then confirms the stored decision digest is internally consistent.
 pub fn verify_decision(
     snapshot: &PolicySnapshot,
     input: KernelInput,
     decision: &KernelDecision,
 ) -> VerifyResult {
     let replayed = snapshot.prescribe(input);
+    if replayed != *decision {
+        return VerifyResult::Mismatch {
+            expected: replayed,
+            actual: *decision,
+        };
+    }
+    // Decisions match on all fields; verify digest consistency as a safety net.
     let expected_d = decision_digest(&replayed);
     let actual_d = decision_digest(decision);
-
     if expected_d != actual_d {
         return VerifyResult::DigestMismatch {
             expected_hex: digest_to_hex(&expected_d),
             actual_hex: digest_to_hex(&actual_d),
         };
     }
-
-    if replayed == *decision {
-        VerifyResult::Valid
-    } else {
-        VerifyResult::Mismatch {
-            expected: replayed,
-            actual: *decision,
-        }
-    }
+    VerifyResult::Valid
 }
 
 /// Compute a fingerprint of a policy snapshot for audit binding.
@@ -426,25 +452,54 @@ mod tests {
         assert_eq!(cert.decision_fingerprint.len(), 64);
     }
 
+    fn audit_bundle_stub(
+        policy_digest_hex: String,
+        input_digest_hex: String,
+        decision_digest_hex: String,
+        replay_valid: bool,
+    ) -> AuditBundle {
+        AuditBundle {
+            schema_version: AUDIT_SCHEMA_VERSION.to_string(),
+            digest_algorithm: AUDIT_DIGEST_ALGORITHM.to_string(),
+            proof_version: AUDIT_PROOF_VERSION,
+            policy_epoch: 1,
+            catalog_epoch: 1,
+            created_by: AUDIT_CREATED_BY.to_string(),
+            policy_digest_hex,
+            input_digest_hex,
+            decision_digest_hex,
+            replay_valid,
+        }
+    }
+
+    #[test]
+    fn audit_bundle_includes_schema_metadata() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        let bundle = audit_bundle(&snap, input, &decision);
+        assert_eq!(bundle.schema_version, AUDIT_SCHEMA_VERSION);
+        assert_eq!(bundle.digest_algorithm, AUDIT_DIGEST_ALGORITHM);
+        assert_eq!(bundle.proof_version, AUDIT_PROOF_VERSION);
+        assert_eq!(bundle.created_by, AUDIT_CREATED_BY);
+        assert_eq!(bundle.policy_epoch, snap.policy_epoch);
+        assert_eq!(bundle.catalog_epoch, snap.catalog_epoch);
+    }
+
     #[test]
     fn decode_hex32_rejects_odd_length() {
-        let bundle = AuditBundle {
-            policy_digest_hex: "abc".into(),
-            input_digest_hex: "00".repeat(32),
-            decision_digest_hex: "00".repeat(32),
-            replay_valid: true,
-        };
+        let bundle = audit_bundle_stub("abc".into(), "00".repeat(32), "00".repeat(32), true);
         assert_eq!(bundle.policy_digest(), Err(DigestDecodeError::OddLength));
     }
 
     #[test]
     fn decode_hex32_rejects_invalid_characters() {
-        let bundle = AuditBundle {
-            policy_digest_hex: format!("{}g", "a".repeat(63)),
-            input_digest_hex: "00".repeat(32),
-            decision_digest_hex: "00".repeat(32),
-            replay_valid: true,
-        };
+        let bundle = audit_bundle_stub(
+            format!("{}g", "a".repeat(63)),
+            "00".repeat(32),
+            "00".repeat(32),
+            true,
+        );
         assert!(matches!(
             bundle.policy_digest(),
             Err(DigestDecodeError::InvalidHexCharacter { .. })
@@ -453,12 +508,7 @@ mod tests {
 
     #[test]
     fn decode_hex32_rejects_wrong_length() {
-        let bundle = AuditBundle {
-            policy_digest_hex: "00".repeat(30),
-            input_digest_hex: "00".repeat(32),
-            decision_digest_hex: "00".repeat(32),
-            replay_valid: true,
-        };
+        let bundle = audit_bundle_stub("00".repeat(30), "00".repeat(32), "00".repeat(32), true);
         assert_eq!(
             bundle.policy_digest(),
             Err(DigestDecodeError::InvalidStringLength)
@@ -499,12 +549,12 @@ mod tests {
     proptest! {
         #[test]
         fn decode_hex32_rejects_non_hex_strings(s in "[^0-9a-fA-F]{1,20}") {
-            let bundle = AuditBundle {
-                policy_digest_hex: s,
-                input_digest_hex: "00".repeat(32),
-                decision_digest_hex: "00".repeat(32),
-                replay_valid: true,
-            };
+            let bundle = audit_bundle_stub(
+                s,
+                "00".repeat(32),
+                "00".repeat(32),
+                true,
+            );
             prop_assert!(bundle.policy_digest().is_err());
         }
     }

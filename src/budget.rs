@@ -1,6 +1,8 @@
 //! Atomic budget engine with CAS (compare-and-swap) reservation management.
 //!
-//! All values are i64 microcents (1 cent = 1,000,000 microcents).
+//! All values are i64 **microcents** (1 US cent = 1,000,000 microcents).
+//! The kernel itself uses currency-agnostic "microunits"; microcents are the
+//! specific denomination chosen for the finance / pre-trade exposure layer.
 //! No floating-point in the core API.
 //!
 //! CAS-based balance updates; metadata maps are mutex-protected.
@@ -354,7 +356,10 @@ impl BudgetEngine {
     /// Set a per-tenant exposure cap on open reservation holds (`0` removes the cap).
     pub fn set_max_reserved_microcents(&self, tenant_id: &str, max_microcents: i64) {
         let key: Arc<str> = Arc::from(tenant_id);
-        let mut limits = self.max_reserved_microcents.lock().unwrap();
+        let mut limits = self
+            .max_reserved_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if max_microcents <= 0 {
             limits.remove(&key);
         } else {
@@ -376,7 +381,10 @@ impl BudgetEngine {
 
     /// Checked sum of lifetime `committed_microcents` across all tenants.
     pub fn try_total_committed_microcents(&self) -> Result<i64, ConservationStatus> {
-        let committed = self.committed_microcents.lock().unwrap();
+        let committed = self
+            .committed_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut total: i128 = 0;
         for amount in committed.values() {
             total = total
@@ -390,13 +398,19 @@ impl BudgetEngine {
     #[must_use]
     pub fn committed_since_last_certificate(&self) -> i64 {
         let current = self.total_committed_microcents();
-        let baseline = *self.last_certified_committed_total.lock().unwrap();
+        let baseline = *self
+            .last_certified_committed_total
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         current.saturating_sub(baseline)
     }
 
     /// Advance certificate baseline from a frozen snapshot total; returns delta since last cert.
     pub(crate) fn rotate_certificate_baseline(&self, snapshot_total_committed: i64) -> i64 {
-        let mut baseline = self.last_certified_committed_total.lock().unwrap();
+        let mut baseline = self
+            .last_certified_committed_total
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if snapshot_total_committed <= *baseline {
             return 0;
         }
@@ -413,13 +427,25 @@ impl BudgetEngine {
     pub fn restore_from_snapshot(&self, snap: BudgetSnapshot) -> Result<(), RestoreError> {
         validate_snapshot_for_restore(&snap)?;
         {
-            let mut reservations = self.reservations.lock().unwrap();
+            let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
             reservations.clear();
         }
-        let mut budgets = self.tenant_budgets.lock().unwrap();
-        let mut initials = self.initial_microcents.lock().unwrap();
-        let mut committed = self.committed_microcents.lock().unwrap();
-        let mut reserved_totals = self.tenant_reserved_totals.lock().unwrap();
+        let mut budgets = self
+            .tenant_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut initials = self
+            .initial_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut committed = self
+            .committed_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut reserved_totals = self
+            .tenant_reserved_totals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         budgets.clear();
         initials.clear();
         committed.clear();
@@ -449,10 +475,22 @@ impl BudgetEngine {
         if budget_microcents < 0 {
             return;
         }
-        let mut budgets = self.tenant_budgets.lock().unwrap();
-        let mut initials = self.initial_microcents.lock().unwrap();
-        let mut committed = self.committed_microcents.lock().unwrap();
-        let mut reserved_totals = self.tenant_reserved_totals.lock().unwrap();
+        let mut budgets = self
+            .tenant_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut initials = self
+            .initial_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut committed = self
+            .committed_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut reserved_totals = self
+            .tenant_reserved_totals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let key: Arc<str> = Arc::from(tenant_id);
         if !budgets.contains_key(&key) {
             budgets.insert(
@@ -477,14 +515,20 @@ impl BudgetEngine {
         let key: Arc<str> = Arc::from(tenant_id);
 
         let budget = {
-            let budgets = self.tenant_budgets.lock().unwrap();
+            let budgets = self
+                .tenant_budgets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             match budgets.get(&key) {
                 Some(b) => Arc::clone(b),
                 None => return TopUpResult::MissingTenant,
             }
         };
 
-        let mut initials = self.initial_microcents.lock().unwrap();
+        let mut initials = self
+            .initial_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let Some(current_initial) = initials.get(&key).copied() else {
             return TopUpResult::MissingTenant;
@@ -511,7 +555,10 @@ impl BudgetEngine {
     /// Total budget ever granted to a tenant (`ensure_tenant` + top-ups).
     #[must_use]
     pub fn initial_microcents(&self, tenant_id: &str) -> Option<i64> {
-        let initials = self.initial_microcents.lock().unwrap();
+        let initials = self
+            .initial_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let key: Arc<str> = Arc::from(tenant_id);
         initials.get(&key).copied()
     }
@@ -521,7 +568,10 @@ impl BudgetEngine {
     /// This is **not** "currently in-flight committed amount" — active holds live in [`reserved_microcents`](Self::reserved_microcents).
     #[must_use]
     pub fn committed_microcents(&self, tenant_id: &str) -> Option<i64> {
-        let committed = self.committed_microcents.lock().unwrap();
+        let committed = self
+            .committed_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let key: Arc<str> = Arc::from(tenant_id);
         committed.get(&key).copied()
     }
@@ -530,7 +580,10 @@ impl BudgetEngine {
     #[must_use]
     pub fn reserved_microcents(&self, tenant_id: &str) -> i64 {
         let key: Arc<str> = Arc::from(tenant_id);
-        let totals = self.tenant_reserved_totals.lock().unwrap();
+        let totals = self
+            .tenant_reserved_totals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         totals
             .get(&key)
             .map(|t| t.load(Ordering::Acquire))
@@ -542,11 +595,23 @@ impl BudgetEngine {
     /// Lock order: reservations → budgets → initials → committed (matches hot path).
     #[must_use]
     pub fn snapshot(&self) -> BudgetSnapshot {
-        let reservations = self.reservations.lock().unwrap();
-        let budgets = self.tenant_budgets.lock().unwrap();
-        let initials = self.initial_microcents.lock().unwrap();
-        let committed = self.committed_microcents.lock().unwrap();
-        let reserved_totals = self.tenant_reserved_totals.lock().unwrap();
+        let reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let budgets = self
+            .tenant_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let initials = self
+            .initial_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let committed = self
+            .committed_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let reserved_totals = self
+            .tenant_reserved_totals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let mut tenants = Vec::with_capacity(budgets.len());
         for (tenant_id, balance) in budgets.iter() {
@@ -582,7 +647,10 @@ impl BudgetEngine {
     /// Remaining budget for a tenant in microcents.
     #[must_use]
     pub fn remaining_microcents(&self, tenant_id: &str) -> Option<i64> {
-        let budgets = self.tenant_budgets.lock().unwrap();
+        let budgets = self
+            .tenant_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let key: Arc<str> = Arc::from(tenant_id);
         budgets.get(&key).map(|b| b.load(Ordering::Acquire))
     }
@@ -609,8 +677,14 @@ impl BudgetEngine {
 
         let key: Arc<str> = Arc::from(tenant_id);
         let (budget, reserved_total) = {
-            let budgets = self.tenant_budgets.lock().unwrap();
-            let totals = self.tenant_reserved_totals.lock().unwrap();
+            let budgets = self
+                .tenant_budgets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let totals = self
+                .tenant_reserved_totals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             match (budgets.get(&key), totals.get(&key)) {
                 (Some(b), Some(t)) => (Arc::clone(b), Arc::clone(t)),
                 _ => return (BudgetReservation::MissingTenant, None),
@@ -618,7 +692,10 @@ impl BudgetEngine {
         };
 
         let max_reserved = {
-            let limits = self.max_reserved_microcents.lock().unwrap();
+            let limits = self
+                .max_reserved_microcents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             limits.get(&key).copied().unwrap_or(0)
         };
         match try_increment_reserved_total(&reserved_total, cost_microcents, max_reserved) {
@@ -655,7 +732,7 @@ impl BudgetEngine {
             }
             Ok(remaining) => {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                let mut reservations = self.reservations.lock().unwrap();
+                let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
                 reservations.insert(
                     id,
                     ReservationRecord {
@@ -687,13 +764,16 @@ impl BudgetEngine {
             return BudgetSettlement::InvalidAmount;
         }
 
-        let mut reservations = self.reservations.lock().unwrap();
+        let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
         let Some(reservation) = reservations.remove(&reservation_id) else {
             return BudgetSettlement::MissingReservation;
         };
 
         let budget = {
-            let budgets = self.tenant_budgets.lock().unwrap();
+            let budgets = self
+                .tenant_budgets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             match budgets.get(&reservation.tenant_id) {
                 Some(b) => Arc::clone(b),
                 None => {
@@ -705,13 +785,16 @@ impl BudgetEngine {
         drop(reservations);
 
         let tenant_key = Arc::clone(&reservation.tenant_id);
-        let mut committed_guard = self.committed_microcents.lock().unwrap();
+        let mut committed_guard = self
+            .committed_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let current_committed = committed_guard.get(&tenant_key).copied().unwrap_or(0);
         let new_committed = match current_committed.checked_add(actual_microcents) {
             Some(v) => v,
             None => {
                 drop(committed_guard);
-                let mut reservations = self.reservations.lock().unwrap();
+                let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
                 reservations.insert(reservation_id, reservation);
                 return BudgetSettlement::Overflow {
                     remaining_microcents: budget.load(Ordering::Acquire),
@@ -724,7 +807,8 @@ impl BudgetEngine {
             std::cmp::Ordering::Greater => {
                 if let Err(remaining) = debit_if_available(&budget, delta) {
                     drop(committed_guard);
-                    let mut reservations = self.reservations.lock().unwrap();
+                    let mut reservations =
+                        self.reservations.lock().unwrap_or_else(|e| e.into_inner());
                     reservations.insert(reservation_id, reservation);
                     return BudgetSettlement::Overrun {
                         remaining_microcents: remaining,
@@ -738,7 +822,10 @@ impl BudgetEngine {
         }
 
         {
-            let totals = self.tenant_reserved_totals.lock().unwrap();
+            let totals = self
+                .tenant_reserved_totals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(total) = totals.get(&tenant_key) {
                 total.fetch_sub(reservation.reserved_microcents, Ordering::AcqRel);
             }
@@ -756,13 +843,16 @@ impl BudgetEngine {
 
     /// Release a reservation, returning the full reserved amount to the tenant's budget.
     pub fn release(&self, reservation_id: u64) -> BudgetSettlement {
-        let mut reservations = self.reservations.lock().unwrap();
+        let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
         let Some((_, reservation)) = reservations.remove_entry(&reservation_id) else {
             return BudgetSettlement::MissingReservation;
         };
 
         let budget = {
-            let budgets = self.tenant_budgets.lock().unwrap();
+            let budgets = self
+                .tenant_budgets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             match budgets.get(&reservation.tenant_id) {
                 Some(b) => Arc::clone(b),
                 None => {
@@ -774,7 +864,10 @@ impl BudgetEngine {
         drop(reservations);
 
         {
-            let totals = self.tenant_reserved_totals.lock().unwrap();
+            let totals = self
+                .tenant_reserved_totals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(total) = totals.get(&reservation.tenant_id) {
                 total.fetch_sub(reservation.reserved_microcents, Ordering::AcqRel);
             }
@@ -792,13 +885,19 @@ impl BudgetEngine {
     /// Number of registered tenants.
     #[must_use]
     pub fn tenant_count(&self) -> usize {
-        self.tenant_budgets.lock().unwrap().len()
+        self.tenant_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Number of active (uncommitted, unreleased) reservations.
     #[must_use]
     pub fn active_reservations(&self) -> usize {
-        self.reservations.lock().unwrap().len()
+        self.reservations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
@@ -1088,7 +1187,10 @@ mod tests {
         engine.ensure_tenant("desk-a", 1);
         engine.ensure_tenant("desk-b", 1);
         {
-            let mut committed = engine.committed_microcents.lock().unwrap();
+            let mut committed = engine
+                .committed_microcents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             committed.insert(Arc::from("desk-a"), i64::MAX);
             committed.insert(Arc::from("desk-b"), 1);
         }
