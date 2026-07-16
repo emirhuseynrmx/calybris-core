@@ -146,7 +146,7 @@ fn signing_key(value: &[u8]) -> PyResult<SigningKey> {
     )?))
 }
 
-fn json_value_to_dict<'py>(py: Python<'py>, value: Value) -> PyResult<Bound<'py, PyDict>> {
+fn json_value_to_dict(py: Python<'_>, value: Value) -> PyResult<Bound<'_, PyDict>> {
     let json = serde_json::to_string(&value).map_err(runtime_error)?;
     let decoded = py.import("json")?.call_method1("loads", (json,))?;
     Ok(decoded.cast_into::<PyDict>()?)
