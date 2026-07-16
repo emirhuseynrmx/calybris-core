@@ -893,7 +893,7 @@ impl PyBudgetEngine {
     }
 }
 
-fn top_up_to_dict<'py>(py: Python<'py>, result: TopUpResult) -> PyResult<Bound<'py, PyDict>> {
+fn top_up_to_dict(py: Python<'_>, result: TopUpResult) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
     match result {
         TopUpResult::ToppedUp {
@@ -913,11 +913,11 @@ fn top_up_to_dict<'py>(py: Python<'py>, result: TopUpResult) -> PyResult<Bound<'
     Ok(d)
 }
 
-fn reservation_to_dict<'py>(
-    py: Python<'py>,
+fn reservation_to_dict(
+    py: Python<'_>,
     reservation: BudgetReservation,
     reservation_id: Option<u64>,
-) -> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("reservation_id", reservation_id)?;
     match reservation {
@@ -955,10 +955,7 @@ fn reservation_to_dict<'py>(
     Ok(d)
 }
 
-fn settlement_to_dict<'py>(
-    py: Python<'py>,
-    settlement: BudgetSettlement,
-) -> PyResult<Bound<'py, PyDict>> {
+fn settlement_to_dict(py: Python<'_>, settlement: BudgetSettlement) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
     match settlement {
         BudgetSettlement::Committed {
@@ -996,10 +993,7 @@ fn settlement_to_dict<'py>(
     Ok(d)
 }
 
-fn conservation_to_dict<'py>(
-    py: Python<'py>,
-    status: ConservationStatus,
-) -> PyResult<Bound<'py, PyDict>> {
+fn conservation_to_dict(py: Python<'_>, status: ConservationStatus) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
     match status {
         ConservationStatus::Balanced => d.set_item("status", "balanced")?,
