@@ -6,7 +6,7 @@ Calybris uses Miri **alongside** Loom:
 
 | Tool | What it checks |
 |------|----------------|
-| **Loom** | Concurrent interleavings of budget CAS + mutex paths (`cfg(loom)`) |
+| **Loom** | Concurrent interleavings of budget CAS + mutex paths (`CALYBRIS_LOOM=1`) |
 | **Miri** | UB in safe Rust under sequential / single-threaded execution |
 
 They are complementary — Loom does not replace Miri, and Miri does not exhaustively model all thread schedules.

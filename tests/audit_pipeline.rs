@@ -72,7 +72,7 @@ fn full_audit_pipeline_with_budget_and_keyed_wal() {
         required_region_mask: 0,
     };
 
-    let decision = snap.prescribe(input);
+    let decision = snap.prescribe_checked(input).unwrap();
     assert_eq!(
         verify_decision(&snap, input, &decision),
         VerifyResult::Valid
@@ -91,11 +91,11 @@ fn full_audit_pipeline_with_budget_and_keyed_wal() {
     assert_eq!(proof.ledger_digest_hex.len(), 64);
 
     let (_dir, path) = temp_wal("e2e");
-    let key = b"audit-pipeline-key-2026";
+    let key = b"calybris-audit-pipeline-key-00001";
 
     {
         let mut wal = WalWriter::open_keyed(&path, key).unwrap();
-        wal.append_audited(&snap, input, decision, proof.ledger_digest_hex.clone())
+        wal.append_verified_audited(&snap, input, decision, proof.ledger_digest_hex.clone())
             .unwrap();
         wal.sync().unwrap();
     }

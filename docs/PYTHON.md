@@ -1,17 +1,35 @@
 # Python bindings
 
-## Rust core vs Python wrappers
+## Rust core vs Python
 
 | | Rust (`calybris-core`) | Python (`calybris`, `calybris_commerce`) |
 |--|------------------------|------------------------------------------|
 | **Role** | Decision kernel + proofs | Convenience wrappers over PyO3 |
-| **Stability** | Stable (crates.io) | Experimental / pre-1.0 |
+| **Runtime integrity** | Production | Production-capable core binding; same Rust implementation |
+| **API stability** | Stable (crates.io) | Pre-1.0; pin minor versions |
 | **Who evaluates** | Rust `prescribe` | Same Rust code — Python never re-implements logic |
-| **API changes** | Semver on crate | May change between minor releases until 1.0 |
+| **Security surfaces** | Decisions, proofs, receipts, provenance, state, WAL | Same surfaces exposed through PyO3 |
 
-**Mental model:** install Python for ergonomics and typed builders; trust the Rust
-kernel for correctness. If you need a hard production contract, depend on
-`calybris-core` directly (or pin Python wheels tightly).
+**Mental model:** Python is a first-class integration surface over the Rust
+trust boundary, not a second implementation. The wheel remains pre-1.0 for API
+evolution, so pin `calybris==0.5.5` in production.
+
+Production exceptions share one stable base:
+
+```python
+from calybris import CalybrisError, ReceiptError
+
+try:
+    receipt.verify_signature(trusted_public_key)
+except ReceiptError as exc:
+    ...
+except CalybrisError as exc:
+    ...
+```
+
+Specialized classes include `ArtifactValidationError`,
+`DecisionVerificationError`, `ReceiptError`, `ProvenanceError`, `WalError`,
+`PersistenceError`, and `StateTrajectoryError`.
 
 ## Packages
 
@@ -45,6 +63,62 @@ bundle = engine.verified_audit_bundle(request, decision)
 assert bundle.replay_valid
 ```
 
+## Production audit path
+
+```python
+from calybris import (
+    AuditedWal,
+    CalybrisEngine,
+    ReceiptState,
+    StateChain,
+    public_key_from_signing_key,
+    verify_audited_wal,
+)
+
+engine = CalybrisEngine(policy)
+decision = engine.prescribe(request)
+
+state_chain = StateChain.genesis(initial_state_bytes)
+transition = state_chain.advance(next_state_bytes)
+state = ReceiptState.from_transition(transition)
+
+with AuditedWal("decisions.wal", hmac_key=wal_key) as wal:
+    entry = wal.append_verified(
+        engine.policy,
+        request,
+        decision,
+        metadata={"tenant": "acme"},
+    )
+    anchor = wal.anchor()
+    anchor.save("trusted-head.json")
+
+receipt = engine.issue_receipt(
+    request,
+    decision,
+    state=state,
+    wal=entry.receipt_anchor(),
+)
+receipt.sign(receipt_signing_key, "decision-service:prod", signed_at_epoch_ms)
+receipt.verify(engine.policy, request, decision)
+receipt.verify_signature(public_key_from_signing_key(receipt_signing_key))
+
+verify_audited_wal(
+    "decisions.wal",
+    hmac_key=wal_key,
+    anchor=anchor,
+)
+```
+
+Production rules:
+
+- Keep WAL HMAC, policy-signing, and receipt-signing keys distinct.
+- Use at least 32 bytes for the WAL HMAC key.
+- Pin trusted Ed25519 public keys; do not trust a key merely because it is
+  embedded in an artifact.
+- Store `WalAnchor` outside the WAL file.
+- Use `append_verified`, not an unaudited log write.
+- Supply canonical byte encodings for domain state.
+
 ### `calybris_commerce`
 
 **Adapter** with a larger surface: `SupplierPolicy`, `OrderInput`, `RouteResult`,
@@ -70,7 +144,7 @@ maturin build --release --out dist
 python -m pip install dist/calybris-*.whl --force-reinstall
 ```
 
-PyPI: `pip install calybris` (experimental).
+PyPI: `pip install calybris`.
 
 ## Test gate (Python)
 
@@ -79,6 +153,8 @@ python -m maturin build --release --out dist
 python -m pip install dist/calybris-*.whl --force-reinstall
 ruff check python/calybris python/calybris_commerce python/tests
 mypy python/calybris python/calybris_commerce
+bandit -r python/calybris python/calybris_commerce -q
+pip-audit . --strict
 pytest python/tests -q
 ```
 

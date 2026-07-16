@@ -1,14 +1,8 @@
-# Build the Python wheel matrix and publish to PyPI.
+# Build, verify, attest, and publish the Calybris Python distributions.
 #
-# Thanks to the abi3 (stable-ABI) build, ONE wheel per platform covers
-# CPython 3.10+, so the matrix is five builds instead of ~sixteen. Triggered
-# by a `v*` tag; `workflow_dispatch` builds without publishing unless
-# `publish` is explicitly set for an emergency/manual release.
-#
-# Publishing uses PyPI Trusted Publishing (OIDC) — no token in secrets. One-time
-# setup on PyPI: project `calybris` -> Publishing -> add a GitHub publisher with
-#   owner: emirhuseynrmx, repo: calybris-core,
-#   workflow: release.yml, environment: pypi
+# The abi3-py310 build emits one wheel per platform for CPython 3.10+.
+# Tag pushes publish automatically. workflow_dispatch only publishes when the
+# operator explicitly sets publish=true.
 name: Release
 
 on:
@@ -30,23 +24,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sdist:
-    name: sdist
+  preflight:
+    name: Release preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.85.0
+          components: rustfmt, clippy
+
+      - name: Install Python release test dependencies
+        run: >
+          python -m pip install
+          maturin==1.14.1
+          pytest==9.1.1
+          hypothesis==6.156.6
+          pydantic==2.13.4
+          typing-extensions==4.16.0
+
+      - name: Rust release gates
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked --workspace --all-targets --all-features
+          cargo test --locked --release --test production_torture --features full -- --ignored --nocapture --test-threads=1
+          cargo package --locked
+
+      - name: Build and test installed release wheel
+        run: |
+          python -m maturin build --release --out dist
+          python -m pip install dist/calybris-*.whl --force-reinstall
+          python -m pytest python/tests -q
+
+  sdist:
+    name: sdist
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v7.0.1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-sdist
           path: dist
 
   wheels:
     name: wheel ${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+    needs: preflight
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
@@ -58,40 +94,107 @@ jobs:
           - { runner: macos-15-intel, target: x86_64 }
           - { runner: macos-14, target: aarch64 }
     steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.10"
-      # abi3-py310 is a Cargo feature, so maturin emits a single cp310-abi3
-      # wheel that runs on every CPython 3.10+ for this platform.
+
       - name: Build abi3 wheel
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
           args: --release --out dist
-      - uses: actions/upload-artifact@v7.0.1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
           path: dist
 
-  publish:
-    name: Publish to PyPI
+  verify:
+    name: Verify and attest distributions
     needs: [sdist, wheels]
     runs-on: ubuntu-latest
-    # Only the canonical public repo publishes, and only on a tag — a tag
-    # pushed to a fork or the private test mirror can never reach PyPI.
-    if: github.repository == 'emirhuseynrmx/calybris-core' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish))
-    environment: pypi
     permissions:
-      id-token: write # OIDC for Trusted Publishing
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           pattern: dist-*
           merge-multiple: true
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Validate distributions and generate checksums
+        run: |
+          python -m pip install twine==6.2.0
+          python -m twine check dist/*
+          sha256sum dist/* | sort -k2 > SHA256SUMS
+
+      - name: Attest release packages
+        uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
+        with:
+          subject-path: "dist/*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-packages
+          path: dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-checksums
+          path: SHA256SUMS
+
+  publish:
+    name: Publish to PyPI
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.repository == 'emirhuseynrmx/calybris-core' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish))
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-packages
+          path: dist
+
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d # v1.14.0
         with:
           packages-dir: dist
+
+  github-release:
+    name: Publish GitHub release assets
+    needs: verify
+    if: github.repository == 'emirhuseynrmx/calybris-core' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-packages
+          path: dist
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-checksums
+          path: release-metadata
+
+      - name: Create release record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${GITHUB_REF_NAME}"
+          dist/*
+          release-metadata/SHA256SUMS
+          --verify-tag
+          --generate-notes

@@ -28,6 +28,7 @@ pub const POLICY_SIGNATURE_CONTEXT: &[u8] = b"calysig1\0";
 /// A policy digest signed by an accountable identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct SignedPolicy {
     /// Hex canonical policy digest (see `docs/CALY_PROOF.md` §1).
     pub policy_digest_hex: String,
@@ -73,9 +74,18 @@ fn parse_hex<const N: usize>(field: &'static str, hex: &str) -> Result<[u8; N], 
         )));
     }
     let mut bytes = [0_u8; N];
-    for (i, chunk) in bytes.iter_mut().enumerate() {
-        *chunk = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| malformed(format!("invalid hex at offset {}", i * 2)))?;
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let high = nibble(pair[0])
+            .ok_or_else(|| malformed(format!("invalid hex at offset {}", index * 2)))?;
+        let low = nibble(pair[1])
+            .ok_or_else(|| malformed(format!("invalid hex at offset {}", index * 2 + 1)))?;
+        bytes[index] = (high << 4) | low;
     }
     Ok(bytes)
 }
@@ -225,6 +235,33 @@ mod tests {
             verify_signed_policy_with_key(&snapshot, &signed, &key(8).verifying_key()),
             Err(ProvenanceError::UntrustedKey)
         );
+    }
+
+    #[test]
+    fn unicode_public_key_is_rejected_without_panicking() {
+        let snapshot = policy(1);
+        let mut signed = sign_policy(&snapshot, &key(7), "risk-officer:ayse", 1);
+        signed.public_key_hex = format!("{}x", "€".repeat(21));
+        assert!(matches!(
+            verify_signed_policy(&snapshot, &signed),
+            Err(ProvenanceError::Malformed {
+                field: "public_key_hex",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn signed_policy_json_rejects_unknown_fields() {
+        let snapshot = policy(1);
+        let signed = sign_policy(&snapshot, &key(7), "risk-officer:ayse", 1);
+        let mut value = serde_json::to_value(signed).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("approved".to_string(), serde_json::Value::Bool(true));
+        assert!(serde_json::from_value::<SignedPolicy>(value).is_err());
     }
 
     #[test]

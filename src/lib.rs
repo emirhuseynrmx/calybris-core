@@ -5,8 +5,9 @@
 //!
 //! - **`kernel`**: Allocation-free integer decision kernel (~8.6M prescribe/sec on CodSpeed CI)
 //! - **`verify`**: Canonical digests, replay verification, correctness certificates
+//! - **`receipt`**: Replay-verified receipts binding policy, state, WAL, and signatures
 //! - **`finance`**: Ledger snapshots and fixed-point conservation proofs for pre-trade guard primitives
-//! - **`wal`**: Generic tamper-evident hash-chained WAL with optional HMAC keying
+//! - **`wal`**: Single-writer hash-chained WAL with HMAC keying and trusted head anchors
 //! - **`budget`**: Per-tenant atomic budget management with conservation invariant
 //! - **`config`**: Runtime configuration with builder ergonomics
 //! - **`builder`**: Builder patterns for `KernelInput`, `KernelModel`, `PolicySnapshot`
@@ -58,6 +59,10 @@ pub mod proof;
 
 #[cfg(feature = "provenance")]
 pub mod provenance;
+
+/// Signed receipt binding a decision to policy, state, and WAL evidence.
+#[cfg(feature = "serde")]
+pub mod receipt;
 
 pub mod state;
 /// Decision verification, replay, and correctness certificates.

@@ -1,11 +1,16 @@
 //! Generate the CALY-PROOF v1 golden vector fixture (one-time tool).
 //!
-//! Run: cargo run --example gen_golden_vectors --features wal
+//! Run: cargo run --example gen_golden_vectors --features wal,provenance
 //! Output is the JSON fixture body for tests/fixtures/caly_proof_v1.json.
 
 use calybris_core::digest::{decision_digest, digest_to_hex, input_digest, policy_digest};
 use calybris_core::kernel::{KernelInput, KernelModel, PolicySnapshot, ALL_PROVIDERS, ALL_REGIONS};
+use calybris_core::receipt::{
+    issue_receipt, sign_receipt, ReceiptAnchors, ReceiptState, ReceiptWal,
+};
+use calybris_core::state::StateChain;
 use calybris_core::wal::WalWriter;
+use ed25519_dalek::SigningKey;
 
 fn fixture_policy() -> PolicySnapshot {
     PolicySnapshot::try_new(
@@ -68,10 +73,8 @@ fn main() {
     let input = fixture_input();
     let decision = policy.prescribe(input);
 
-    let dir = std::env::temp_dir().join("caly-golden-gen");
-    std::fs::create_dir_all(&dir).unwrap();
-    let wal_path = dir.join("golden.wal.jsonl");
-    let _ = std::fs::remove_file(&wal_path);
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("golden.wal.jsonl");
     let mut wal: WalWriter<serde_json::Value> = WalWriter::open(&wal_path).unwrap();
     let e1 = wal
         .append(serde_json::json!({"k": 1_u64, "v": "alpha"}))
@@ -102,4 +105,42 @@ fn main() {
     );
     println!("wal entry1 hash  = {}", e1.entry_hash);
     println!("wal entry2 hash  = {}", e2.entry_hash);
+
+    let mut state_chain = StateChain::genesis(&1_000_000_u64.to_le_bytes());
+    let transition = state_chain.advance(&999_000_u64.to_le_bytes());
+    let mut receipt = issue_receipt(
+        &policy,
+        input,
+        &decision,
+        ReceiptAnchors {
+            state: Some(ReceiptState {
+                step: transition.step,
+                state_digest_before_hex: digest_to_hex(&transition.digest_before),
+                state_digest_after_hex: digest_to_hex(&transition.digest_after),
+            }),
+            wal: Some(ReceiptWal {
+                sequence: e2.sequence,
+                entry_hash: e2.entry_hash,
+            }),
+        },
+    )
+    .unwrap();
+    let receipt_signing_key = SigningKey::from_bytes(&[11_u8; 32]);
+    sign_receipt(
+        &mut receipt,
+        &receipt_signing_key,
+        "receipt-service:golden",
+        1_783_000_000_001,
+    )
+    .unwrap();
+    let signature = receipt.signature.as_ref().unwrap();
+    let state = receipt.state.as_ref().unwrap();
+    let wal = receipt.wal.as_ref().unwrap();
+    println!("receipt state before = {}", state.state_digest_before_hex);
+    println!("receipt state after  = {}", state.state_digest_after_hex);
+    println!("receipt wal sequence = {}", wal.sequence);
+    println!("receipt wal hash     = {}", wal.entry_hash);
+    println!("receipt claims digest= {}", receipt.claims_digest_hex);
+    println!("receipt public key   = {}", signature.public_key_hex);
+    println!("receipt signature    = {}", signature.signature_hex);
 }

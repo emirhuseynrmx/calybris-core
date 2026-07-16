@@ -27,6 +27,7 @@ pub const CERTIFICATE_SCHEMA: &str = "calybris-certificate-v1";
 /// State-trajectory anchor carried in a certificate (see `state` module).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct CertificateState {
     pub step: u64,
     pub state_digest_before_hex: String,
@@ -36,6 +37,7 @@ pub struct CertificateState {
 /// WAL anchor carried in a certificate: where the decision was durably logged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct CertificateWal {
     pub sequence: u64,
     pub entry_hash: String,
@@ -45,6 +47,7 @@ pub struct CertificateWal {
 /// so the base certificate needs no Ed25519 dependency).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct CertificateSignature {
     pub signer_id: String,
     pub signed_at_epoch_ms: u64,
@@ -56,6 +59,7 @@ pub struct CertificateSignature {
 /// (optionally) an accountable signer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct DecisionCertificate {
     pub schema_version: String,
     pub policy_epoch: u64,

@@ -1,4 +1,4 @@
-//! Production-like LLM gateway simulation
+//! Production LLM gateway reference
 //!
 //! This example is intentionally boring: every boundary verifies before writing.
 //!
@@ -6,16 +6,57 @@
 //! config → builder → prescribe → verify → budget → verified WAL → checkpoint_with_wal → recovery
 //!
 //! ```bash
-//! cargo run --example production_gateway --features wal
+//! # Both values are 64 hex characters loaded from your KMS in production.
+//! CALYBRIS_WAL_HMAC_KEY_HEX=... \
+//! CALYBRIS_RECEIPT_SIGNING_KEY_HEX=... \
+//! cargo run --example production_gateway --features full
 //! ```
 
 use calybris_core::budget::BudgetEngine;
 use calybris_core::builder::{InputBuilder, ModelBuilder, PolicyBuilder};
 use calybris_core::config::EngineConfig;
-use calybris_core::finance::{certify_ledger, prove_conservation};
-use calybris_core::persistence::{checkpoint_with_wal, recovery_plan, restore};
+use calybris_core::digest::bytes_to_hex;
+use calybris_core::finance::{certify_ledger, ledger_digest, prove_conservation};
+use calybris_core::persistence::{
+    checkpoint_with_wal, recovery_plan_keyed_against_anchor, restore, save_wal_anchor,
+};
+use calybris_core::receipt::{
+    issue_receipt, sign_receipt, verify_receipt, verify_receipt_signature, verify_receipt_state,
+    verify_receipt_wal, ReceiptAnchors, ReceiptState, ReceiptWal,
+};
+use calybris_core::state::StateChain;
 use calybris_core::verify::{verify_decision, VerifyResult};
 use calybris_core::wal::WalWriter;
+
+fn load_hex_env<const N: usize>(name: &str) -> Result<[u8; N], Box<dyn std::error::Error>> {
+    let value = std::env::var(name)?;
+    if value.len() != N * 2 {
+        return Err(format!("{name} must contain exactly {} hex characters", N * 2).into());
+    }
+    let mut bytes = [0_u8; N];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let high = nibble(pair[0])
+            .ok_or_else(|| format!("{name} contains invalid hex at offset {}", index * 2))?;
+        let low = nibble(pair[1])
+            .ok_or_else(|| format!("{name} contains invalid hex at offset {}", index * 2 + 1))?;
+        bytes[index] = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+fn now_epoch_ms() -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis(),
+    )?)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Calybris — Production Gateway Simulation");
@@ -96,9 +137,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.ensure_tenant(&budget, "team-compliance", 200_000_000);
     println!("[budget] 3 tenants initialized (exposure cap from config)\n");
 
+    let wal_key = load_hex_env::<32>("CALYBRIS_WAL_HMAC_KEY_HEX")?;
+    let receipt_key_bytes = load_hex_env::<32>("CALYBRIS_RECEIPT_SIGNING_KEY_HEX")?;
+    let receipt_signing_key = ed25519_dalek::SigningKey::from_bytes(&receipt_key_bytes);
+
     let wal_path = std::path::PathBuf::from("production_gateway_demo.jsonl");
+    let anchor_path = std::path::PathBuf::from("production_gateway_anchor.json");
     let _ = std::fs::remove_file(&wal_path);
-    let mut wal = WalWriter::open(&wal_path)?;
+    let mut wal = WalWriter::open_keyed(&wal_path, &wal_key)?;
+    let mut state_chain = StateChain::genesis(&ledger_digest(&budget.snapshot()));
 
     let requests = vec![
         (
@@ -173,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .max_latency(1000)
             .build();
 
-        let (decision, trace) = snapshot.prescribe_with_trace(input);
+        let (decision, trace) = snapshot.prescribe_with_trace_checked(input)?;
 
         // Verify before anything else
         assert_eq!(
@@ -189,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 budget.commit(id, cost);
             }
         }
+        let transition = state_chain.advance(&ledger_digest(&budget.snapshot()));
 
         let selected_name = if decision.selected_model_id > 0 && decision.selected_model_id <= 6 {
             model_names[(decision.selected_model_id - 1) as usize]
@@ -217,9 +265,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
 
         // Fail-closed WAL append — invalid decisions never enter the log
-        wal.append_verified_audited(&snapshot, input, decision, scenario.to_string())?;
+        let entry =
+            wal.append_verified_audited(&snapshot, input, decision, scenario.to_string())?;
+        let mut receipt = issue_receipt(
+            &snapshot,
+            input,
+            &decision,
+            ReceiptAnchors {
+                state: Some(ReceiptState {
+                    step: transition.step,
+                    state_digest_before_hex: bytes_to_hex(&transition.digest_before),
+                    state_digest_after_hex: bytes_to_hex(&transition.digest_after),
+                }),
+                wal: Some(ReceiptWal {
+                    sequence: entry.sequence,
+                    entry_hash: entry.entry_hash.clone(),
+                }),
+            },
+        )?;
+        sign_receipt(
+            &mut receipt,
+            &receipt_signing_key,
+            "production-gateway",
+            now_epoch_ms()?,
+        )?;
+        verify_receipt(&receipt, &snapshot, input, &decision)?;
+        verify_receipt_signature(&receipt, Some(&receipt_signing_key.verifying_key()))?;
+        verify_receipt_state(
+            &receipt,
+            transition.step,
+            &bytes_to_hex(&transition.digest_before),
+            &bytes_to_hex(&transition.digest_after),
+        )?;
+        verify_receipt_wal(&receipt, entry.sequence, &entry.entry_hash)?;
     }
     wal.flush_and_sync()?;
+    let wal_anchor = wal.anchor();
+    save_wal_anchor(&wal_anchor, &anchor_path)?;
     println!("[wal] {} entries written\n", wal.sequence());
 
     let _proof = prove_conservation(&budget)?;
@@ -240,7 +322,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snap_path.display()
     );
 
-    let plan = recovery_plan(&snap_path, &wal_path)?;
+    let plan = recovery_plan_keyed_against_anchor(&snap_path, &wal_path, &wal_key, &wal_anchor)?;
     println!(
         "[recovery] plan: {} total WAL entries, {} to replay (watermark={})",
         plan.total_wal_entries, plan.entries_to_replay, plan.wal_high_watermark
@@ -259,10 +341,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Cleanup
+    // Cleanup demo artifacts after releasing the single-writer lock.
+    drop(wal);
     let _ = std::fs::remove_file(&wal_path);
     let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&anchor_path);
 
-    println!("\nFull pipeline: config -> build -> prescribe -> verify -> budget -> verified WAL -> checkpoint_with_wal -> recovery");
+    println!("\nFull pipeline: config -> checked prescribe -> verify -> budget/state -> keyed WAL -> signed receipt -> external anchor -> anchored recovery");
     Ok(())
 }

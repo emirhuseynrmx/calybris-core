@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.5.0"
+version = "0.5.5"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -26,25 +26,28 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 [features]
 default = ["wal"]
 serde = ["dep:serde", "dep:serde_json"]
-wal = ["serde", "dep:hmac", "dep:subtle"]
+wal = ["serde", "dep:file-id", "dep:fs2", "dep:hmac", "dep:subtle"]
 async = ["wal", "dep:tokio"]
 observability = ["dep:tracing"]
 provenance = ["dep:ed25519-dalek"]
 full = ["wal", "async", "observability", "provenance"]
+# Test-only dependency switch. `cfg(loom)` is enabled separately by
+# `CALYBRIS_LOOM=1`, so `--all-features` keeps standard synchronization.
+loom-model = ["dep:loom"]
 
 [dependencies]
 sha2 = "0.11"
 hmac = { version = "0.13", optional = true }
 subtle = { version = "2.6", optional = true }
 ed25519-dalek = { version = "2", optional = true }
+file-id = { version = "0.2.3", optional = true }
+fs2 = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"], optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "sync"], optional = true }
 tracing = { version = "0.1", optional = true }
-
-[target.'cfg(loom)'.dependencies]
-loom = { version = "0.7", features = ["checkpoint"] }
+loom = { version = "0.7", features = ["checkpoint"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -60,7 +63,7 @@ required-features = ["wal"]
 [[example]]
 name = "gen_golden_vectors"
 path = "examples/gen_golden_vectors.rs"
-required-features = ["wal"]
+required-features = ["wal", "provenance"]
 
 [[example]]
 name = "gen_conformance_vectors"
@@ -123,13 +126,23 @@ path = "tests/conformance_proof_surfaces.rs"
 required-features = ["wal", "provenance"]
 
 [[test]]
+name = "receipt_pipeline"
+path = "tests/receipt_pipeline.rs"
+required-features = ["wal", "provenance"]
+
+[[test]]
+name = "production_torture"
+path = "tests/production_torture.rs"
+required-features = ["wal", "provenance"]
+
+[[test]]
 name = "budget_loom"
 path = "tests/budget_loom.rs"
 
 [[example]]
 name = "production_gateway"
 path = "examples/production_gateway.rs"
-required-features = ["wal"]
+required-features = ["wal", "provenance"]
 
 [[bench]]
 name = "budget_bench"

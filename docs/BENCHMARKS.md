@@ -50,7 +50,30 @@ cargo bench --bench budget_bench
 
 # Proof surfaces (digests, certificates, Ed25519 signing):
 cargo bench --bench proof_bench --features wal,provenance
+
+# Release acceptance torture suite (fails when a gate regresses):
+cargo test --release --test production_torture --features full -- \
+  --ignored --nocapture --test-threads=1
 ```
+
+## Production torture gate (0.5.5)
+
+The release gate is intentionally broader and more hostile than the README
+hot-path figure. It combines:
+
+- checked decisions over a 64-model catalog with near-maximum integer inputs;
+- fail-closed replay/audit bundles;
+- a 25,000-step state-proof trajectory;
+- signed receipts carrying state and WAL evidence;
+- strict rejection of forward-incompatible receipt JSON;
+- 25,000 keyed, audited WAL appends, one durability barrier, streaming
+  verification, and clean-suffix truncation detection against a trusted anchor;
+- same-tenant budget contention across 4-16 threads; and
+- snapshot, digest, and conservation proof over 25,000 tenants.
+
+The thresholds are deliberately conservative enough for shared CI runners but
+strict enough to detect order-of-magnitude regressions. This suite is a release
+acceptance test, not a claim that every deployment will see the same latency.
 
 Criterion writes HTML reports to `target/criterion/`. Record your environment
 alongside the result so the number is meaningful to a reader:

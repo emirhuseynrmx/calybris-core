@@ -98,6 +98,7 @@ pub const AUDIT_CREATED_BY: &str = "calybris";
 /// Binds a decision to its policy and input via canonical SHA-256 digests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct AuditBundle {
     /// Stable schema tag for long-term audit storage.
     pub schema_version: String,

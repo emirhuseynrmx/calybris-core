@@ -11,7 +11,7 @@ Subject: `[SECURITY] Calybris Core — <brief description>`
 | Severity assessment | 7 days |
 | Fix or mitigation plan | 30 days (critical), 90 days (medium) |
 
-Please include: affected version, reproduction steps, impact on invariants I1–I8 (see `docs/SECURITY_INVARIANTS.md`), and suggested fix if any.
+Please include: affected version, reproduction steps, impact on invariants I1–I10 (see `docs/SECURITY_INVARIANTS.md`), and suggested fix if any.
 
 **Do not** open public GitHub issues for undisclosed vulnerabilities.
 
@@ -27,7 +27,7 @@ Please include: affected version, reproduction steps, impact on invariants I1–
 
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | Yes |
+| 0.5.x   | Security fixes |
 | 0.4.x   | Best effort |
 | < 0.4   | No |
 
@@ -46,7 +46,7 @@ External reviewers should start with:
 
 1. [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) — commands and module map
 2. [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) — assets, trust boundaries, attackers
-3. [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) — invariants I1–I8 and test mapping
+3. [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) — invariants I1–I10 and test mapping
 
 ```bash
 cargo fmt --check
@@ -62,6 +62,16 @@ PROPTEST_CASES=10000 cargo test --locked --all-features
 - **Unkeyed WAL:** Detects accidental corruption; a filesystem attacker can recompute plain SHA-256 chain hashes. Use **keyed WAL** in production.
 - **`read_wal`:** Does not verify chain — use `read_verified_wal*` only on trusted paths.
 - **Caller responsibility:** `verify_decision` must be enforced by your control plane; the library does not block application logic on failure.
+- **Clean WAL suffix truncation:** A hash-chain prefix remains internally valid.
+  Persist and verify a trusted external `WalAnchor` when log completeness matters.
+- **Weak keyed-WAL configuration:** Keyed APIs reject HMAC keys shorter than
+  32 bytes; load independent random key material from a secrets manager.
+- **Oversized WAL records:** Readers and writers reject encoded entries above
+  16 MiB before JSON parsing or persistence.
+- **Unchecked Rust hot path:** Validate direct `KernelInput` values or use
+  `prescribe_checked`; Python bindings validate automatically.
+- **Artifact semantics:** Security artifacts reject unknown JSON fields. Do not
+  attach unsigned application claims outside the signed receipt or WAL payload.
 - **Formal concurrency proofs:** Loom/Miri in CI cover selected budget interleavings and UB paths; not exhaustive for all production schedules.
 
 ## Dependency Policy

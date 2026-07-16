@@ -5,10 +5,11 @@ build-backend = "maturin"
 [project]
 name = "calybris"
 dynamic = ["version"]
-description = "Python bindings for Calybris Core — experimental/pre-1.0; Rust kernel is the stable surface"
+description = "Production-grade Python bindings for the Calybris deterministic decision and audit core"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
   { name = "Emir Huseyn", email = "emirhuseynrmx@gmail.com" },
 ]
@@ -17,18 +18,20 @@ maintainers = [
 ]
 keywords = ["commerce", "routing", "deterministic", "audit", "llm", "finance", "policy"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Rust",
   "Topic :: Software Development :: Libraries",
   "Typing :: Typed",
 ]
 dependencies = [
   "pydantic>=2.0",
+  "typing-extensions>=4.6",
 ]
 
 [project.urls]
@@ -48,6 +51,8 @@ dev = [
   "hypothesis[cli]>=6.100",
   "ruff>=0.6",
   "mypy>=1.10",
+  "bandit>=1.9",
+  "pip-audit>=2.10",
 ]
 
 [tool.maturin]

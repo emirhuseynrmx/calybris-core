@@ -47,6 +47,11 @@ class CalybrisEngine:
     def model_count(self) -> int:
         return self._policy.model_count()
 
+    @property
+    def policy(self) -> _core.PolicySnapshot:
+        """The immutable Rust policy snapshot used by this engine."""
+        return self._policy
+
     def prescribe(self, request: _core.KernelInput) -> _core.KernelDecision:
         """Evaluate ``request`` and return the kernel's decision.
 
@@ -166,6 +171,39 @@ class CalybrisEngine:
             verify_result = self.verify(request, decision)
             raise VerificationError(str(exc), verify_result.model_dump()) from exc
         return AuditBundle.model_validate(raw)
+
+    def sign_policy(
+        self,
+        signing_key: bytes,
+        signer_id: str,
+        signed_at_epoch_ms: int,
+    ) -> _core.SignedPolicy:
+        """Sign the exact policy digest with an Ed25519 seed.
+
+        ``signing_key`` must be exactly 32 bytes. Keep it in a KMS/HSM-backed
+        secret path in production; Calybris never persists it.
+        """
+        return self._policy.sign_policy(signing_key, signer_id, signed_at_epoch_ms)
+
+    def stateful_audit_bundle(
+        self,
+        request: _core.KernelInput,
+        decision: _core.KernelDecision,
+        transition: _core.StateTransition,
+    ) -> _core.StatefulAuditBundle:
+        """Bind a replay-verified decision to one state-chain transition."""
+        return self._policy.stateful_audit_bundle(request, decision, transition)
+
+    def issue_receipt(
+        self,
+        request: _core.KernelInput,
+        decision: _core.KernelDecision,
+        *,
+        state: _core.ReceiptState | None = None,
+        wal: _core.ReceiptWal | None = None,
+    ) -> _core.DecisionReceipt:
+        """Issue a receipt only after exact replay verification succeeds."""
+        return self._policy.issue_receipt(request, decision, state=state, wal=wal)
 
     def __repr__(self) -> str:
         return (

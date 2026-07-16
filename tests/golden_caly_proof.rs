@@ -12,8 +12,17 @@ use calybris_core::kernel::{
     KernelAction, KernelInput, KernelModel, KernelReason, PolicySnapshot, ALL_PROVIDERS,
     ALL_REGIONS,
 };
+#[cfg(feature = "provenance")]
+use calybris_core::receipt::{
+    issue_receipt, sign_receipt, verify_receipt, verify_receipt_signature, ReceiptAnchors,
+    ReceiptState, ReceiptWal,
+};
+#[cfg(feature = "provenance")]
+use calybris_core::state::StateChain;
 use calybris_core::verify::{verify_decision, VerifyResult};
 use calybris_core::wal::WalWriter;
+#[cfg(feature = "provenance")]
+use ed25519_dalek::SigningKey;
 
 const FIXTURE: &str = include_str!("fixtures/caly_proof_v1.json");
 
@@ -147,4 +156,66 @@ fn golden_wal_chain_hashes_are_reproduced() {
         fixture["wal"]["entry_2_hash"].as_str().unwrap(),
         "WAL chain hashing changed — this is a breaking proof-format change"
     );
+}
+
+#[test]
+#[cfg(feature = "provenance")]
+fn golden_signed_receipt_is_reproduced_byte_for_byte() {
+    let fixture: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let expected = &fixture["receipt"];
+    let policy = fixture_policy();
+    let input = fixture_input();
+    let decision = policy.prescribe(input);
+    let mut state_chain = StateChain::genesis(&1_000_000_u64.to_le_bytes());
+    let transition = state_chain.advance(&999_000_u64.to_le_bytes());
+    let mut receipt = issue_receipt(
+        &policy,
+        input,
+        &decision,
+        ReceiptAnchors {
+            state: Some(ReceiptState {
+                step: transition.step,
+                state_digest_before_hex: digest_to_hex(&transition.digest_before),
+                state_digest_after_hex: digest_to_hex(&transition.digest_after),
+            }),
+            wal: Some(ReceiptWal {
+                sequence: expected["wal_sequence"].as_u64().unwrap(),
+                entry_hash: expected["wal_entry_hash"].as_str().unwrap().to_string(),
+            }),
+        },
+    )
+    .unwrap();
+    let signing_key = SigningKey::from_bytes(&[11_u8; 32]);
+    sign_receipt(
+        &mut receipt,
+        &signing_key,
+        "receipt-service:golden",
+        1_783_000_000_001,
+    )
+    .unwrap();
+
+    let state = receipt.state.as_ref().unwrap();
+    let signature = receipt.signature.as_ref().unwrap();
+    assert_eq!(
+        state.state_digest_before_hex,
+        expected["state_digest_before_hex"].as_str().unwrap()
+    );
+    assert_eq!(
+        state.state_digest_after_hex,
+        expected["state_digest_after_hex"].as_str().unwrap()
+    );
+    assert_eq!(
+        receipt.claims_digest_hex,
+        expected["claims_digest_hex"].as_str().unwrap()
+    );
+    assert_eq!(
+        signature.public_key_hex,
+        expected["public_key_hex"].as_str().unwrap()
+    );
+    assert_eq!(
+        signature.signature_hex,
+        expected["signature_hex"].as_str().unwrap()
+    );
+    verify_receipt(&receipt, &policy, input, &decision).unwrap();
+    verify_receipt_signature(&receipt, Some(&signing_key.verifying_key())).unwrap();
 }

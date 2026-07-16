@@ -179,6 +179,7 @@ pub struct BudgetEngine {
 /// Point-in-time ledger row for one tenant (integer microcents only).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct TenantLedger {
     pub tenant_id: String,
     pub initial_microcents: i64,
@@ -191,6 +192,7 @@ pub struct TenantLedger {
 /// Immutable financial snapshot across all tenants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct BudgetSnapshot {
     /// Monotonic epoch assigned when this snapshot was captured.
     pub version: u64,

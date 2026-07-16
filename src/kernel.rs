@@ -59,6 +59,7 @@ pub struct KernelModel {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct KernelInput {
     /// Monotonic sequence number for this request.
     pub request_sequence: u64,
@@ -210,6 +211,7 @@ impl std::fmt::Display for KernelReason {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct KernelDecision {
     /// Echoed from the input.
     pub request_sequence: u64,
@@ -539,6 +541,18 @@ impl PolicySnapshot {
         inputs.iter().map(|&input| self.prescribe(input)).collect()
     }
 
+    /// Validate and evaluate many inputs, failing before producing decisions
+    /// when any request is structurally invalid.
+    pub fn prescribe_batch_checked(
+        &self,
+        inputs: &[KernelInput],
+    ) -> Result<Vec<KernelDecision>, InputError> {
+        for input in inputs {
+            input.validate()?;
+        }
+        Ok(self.prescribe_batch(inputs))
+    }
+
     /// Evaluate `input` and return decision plus rejection histogram.
     pub fn prescribe_with_trace(&self, input: KernelInput) -> (KernelDecision, DecisionTrace) {
         let (decision, rejections) = self.prescribe_inner(input);
@@ -548,6 +562,15 @@ impl PolicySnapshot {
             eligible_models: decision.eligible_models,
         };
         (decision, trace)
+    }
+
+    /// Validate `input`, then evaluate it with an explainability trace.
+    pub fn prescribe_with_trace_checked(
+        &self,
+        input: KernelInput,
+    ) -> Result<(KernelDecision, DecisionTrace), InputError> {
+        input.validate()?;
+        Ok(self.prescribe_with_trace(input))
     }
 
     /// Evaluate `input` against the policy and return the optimal decision.
@@ -563,6 +586,16 @@ impl PolicySnapshot {
     #[must_use]
     pub fn prescribe(&self, input: KernelInput) -> KernelDecision {
         self.prescribe_inner(input).0
+    }
+
+    /// Validate `input`, then evaluate it.
+    ///
+    /// This is the recommended API at untrusted Rust boundaries. The unchecked
+    /// [`prescribe`](Self::prescribe) path remains available for callers that
+    /// have already validated or constructed the input through a safe builder.
+    pub fn prescribe_checked(&self, input: KernelInput) -> Result<KernelDecision, InputError> {
+        input.validate()?;
+        Ok(self.prescribe(input))
     }
 
     /// Evaluate utility for a **specific** catalog model if it passes all constraint gates.
@@ -1217,6 +1250,24 @@ mod tests {
         request.confidence_bps = MAX_BPS;
         request.minimum_quality_bps = MAX_BPS;
         assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn checked_prescribe_rejects_invalid_input_before_evaluation() {
+        let snapshot = snapshot();
+        let mut request = input();
+        request.confidence_bps = MAX_BPS + 1;
+        assert!(matches!(
+            snapshot.prescribe_checked(request),
+            Err(InputError::OutOfRangeBps {
+                field: "confidence_bps",
+                ..
+            })
+        ));
+        assert!(snapshot.prescribe_with_trace_checked(request).is_err());
+        assert!(snapshot
+            .prescribe_batch_checked(&[input(), request])
+            .is_err());
     }
 
     #[test]

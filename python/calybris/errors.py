@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-
-class CalybrisError(Exception):
-    """Base class for all Calybris errors."""
+from calybris._core import (
+    ArtifactValidationError,
+    CalybrisError,
+    DecisionVerificationError,
+    PersistenceError,
+    ProvenanceError,
+    ReceiptError,
+    StateTrajectoryError,
+    WalError,
+)
 
 
 class PolicyValidationError(CalybrisError):
@@ -22,3 +29,18 @@ class VerificationError(CalybrisError):
     def __init__(self, message: str, result: dict) -> None:
         super().__init__(message)
         self.result = result
+
+
+__all__ = [
+    "CalybrisError",
+    "ArtifactValidationError",
+    "DecisionVerificationError",
+    "ReceiptError",
+    "ProvenanceError",
+    "WalError",
+    "PersistenceError",
+    "StateTrajectoryError",
+    "PolicyValidationError",
+    "InputValidationError",
+    "VerificationError",
+]

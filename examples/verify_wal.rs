@@ -46,10 +46,13 @@ fn main() {
 
     let wal = WalWriter::<Decision>::open(&path).unwrap();
     println!("\nReopened: seq={}, chain valid", wal.sequence());
+    drop(wal);
     let _ = std::fs::remove_file(&path);
 
     let keyed_path = PathBuf::from("example_wal_keyed.jsonl");
-    let key = b"my-secret-audit-key";
+    // Demo-only key. Production code must load 32+ random bytes from a KMS.
+    let key = b"calybris-example-hmac-key-000001";
+    let wrong_key = b"calybris-example-hmac-key-000002";
 
     {
         let mut wal = WalWriter::<Decision>::open_keyed(&keyed_path, key).unwrap();
@@ -68,7 +71,7 @@ fn main() {
     println!("\nVerified {} HMAC-keyed entries.", entries.len());
 
     // Wrong key correctly fails
-    let result = read_verified_wal_keyed::<Decision>(&keyed_path, b"wrong-key");
+    let result = read_verified_wal_keyed::<Decision>(&keyed_path, wrong_key);
     println!(
         "Wrong key: {}",
         if result.is_err() {

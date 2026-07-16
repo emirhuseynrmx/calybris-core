@@ -67,7 +67,9 @@ fn main() {
             allowed_provider_mask: ALL_PROVIDERS,
             required_region_mask: 0,
         };
-        let decision = snapshot.prescribe(input);
+        let decision = snapshot
+            .prescribe_checked(input)
+            .expect("valid scenario input");
         assert_eq!(
             verify_decision(&snapshot, input, &decision),
             VerifyResult::Valid
@@ -102,5 +104,6 @@ fn main() {
         );
     }
 
+    drop(wal);
     let _ = std::fs::remove_file(&path);
 }

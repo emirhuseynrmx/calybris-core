@@ -157,6 +157,25 @@ An auditor verifies, per entry: chain linkage (§5), then
 policy artifact — `policy_digest(policy) == audit.policy_digest_hex` plus a
 full kernel replay of `decision`.
 
+### 5.3 Trusted WAL head anchor
+
+A hash chain proves the integrity of the records that are present. It cannot,
+by itself, distinguish a complete log from a cleanly truncated prefix. Calybris
+therefore exposes a head anchor:
+
+```json
+{
+  "schema_version": "calybris.wal-anchor.v1",
+  "sequence": N,
+  "last_hash": "<64 lowercase hex chars>",
+  "keyed": true
+}
+```
+
+The anchor MUST be stored outside the WAL file in trusted durable storage.
+Anchored verification accepts only when the validated WAL's final sequence and
+hash exactly equal the anchor and the keyed/unkeyed mode matches.
+
 ## 6. State transition digest (stateful decisions)
 
 A stateful decision extends the bundle with the state trajectory:
@@ -189,16 +208,56 @@ a registered signer key MUST additionally pin `public_key_hex` to that trust
 anchor. Domain separation makes a signature non-transferable across
 policies, signers, and timestamps.
 
-## 8. Portability
+## 8. Decision receipt
+
+The 0.5.5 decision receipt binds the decision digests to optional state and WAL
+evidence:
+
+```text
+claims_digest = SHA256(
+    "calyrcp1\0"
+ || LE(schema_version_utf8_length: u64)
+ || schema_version_utf8
+ || LE(policy_epoch: u64)
+ || LE(catalog_epoch: u64)
+ || policy_digest (32 raw bytes)
+ || input_digest (32 raw bytes)
+ || decision_digest (32 raw bytes)
+ || replay_valid: u8
+ || state_present: u8
+ || [ LE(step: u64) || state_before (32) || state_after (32) ]
+ || wal_present: u8
+ || [ LE(sequence: u64) || entry_hash (32) ]
+)
+```
+
+Optional sections are present only when their preceding flag is `1`.
+The schema string is length-prefixed and signed as part of the claims digest;
+changing receipt semantics without changing the digest is therefore impossible.
+
+With the `provenance` feature, the receipt signature is:
+
+```text
+message   = "calyrcs1\0" || claims_digest
+         || LE(signed_at_epoch_ms: u64) || signer_id_utf8
+signature = Ed25519(signing_key, message)
+```
+
+Unlike a policy provenance signature, this signature authenticates the entire
+decision receipt, including its state and WAL evidence.
+
+## 9. Portability
 
 The verification path (kernel, digests, state chain, replay) compiles for
 `wasm32-unknown-unknown` with `--no-default-features`; proofs can be checked
 in browsers and edge runtimes. The WAL writer requires a filesystem.
 
-## 9. Golden vectors
+## 10. Golden vectors
 
 `tests/fixtures/caly_proof_v1.json` pins byte-exact expected digests for a
-fixed policy/input/decision triple and a fixed WAL chain. Any implementation
-(and any future version of this crate, on any platform) MUST reproduce them
-exactly. A vector mismatch is a breaking change and requires a new digest
-tag, never a silent re-pin.
+fixed policy/input/decision triple, a fixed WAL chain, and a signed receipt
+binding state plus the WAL head. Rust and Python MUST reproduce the receipt
+claims digest, public key, and Ed25519 signature exactly. Any implementation
+(and any future version of this crate, on any platform) MUST reproduce these
+values. A vector mismatch is a breaking change and requires a new digest tag,
+never a silent re-pin.

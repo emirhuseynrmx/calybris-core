@@ -13,6 +13,8 @@ use calybris_core_rs::verify::{
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+mod production;
+
 #[pyclass(name = "KernelModel", module = "calybris._core", from_py_object)]
 #[derive(Clone)]
 struct PyKernelModel {
@@ -148,7 +150,7 @@ impl From<&KernelModel> for PyKernelModel {
 
 #[pyclass(name = "KernelInput", module = "calybris._core", from_py_object)]
 #[derive(Clone, Copy)]
-struct PyKernelInput {
+pub(crate) struct PyKernelInput {
     #[pyo3(get, set)]
     request_sequence: u64,
     #[pyo3(get, set)]
@@ -281,8 +283,8 @@ impl From<PyKernelInput> for KernelInput {
 
 #[pyclass(name = "KernelDecision", module = "calybris._core", from_py_object)]
 #[derive(Clone, Copy)]
-struct PyKernelDecision {
-    inner: KernelDecision,
+pub(crate) struct PyKernelDecision {
+    pub(crate) inner: KernelDecision,
 }
 
 #[pymethods]
@@ -432,8 +434,8 @@ impl From<KernelDecision> for PyKernelDecision {
 }
 
 #[pyclass(name = "PolicySnapshot", module = "calybris._core")]
-struct PyPolicySnapshot {
-    inner: PolicySnapshot,
+pub(crate) struct PyPolicySnapshot {
+    pub(crate) inner: PolicySnapshot,
 }
 
 #[pymethods]
@@ -687,7 +689,7 @@ impl PyPolicySnapshot {
     }
 }
 
-fn validate_input(input: PyKernelInput) -> PyResult<KernelInput> {
+pub(crate) fn validate_input(input: PyKernelInput) -> PyResult<KernelInput> {
     let rust_input = KernelInput::from(input);
     rust_input
         .validate()
@@ -734,7 +736,7 @@ fn audit_bundle_to_dict<'py>(
 
 #[pyclass(name = "BudgetEngine", module = "calybris._core")]
 struct PyBudgetEngine {
-    inner: BudgetEngine,
+    pub(crate) inner: BudgetEngine,
 }
 
 #[pymethods]
@@ -1022,6 +1024,7 @@ fn calybris_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKernelDecision>()?;
     m.add_class::<PyPolicySnapshot>()?;
     m.add_class::<PyBudgetEngine>()?;
+    production::register(m)?;
 
     // Mask helpers
     m.add("ALL_PROVIDERS", ALL_PROVIDERS)?;

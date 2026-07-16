@@ -35,9 +35,12 @@ src/
   digest.rs   — canonical SHA-256 digests (policy, input, decision, ledger)
   kernel.rs   — allocation-free integer decision kernel
   verify.rs   — audit bundles, replay verification, certificates
+  receipt.rs  — replay-verified decision receipts and signatures
+  state.rs    — state trajectory digests and verification
   finance.rs  — ledger digest, conservation proofs (HFT microcents)
   budget.rs   — CAS atomic per-tenant budget engine
-  wal.rs      — HMAC-SHA256 hash-chained write-ahead log + audited replay
+  wal.rs      — single-writer anchored WAL + audited replay
+  async_wal.rs — Tokio WAL with the same locking and anchor model
 benches/
   kernel_bench.rs  — prescribe latency
   budget_bench.rs  — reserve/commit latency

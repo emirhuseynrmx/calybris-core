@@ -134,6 +134,7 @@ fn main() {
 
     wal.flush_and_sync().unwrap();
     println!("WAL entries: {} -> {}", wal.sequence(), wal_path.display());
+    drop(wal);
     let _ = std::fs::remove_file(&wal_path);
 }
 
@@ -144,7 +145,9 @@ fn route(
     input: KernelInput,
     wal: &mut WalWriter<AuditedRecord<RoutingRecord>>,
 ) {
-    let (decision, trace) = snapshot.prescribe_with_trace(input);
+    let (decision, trace) = snapshot
+        .prescribe_with_trace_checked(input)
+        .expect("valid scenario input");
     assert_eq!(
         verify_decision(snapshot, input, &decision),
         VerifyResult::Valid

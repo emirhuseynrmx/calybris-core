@@ -1,6 +1,6 @@
 //! Loom model checking for budget CAS + mutex interleavings.
 //!
-//! Run: `RUSTFLAGS='--cfg loom' cargo test --locked --test budget_loom`
+//! Run: `CALYBRIS_LOOM=1 cargo test --locked --features loom-model --test budget_loom`
 
 #[cfg(loom)]
 mod loom_tests {
@@ -185,5 +185,5 @@ mod loom_tests {
 #[cfg(not(loom))]
 #[test]
 fn loom_tests_require_cfg() {
-    eprintln!("skip: run with RUSTFLAGS='--cfg loom' cargo test --test budget_loom");
+    eprintln!("skip: run with CALYBRIS_LOOM=1 cargo test --features loom-model --test budget_loom");
 }

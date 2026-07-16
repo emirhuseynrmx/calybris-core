@@ -11,18 +11,27 @@
 use crate::digest::{bytes_to_hex, digest_to_hex, policy_digest};
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{audit_bundle, verified_audit_bundle, verify_decision, VerifyResult};
+use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Minimum HMAC-SHA256 key length accepted by keyed WAL APIs.
+pub const MIN_HMAC_KEY_BYTES: usize = 32;
+/// Maximum encoded WAL line accepted by readers.
+pub const MAX_WAL_ENTRY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WAL_PAYLOAD_BYTES: usize = MAX_WAL_ENTRY_BYTES - 512;
+
 /// A single entry in the hash-chained WAL.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalEntry<T> {
     /// Monotonically increasing sequence number (starts at 1).
     pub sequence: u64,
@@ -33,6 +42,23 @@ pub struct WalEntry<T> {
     /// The decision or record stored in this entry.
     pub data: T,
 }
+
+/// Trusted head of a WAL at a point in time.
+///
+/// Persist this outside the WAL file. Verification against an anchor detects
+/// clean suffix truncation that an internally consistent hash-chain prefix
+/// cannot detect by itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalAnchor {
+    pub schema_version: String,
+    pub sequence: u64,
+    pub last_hash: String,
+    pub keyed: bool,
+}
+
+/// Stable schema for serialized WAL anchors.
+pub const WAL_ANCHOR_SCHEMA: &str = "calybris.wal-anchor.v1";
 
 /// WAL error types.
 #[derive(Debug, thiserror::Error)]
@@ -53,8 +79,76 @@ pub enum WalError {
     AuditFailed { sequence: u64, reason: String },
 }
 
+fn wal_io_error(kind: std::io::ErrorKind, message: impl Into<String>) -> WalError {
+    WalError::Io(std::io::Error::new(kind, message.into()))
+}
+
+impl WalAnchor {
+    /// Verify an already chain-validated WAL head against this anchor.
+    pub fn verify_head(
+        &self,
+        found_sequence: u64,
+        found_hash: String,
+        keyed: bool,
+    ) -> Result<(u64, String), WalError> {
+        if self.schema_version != WAL_ANCHOR_SCHEMA {
+            return Err(WalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown WAL anchor schema: {}", self.schema_version),
+            )));
+        }
+        if self.keyed != keyed {
+            return Err(wal_io_error(
+                std::io::ErrorKind::InvalidInput,
+                "WAL anchor keyed mode does not match verifier mode",
+            ));
+        }
+        if found_sequence != self.sequence || found_hash != self.last_hash {
+            return Err(wal_io_error(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "WAL anchor mismatch: expected sequence {} hash {}, found sequence {} hash {}",
+                    self.sequence, self.last_hash, found_sequence, found_hash
+                ),
+            ));
+        }
+        Ok((self.sequence, self.last_hash.clone()))
+    }
+}
+
+fn validate_hmac_key(key: &[u8]) -> Result<(), WalError> {
+    if key.len() < MIN_HMAC_KEY_BYTES {
+        return Err(wal_io_error(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "WAL HMAC key must be at least {MIN_HMAC_KEY_BYTES} bytes, found {}",
+                key.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, buffer: &mut Vec<u8>) -> Result<usize, WalError> {
+    buffer.clear();
+    let read = Read::by_ref(reader)
+        .take((MAX_WAL_ENTRY_BYTES + 1) as u64)
+        .read_until(b'\n', buffer)?;
+    if buffer.len() > MAX_WAL_ENTRY_BYTES {
+        return Err(wal_io_error(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "WAL entry exceeds {MAX_WAL_ENTRY_BYTES} bytes: found {}",
+                buffer.len()
+            ),
+        ));
+    }
+    Ok(read)
+}
+
 /// Full audit record: policy/input/decision digests + replay flag + optional metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditedRecord<M> {
     pub audit: crate::verify::AuditBundle,
     pub input: KernelInput,
@@ -160,6 +254,7 @@ fn compute_hash(
 ) -> Result<String, WalError> {
     match key {
         Some(k) => {
+            validate_hmac_key(k)?;
             let mut mac = HmacSha256::new_from_slice(k).map_err(|_| {
                 WalError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -199,10 +294,78 @@ fn hash_entry<T: Serialize>(
 /// The chain is validated on every [`open`](WalWriter::open) call.
 pub struct WalWriter<T> {
     file: File,
+    _writer_lock: File,
     sequence: u64,
     last_hash: String,
     hmac_key: Option<Vec<u8>>,
+    poisoned: AtomicBool,
     _phantom: std::marker::PhantomData<T>,
+}
+
+fn acquire_writer_lock(path: &Path) -> Result<File, WalError> {
+    let lock_path = writer_lock_path(path)?;
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock_file.try_lock_exclusive().map_err(|_| {
+        wal_io_error(
+            std::io::ErrorKind::WouldBlock,
+            format!("WAL already has an active writer: {}", path.display()),
+        )
+    })?;
+    Ok(lock_file)
+}
+
+fn configured_lock_dir() -> Result<PathBuf, std::io::Error> {
+    if let Some(path) = std::env::var_os("CALYBRIS_WAL_LOCK_DIR").filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(path));
+    }
+
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path).join("calybris").join("wal-locks"));
+    }
+
+    #[cfg(not(windows))]
+    if let Some(path) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path).join("calybris").join("wal-locks"));
+    }
+
+    if let Some(path) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path)
+            .join(".cache")
+            .join("calybris")
+            .join("wal-locks"));
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no secure WAL lock directory; set CALYBRIS_WAL_LOCK_DIR",
+    ))
+}
+
+pub(crate) fn writer_lock_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let identity = match file_id::get_file_id(path)? {
+        file_id::FileId::Inode {
+            device_id,
+            inode_number,
+        } => format!("inode-{device_id:016x}-{inode_number:016x}"),
+        file_id::FileId::LowRes {
+            volume_serial_number,
+            file_index,
+        } => format!("lowres-{volume_serial_number:08x}-{file_index:016x}"),
+        file_id::FileId::HighRes {
+            volume_serial_number,
+            file_id,
+        } => format!("highres-{volume_serial_number:016x}-{file_id:032x}"),
+    };
+    let lock_dir = configured_lock_dir()?;
+    std::fs::create_dir_all(&lock_dir)?;
+    Ok(lock_dir.join(format!("{identity}.lock")))
 }
 
 impl<T: Serialize> WalWriter<T> {
@@ -219,11 +382,15 @@ impl<T: Serialize> WalWriter<T> {
     }
 
     fn open_inner(path: &Path, hmac_key: Option<Vec<u8>>) -> Result<Self, WalError> {
+        if let Some(key) = hmac_key.as_deref() {
+            validate_hmac_key(key)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(path)?;
+        let writer_lock = acquire_writer_lock(path)?;
         let mut read_file = file.try_clone()?;
         read_file.seek(SeekFrom::Start(0))?;
         let (sequence, last_hash) =
@@ -231,11 +398,21 @@ impl<T: Serialize> WalWriter<T> {
 
         Ok(Self {
             file,
+            _writer_lock: writer_lock,
             sequence,
             last_hash,
             hmac_key,
+            poisoned: AtomicBool::new(false),
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
     }
 
     /// Append a decision to the WAL. Returns the entry with proof.
@@ -246,6 +423,12 @@ impl<T: Serialize> WalWriter<T> {
     /// callers batch durability when appropriate.
     #[must_use = "check the returned entry for the hash chain link"]
     pub fn append(&mut self, data: T) -> Result<WalEntry<T>, WalError> {
+        if self.is_poisoned() {
+            return Err(wal_io_error(
+                std::io::ErrorKind::Other,
+                "WAL writer is poisoned after an earlier I/O failure",
+            ));
+        }
         let next_sequence = self.sequence.checked_add(1).ok_or_else(|| {
             WalError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -254,16 +437,28 @@ impl<T: Serialize> WalWriter<T> {
         })?;
         // Serialize data once — reuse for both hash computation and file write.
         let data_json = serde_json::to_string(&data)?;
+        if data_json.len() > MAX_WAL_PAYLOAD_BYTES {
+            return Err(wal_io_error(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "WAL entry exceeds {MAX_WAL_PAYLOAD_BYTES} bytes: found {}",
+                    data_json.len()
+                ),
+            ));
+        }
         let entry_hash = compute_hash(&self.last_hash, &data_json, self.hmac_key.as_deref())?;
         let previous_hash = self.last_hash.clone();
 
         // Build the line manually to avoid serializing data a second time.
         // Format: {"sequence":N,"previous_hash":"...","entry_hash":"...","data":...}
-        writeln!(
+        if let Err(error) = writeln!(
             self.file,
             "{{\"sequence\":{},\"previous_hash\":\"{}\",\"entry_hash\":\"{}\",\"data\":{}}}",
             next_sequence, previous_hash, entry_hash, data_json
-        )?;
+        ) {
+            self.poison();
+            return Err(WalError::Io(error));
+        }
 
         self.sequence = next_sequence;
         self.last_hash = entry_hash.clone();
@@ -279,20 +474,46 @@ impl<T: Serialize> WalWriter<T> {
     /// Flush userspace buffer to OS and fsync to disk.
     /// Call after a batch of appends for crash durability.
     pub fn flush_and_sync(&mut self) -> Result<(), WalError> {
-        self.file.flush()?;
-        self.file.sync_data()?;
+        if self.is_poisoned() {
+            return Err(wal_io_error(
+                std::io::ErrorKind::Other,
+                "WAL writer is poisoned after an earlier I/O failure",
+            ));
+        }
+        if let Err(error) = self.file.flush().and_then(|()| self.file.sync_data()) {
+            self.poison();
+            return Err(WalError::Io(error));
+        }
         Ok(())
     }
 
     /// Flush userspace buffer to OS (no fsync).
     pub fn flush(&mut self) -> Result<(), WalError> {
-        self.file.flush()?;
+        if self.is_poisoned() {
+            return Err(wal_io_error(
+                std::io::ErrorKind::Other,
+                "WAL writer is poisoned after an earlier I/O failure",
+            ));
+        }
+        if let Err(error) = self.file.flush() {
+            self.poison();
+            return Err(WalError::Io(error));
+        }
         Ok(())
     }
 
     /// Sync data to disk (fsync). Assumes buffer is already flushed.
     pub fn sync(&self) -> Result<(), WalError> {
-        self.file.sync_data()?;
+        if self.is_poisoned() {
+            return Err(wal_io_error(
+                std::io::ErrorKind::Other,
+                "WAL writer is poisoned after an earlier I/O failure",
+            ));
+        }
+        if let Err(error) = self.file.sync_data() {
+            self.poison();
+            return Err(WalError::Io(error));
+        }
         Ok(())
     }
 
@@ -311,6 +532,17 @@ impl<T: Serialize> WalWriter<T> {
         &self.last_hash
     }
 
+    /// Capture the current trusted WAL head.
+    #[must_use]
+    pub fn anchor(&self) -> WalAnchor {
+        WalAnchor {
+            schema_version: WAL_ANCHOR_SCHEMA.to_string(),
+            sequence: self.sequence,
+            last_hash: self.last_hash.clone(),
+            keyed: self.hmac_key.is_some(),
+        }
+    }
+
     /// Validate the hash chain in an existing WAL file (unkeyed).
     pub fn validate_chain(path: &Path) -> Result<(u64, String), WalError> {
         validate_chain_inner(path, None)
@@ -321,13 +553,16 @@ impl<T: Serialize> WalWriter<T> {
 /// Uses serde_json's preserve_order feature so re-serializing the data
 /// field produces the same JSON bytes as the original write.
 fn validate_chain_inner(path: &Path, key: Option<&[u8]>) -> Result<(u64, String), WalError> {
+    if let Some(key) = key {
+        validate_hmac_key(key)?;
+    }
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     validate_chain_reader(reader, key)
 }
 
 fn validate_chain_reader<R: BufRead>(
-    reader: R,
+    mut reader: R,
     key: Option<&[u8]>,
 ) -> Result<(u64, String), WalError> {
     let mut expected_sequence = 1_u64;
@@ -335,13 +570,13 @@ fn validate_chain_reader<R: BufRead>(
     let mut last_hash = "genesis".to_string();
     let mut last_sequence = 0_u64;
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut line = Vec::new();
+    while read_bounded_line(&mut reader, &mut line)? != 0 {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
 
-        let entry: WalEntry<serde_json::Value> = serde_json::from_str(&line)?;
+        let entry: WalEntry<serde_json::Value> = serde_json::from_slice(&line)?;
 
         if entry.sequence != expected_sequence {
             return Err(WalError::DuplicateSequence(entry.sequence));
@@ -389,20 +624,38 @@ fn read_verified_wal_inner<T: for<'de> Deserialize<'de>>(
     path: &Path,
     key: Option<&[u8]>,
 ) -> Result<Vec<WalEntry<T>>, WalError> {
+    let mut entries = Vec::new();
+    visit_verified_wal_inner(path, key, |entry| entries.push(entry))?;
+    Ok(entries)
+}
+
+fn visit_verified_wal_inner<T, F>(
+    path: &Path,
+    key: Option<&[u8]>,
+    mut visit: F,
+) -> Result<(u64, String), WalError>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnMut(WalEntry<T>),
+{
+    if let Some(key) = key {
+        validate_hmac_key(key)?;
+    }
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
 
     let mut expected_sequence = 1_u64;
     let mut expected_prev_hash = "genesis".to_string();
-    let mut entries = Vec::new();
+    let mut last_sequence = 0_u64;
+    let mut last_hash = "genesis".to_string();
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut line = Vec::new();
+    while read_bounded_line(&mut reader, &mut line)? != 0 {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
 
-        let value_entry: WalEntry<serde_json::Value> = serde_json::from_str(&line)?;
+        let value_entry: WalEntry<serde_json::Value> = serde_json::from_slice(&line)?;
 
         if value_entry.sequence != expected_sequence {
             return Err(WalError::DuplicateSequence(value_entry.sequence));
@@ -437,14 +690,16 @@ fn read_verified_wal_inner<T: for<'de> Deserialize<'de>>(
                 "WAL sequence overflow",
             ))
         })?;
-        expected_prev_hash = value_entry.entry_hash;
+        last_sequence = value_entry.sequence;
+        last_hash = value_entry.entry_hash;
+        expected_prev_hash = last_hash.clone();
 
         // Parse the typed entry from the already-validated line. This avoids a
         // validate-then-reopen race while keeping the public API generic over T.
-        entries.push(serde_json::from_str(&line)?);
+        visit(serde_json::from_slice(&line)?);
     }
 
-    Ok(entries)
+    Ok((last_sequence, last_hash))
 }
 
 /// Read a WAL file **without** chain verification.
@@ -453,15 +708,15 @@ fn read_verified_wal_inner<T: for<'de> Deserialize<'de>>(
 /// tamper detection. This function is faster but trusts the data.
 pub fn read_wal<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<WalEntry<T>>, WalError> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut entries = Vec::new();
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut line = Vec::new();
+    while read_bounded_line(&mut reader, &mut line)? != 0 {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let entry: WalEntry<T> = serde_json::from_str(&line)?;
+        let entry: WalEntry<T> = serde_json::from_slice(&line)?;
         entries.push(entry);
     }
 
@@ -478,6 +733,34 @@ pub fn verify_wal_keyed(path: &Path, key: &[u8]) -> Result<(u64, String), WalErr
     validate_chain_inner(path, Some(key))
 }
 
+pub(crate) fn verify_anchor(
+    found_sequence: u64,
+    found_hash: String,
+    anchor: &WalAnchor,
+    keyed: bool,
+) -> Result<(u64, String), WalError> {
+    anchor.verify_head(found_sequence, found_hash, keyed)
+}
+
+/// Verify an unkeyed WAL against a trusted external head anchor.
+pub fn verify_wal_against_anchor(
+    path: &Path,
+    anchor: &WalAnchor,
+) -> Result<(u64, String), WalError> {
+    let (sequence, hash) = verify_wal(path)?;
+    verify_anchor(sequence, hash, anchor, false)
+}
+
+/// Verify a keyed WAL against a trusted external head anchor.
+pub fn verify_wal_keyed_against_anchor(
+    path: &Path,
+    key: &[u8],
+    anchor: &WalAnchor,
+) -> Result<(u64, String), WalError> {
+    let (sequence, hash) = verify_wal_keyed(path, key)?;
+    verify_anchor(sequence, hash, anchor, true)
+}
+
 /// Read a WAL file AND verify its chain integrity (unkeyed).
 pub fn read_verified_wal<T: for<'de> Deserialize<'de>>(
     path: &Path,
@@ -491,6 +774,32 @@ pub fn read_verified_wal_keyed<T: for<'de> Deserialize<'de>>(
     key: &[u8],
 ) -> Result<Vec<WalEntry<T>>, WalError> {
     read_verified_wal_inner(path, Some(key))
+}
+
+/// Stream an unkeyed WAL through `visit` after validating each entry.
+///
+/// Memory use is constant with respect to WAL length.
+pub fn visit_verified_wal<T, F>(path: &Path, visit: F) -> Result<(u64, String), WalError>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnMut(WalEntry<T>),
+{
+    visit_verified_wal_inner(path, None, visit)
+}
+
+/// Stream a keyed WAL through `visit` after validating each entry.
+///
+/// Memory use is constant with respect to WAL length.
+pub fn visit_verified_wal_keyed<T, F>(
+    path: &Path,
+    key: &[u8],
+    visit: F,
+) -> Result<(u64, String), WalError>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnMut(WalEntry<T>),
+{
+    visit_verified_wal_inner(path, Some(key), visit)
 }
 
 /// Replay-verify every audited entry against `snapshot` (chain + digests + prescribe).
@@ -551,10 +860,31 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    const TEST_HMAC_KEY: &[u8; 32] = b"calybris-test-hmac-key-000000001";
+    const OTHER_HMAC_KEY: &[u8; 32] = b"calybris-test-hmac-key-000000002";
+
     fn temp_wal(name: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join(format!("{name}.jsonl"));
         (dir, path)
+    }
+
+    fn assert_io_error<T>(
+        result: Result<T, WalError>,
+        expected_kind: std::io::ErrorKind,
+        expected_message: &str,
+    ) {
+        match result {
+            Err(WalError::Io(error)) => {
+                assert_eq!(error.kind(), expected_kind);
+                assert!(
+                    error.to_string().contains(expected_message),
+                    "unexpected error: {error}"
+                );
+            }
+            Err(error) => panic!("expected WAL I/O error, got: {error}"),
+            Ok(_) => panic!("expected WAL I/O error, got success"),
+        }
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -587,6 +917,31 @@ mod tests {
         assert_eq!(entries[0].data.model, "gpt-4o");
         assert_eq!(entries[1].data.model, "mini");
         assert_eq!(entries[1].previous_hash, entries[0].entry_hash);
+    }
+
+    #[test]
+    fn verified_visitor_streams_entries_and_returns_head() {
+        let (_dir, path) = temp_wal("visitor");
+        let expected_head = {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            for cost in [1, 2, 3] {
+                wal.append(TestDecision {
+                    model: "streamed".into(),
+                    cost,
+                })
+                .unwrap();
+            }
+            wal.flush_and_sync().unwrap();
+            wal.last_hash().to_string()
+        };
+
+        let mut costs = Vec::new();
+        let head = visit_verified_wal::<TestDecision, _>(&path, |entry| {
+            costs.push(entry.data.cost);
+        })
+        .unwrap();
+        assert_eq!(costs, vec![1, 2, 3]);
+        assert_eq!(head, (3, expected_head));
     }
 
     struct FailingSerialize;
@@ -731,7 +1086,7 @@ mod tests {
     #[test]
     fn hmac_keyed_chain_validates() {
         let (_dir, path) = temp_wal("hmac-basic");
-        let key = b"calybris-secret-key-2026";
+        let key = TEST_HMAC_KEY;
 
         {
             let mut wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
@@ -756,11 +1111,27 @@ mod tests {
     }
 
     #[test]
+    fn short_hmac_keys_are_rejected_even_for_empty_wals() {
+        let (_dir, path) = temp_wal("hmac-short-key");
+        assert_io_error(
+            WalWriter::<TestDecision>::open_keyed(&path, b"too-short"),
+            std::io::ErrorKind::InvalidInput,
+            "at least 32 bytes, found 9",
+        );
+        std::fs::write(&path, "").unwrap();
+        assert_io_error(
+            verify_wal_keyed(&path, b""),
+            std::io::ErrorKind::InvalidInput,
+            "at least 32 bytes, found 0",
+        );
+    }
+
+    #[test]
     fn hmac_wrong_key_rejects() {
         let (_dir, path) = temp_wal("hmac-wrongkey");
 
         {
-            let mut wal = WalWriter::<TestDecision>::open_keyed(&path, b"correct-key").unwrap();
+            let mut wal = WalWriter::<TestDecision>::open_keyed(&path, TEST_HMAC_KEY).unwrap();
             wal.append(TestDecision {
                 model: "a".into(),
                 cost: 1,
@@ -768,7 +1139,7 @@ mod tests {
             .unwrap();
         }
 
-        let result = WalWriter::<TestDecision>::open_keyed(&path, b"wrong-key");
+        let result = WalWriter::<TestDecision>::open_keyed(&path, OTHER_HMAC_KEY);
         assert!(result.is_err());
 
         let result = WalWriter::<TestDecision>::open(&path);
@@ -778,7 +1149,7 @@ mod tests {
     #[test]
     fn hmac_tamper_detected() {
         let (_dir, path) = temp_wal("hmac-tamper");
-        let key = b"audit-key";
+        let key = TEST_HMAC_KEY;
 
         {
             let mut wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
@@ -804,8 +1175,8 @@ mod tests {
 
     #[test]
     fn hmac_different_key_different_hash() {
-        let h1 = compute_hash("prev", "{\"x\":1}", Some(b"key-a")).unwrap();
-        let h2 = compute_hash("prev", "{\"x\":1}", Some(b"key-b")).unwrap();
+        let h1 = compute_hash("prev", "{\"x\":1}", Some(TEST_HMAC_KEY)).unwrap();
+        let h2 = compute_hash("prev", "{\"x\":1}", Some(OTHER_HMAC_KEY)).unwrap();
         let h3 = compute_hash("prev", "{\"x\":1}", None).unwrap();
         assert_ne!(h1, h2);
         assert_ne!(h1, h3);
@@ -815,7 +1186,7 @@ mod tests {
     #[test]
     fn read_verified_keyed_works() {
         let (_dir, path) = temp_wal("hmac-read-verified");
-        let key = b"read-key";
+        let key = TEST_HMAC_KEY;
 
         {
             let mut wal = WalWriter::<TestDecision>::open_keyed(&path, key).unwrap();
@@ -1113,11 +1484,132 @@ mod tests {
     }
 
     #[test]
+    fn oversized_wal_line_is_rejected_before_json_parsing() {
+        let (_dir, path) = temp_wal("oversized-line");
+        std::fs::write(&path, vec![b'x'; MAX_WAL_ENTRY_BYTES + 1]).unwrap();
+        assert_io_error(
+            verify_wal(&path),
+            std::io::ErrorKind::InvalidData,
+            "WAL entry exceeds",
+        );
+    }
+
+    #[test]
+    fn oversized_append_does_not_advance_writer() {
+        let (_dir, path) = temp_wal("oversized-append");
+        let mut wal = WalWriter::<String>::open(&path).unwrap();
+        assert_io_error(
+            wal.append("x".repeat(MAX_WAL_ENTRY_BYTES)),
+            std::io::ErrorKind::InvalidInput,
+            "WAL entry exceeds",
+        );
+        assert_eq!(wal.sequence(), 0);
+        assert_eq!(wal.last_hash(), "genesis");
+    }
+
+    #[test]
+    fn clean_suffix_truncation_requires_external_anchor() {
+        let (_dir, path) = temp_wal("suffix-anchor");
+        let anchor = {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            for cost in [10, 20, 30] {
+                wal.append(TestDecision {
+                    model: "candidate".into(),
+                    cost,
+                })
+                .unwrap();
+            }
+            wal.flush_and_sync().unwrap();
+            wal.anchor()
+        };
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let retained = content.lines().take(2).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&path, retained).unwrap();
+
+        assert_eq!(verify_wal(&path).unwrap().0, 2);
+        assert_io_error(
+            verify_wal_against_anchor(&path, &anchor),
+            std::io::ErrorKind::InvalidData,
+            "WAL anchor mismatch",
+        );
+    }
+
+    #[test]
+    fn second_writer_for_same_file_is_rejected() {
+        let (_dir, path) = temp_wal("writer-lock");
+        let _first = WalWriter::<TestDecision>::open(&path).unwrap();
+        assert_io_error(
+            WalWriter::<TestDecision>::open(&path),
+            std::io::ErrorKind::WouldBlock,
+            "active writer",
+        );
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn hard_link_alias_shares_the_same_writer_lock() {
+        let (_dir, path) = temp_wal("hard-link");
+        std::fs::write(&path, "").unwrap();
+        let alias = path.with_file_name("hard-link-alias.jsonl");
+        std::fs::hard_link(&path, &alias).unwrap();
+        let _writer = WalWriter::<TestDecision>::open(&path).unwrap();
+        assert_io_error(
+            WalWriter::<TestDecision>::open(&alias),
+            std::io::ErrorKind::WouldBlock,
+            "active writer",
+        );
+    }
+
+    #[test]
+    fn keyed_anchor_verifies_only_with_the_keyed_path() {
+        let (_dir, path) = temp_wal("keyed-anchor-mode");
+        let anchor = {
+            let mut wal = WalWriter::<TestDecision>::open_keyed(&path, TEST_HMAC_KEY).unwrap();
+            wal.append(TestDecision {
+                model: "candidate".into(),
+                cost: 10,
+            })
+            .unwrap();
+            wal.flush_and_sync().unwrap();
+            wal.anchor()
+        };
+
+        assert!(verify_wal_against_anchor(&path, &anchor).is_err());
+        verify_wal_keyed_against_anchor(&path, TEST_HMAC_KEY, &anchor).unwrap();
+    }
+
+    #[test]
     fn malformed_json_line_rejected() {
         let (_dir, path) = temp_wal("malformed");
         std::fs::write(&path, "not valid json\n").unwrap();
         let result = verify_wal(&path);
         assert!(matches!(result, Err(WalError::Json(_))));
+    }
+
+    #[test]
+    fn wal_json_rejects_unknown_fields() {
+        let anchor = WalAnchor {
+            schema_version: WAL_ANCHOR_SCHEMA.to_string(),
+            sequence: 1,
+            last_hash: "11".repeat(32),
+            keyed: true,
+        };
+        let mut value = serde_json::to_value(anchor).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("trusted".to_string(), serde_json::Value::Bool(true));
+        assert!(serde_json::from_value::<WalAnchor>(value).is_err());
+
+        let entry = serde_json::json!({
+            "sequence": 1,
+            "previous_hash": "genesis",
+            "entry_hash": "11".repeat(32),
+            "data": {"model": "candidate", "cost": 10},
+            "trusted": true
+        });
+        assert!(serde_json::from_value::<WalEntry<TestDecision>>(entry).is_err());
     }
 
     #[test]
@@ -1255,7 +1747,7 @@ mod tests {
     proptest! {
         #[test]
         fn keyed_wal_roundtrip(
-            key in prop::array::uniform16(any::<u8>()),
+            key in prop::array::uniform32(any::<u8>()),
             count in 1_usize..30,
         ) {
             let (_dir, path) = temp_wal(&format!("keyed-{count}"));

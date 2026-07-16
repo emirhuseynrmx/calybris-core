@@ -7,6 +7,7 @@ systems, and any workflow that needs reserve/commit/release semantics.
 
 from __future__ import annotations
 
+from os import PathLike
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -185,6 +186,23 @@ class BudgetGuard:
 
     def snapshot(self) -> BudgetSnapshot:
         return BudgetSnapshot.model_validate(self._engine.snapshot())
+
+    def checkpoint(
+        self,
+        path: str | PathLike[str],
+        *,
+        wal_sequence: int | None = None,
+    ) -> BudgetSnapshot:
+        """Persist an fsync-backed snapshot, optionally bound to a WAL position."""
+        if wal_sequence is None:
+            raw = self._engine.checkpoint(path)
+        else:
+            raw = self._engine.checkpoint_with_wal(path, wal_sequence)
+        return BudgetSnapshot.model_validate(raw)
+
+    def restore(self, path: str | PathLike[str]) -> BudgetSnapshot:
+        """Restore a validated snapshot during exclusive recovery."""
+        return BudgetSnapshot.model_validate(self._engine.restore(path))
 
     def verify_conservation(self) -> ConservationCheck:
         return ConservationCheck.model_validate(self._engine.verify_conservation())

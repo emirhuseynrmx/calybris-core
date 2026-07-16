@@ -37,13 +37,27 @@ try:
 except PackageNotFoundError:
     __version__ = "0.0.0+local"
 
+from calybris.audit import (
+    AuditedWal,
+    plan_recovery,
+    replay_verify_audited_wal,
+    verify_audited_wal,
+    verify_state_trajectory,
+)
 from calybris.builder import EngineConfig, InputBuilder, PolicyBuilder
 from calybris.engine import CalybrisEngine
 from calybris.errors import (
+    ArtifactValidationError,
     CalybrisError,
+    DecisionVerificationError,
     InputValidationError,
+    PersistenceError,
     PolicyValidationError,
+    ProvenanceError,
+    ReceiptError,
+    StateTrajectoryError,
     VerificationError,
+    WalError,
 )
 from calybris.finance import (
     MICROCENTS_PER_CENT,
@@ -87,10 +101,20 @@ from ._core import (
     REASON_RISK_CEILING_CONSTRAINT,
     REASON_RISK_HARD_LIMIT,
     BudgetEngine,
+    DecisionReceipt,
     KernelDecision,
     KernelInput,
     KernelModel,
     PolicySnapshot,
+    ReceiptState,
+    ReceiptWal,
+    SignedPolicy,
+    StateChain,
+    StatefulAuditBundle,
+    StateTransition,
+    WalAnchor,
+    WalEntry,
+    public_key_from_signing_key,
 )
 
 __all__ = [
@@ -100,6 +124,11 @@ __all__ = [
     "EngineConfig",
     "PolicyBuilder",
     "InputBuilder",
+    "AuditedWal",
+    "verify_audited_wal",
+    "replay_verify_audited_wal",
+    "plan_recovery",
+    "verify_state_trajectory",
     # Typed models
     "ModelSpec",
     "Decision",
@@ -118,6 +147,13 @@ __all__ = [
     "FinancialCertificate",
     # Errors
     "CalybrisError",
+    "ArtifactValidationError",
+    "DecisionVerificationError",
+    "ReceiptError",
+    "ProvenanceError",
+    "WalError",
+    "PersistenceError",
+    "StateTrajectoryError",
     "InputValidationError",
     "PolicyValidationError",
     "VerificationError",
@@ -128,6 +164,16 @@ __all__ = [
     "KernelDecision",
     "KernelModel",
     "BudgetEngine",
+    "DecisionReceipt",
+    "ReceiptState",
+    "ReceiptWal",
+    "SignedPolicy",
+    "StateChain",
+    "StatefulAuditBundle",
+    "StateTransition",
+    "WalAnchor",
+    "WalEntry",
+    "public_key_from_signing_key",
     # Constants
     "MICROCENTS_PER_CENT",
     "ALL_PROVIDERS",

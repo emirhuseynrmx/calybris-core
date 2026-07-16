@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-07-16
+
+### Added
+- **Decision receipts** (`receipt` module): canonical `calyrcp1\0` claims digest binds
+  policy/input/decision digests to optional state and WAL evidence. The optional
+  `calyrcs1\0` Ed25519 signature covers the complete receipt, not only the policy.
+- **Anchored WAL verification**: `WalAnchor`, `WalWriter::anchor`,
+  `verify_wal_against_anchor`, keyed and async equivalents, plus
+  `calybris-verify --anchor`. A trusted external head detects clean suffix truncation.
+- Cross-platform single-writer WAL lock shared by sync and async writers.
+- File-identity writer locks cover canonical, symlink, and hardlink aliases
+  without using a predictable shared temporary directory.
+- Poisoned-writer fail-closed behavior after append/flush/sync I/O failures.
+- Keyed WAL APIs reject HMAC keys shorter than 32 bytes.
+- Anchored recovery planning rejects clean suffix truncation before restore.
+- Fsync-backed atomic `save_wal_anchor` / `load_wal_anchor` persistence.
+- Streaming verified WAL visitors keep CLI audit and recovery planning at
+  constant memory with respect to log length.
+- Sync and async WAL readers reject encoded entries larger than 16 MiB before
+  JSON parsing, limiting single-line memory denial of service.
+- Checked Rust decision APIs: `prescribe_checked`, `prescribe_with_trace_checked`,
+  and `prescribe_batch_checked`.
+- First-class Python production APIs for Ed25519-signed policy provenance,
+  state trajectories, signed decision receipts, keyed audited WAL writes,
+  trusted WAL anchors, anchored chain verification, and full WAL replay.
+- Python adversarial coverage for untrusted keys, receipt mutation, duplicate
+  writers, invalid metadata, weak HMAC keys, and clean suffix truncation.
+- Release-only production torture benchmark covering a fully evaluated 64-model
+  checked kernel, 25,000-step state trajectory, signed receipts, 25,000 keyed
+  audited WAL records, trusted-anchor truncation rejection, contended budgets,
+  and a 25,000-tenant ledger.
+
+### Security
+- Receipt issuance now returns `ReceiptError` for malformed or zero-position
+  state/WAL anchors instead of panicking.
+- Security artifact deserializers reject unknown JSON fields to prevent unsigned
+  semantic-confusion claims beside verified data.
+- Python artifact representations are UTF-8 and short-input safe for untrusted
+  receipt, signed-policy, and WAL-anchor JSON.
+- Python production APIs expose a stable `CalybrisError` hierarchy for receipt,
+  provenance, WAL, persistence, state-trajectory, and artifact-validation failures.
+- Receipt verification detects mutation of state step/digests, WAL sequence/hash,
+  schema, signer identity, timestamp, key, or any decision-binding digest.
+- Hex decoders reject malformed multi-byte UTF-8 without panicking.
+- Updated `crossbeam-epoch` to 0.9.20, resolving RUSTSEC-2026-0204 in the benchmark
+  dependency graph.
+- Threat model now distinguishes internal hash-chain validation from externally
+  anchored suffix-truncation detection.
+- Semgrep Rust/Python/secrets/security-audit scanning is a blocking Security CI job.
+- Bandit and pip-audit are blocking Python security CI jobs.
+- Every third-party GitHub Action in CI, security, benchmark, and release
+  workflows is pinned to an immutable 40-character commit SHA.
+- Loom activation now uses the crate-scoped `CALYBRIS_LOOM` build switch plus
+  the `loom-model` dependency feature instead of global `RUSTFLAGS`, preventing
+  test-only cfg flags from leaking into third-party dependencies.
+
+### Changed
+- Version 0.5.5 for Rust and Python packages.
+- Python package status moves from experimental/alpha to production-capable
+  beta. Runtime integrity matches the Rust core; the public API remains pre-1.0.
+- Release automation runs full preflight tests, validates distributions, emits
+  SHA-256 checksums, creates GitHub build attestations, and publishes release assets.
+- Python CI covers CPython 3.10 through 3.14.
+- Production examples use checked input evaluation and decision receipts.
+- Removed stale `finance_hft` and `hft_pretrade_guard` examples from the package.
+
 ## [0.5.0] - 2026-07-04
 
 ### Added

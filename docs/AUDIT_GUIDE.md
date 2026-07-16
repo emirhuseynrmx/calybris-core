@@ -18,7 +18,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-features
 cargo test --locked --no-default-features
 cargo test --locked --test audit_pipeline
-RUSTFLAGS='--cfg loom' LOOM_MAX_PREEMPTIONS=3 cargo test --locked --test budget_loom
+CALYBRIS_LOOM=1 LOOM_MAX_PREEMPTIONS=3 cargo test --locked --features loom-model --test budget_loom
 ```
 
 Extended property testing (recommended before release):
@@ -45,8 +45,9 @@ See [MIRI.md](MIRI.md) for CI-equivalent `--skip` filters and **why** those test
 | `digest` | Canonical hashing | `policy_digest`, `input_digest`, `decision_digest` |
 | `verify` | Replay + certificates | `verify_decision`, `verified_audit_bundle` |
 | `proof` | Evidence packaging | `ProofEnvelope`, `seal` |
+| `receipt` | Production evidence binding | `issue_receipt`, `verify_receipt`, `sign_receipt` |
 | `persistence` | Crash recovery | `checkpoint_with_wal`, `recovery_plan`, `restore` |
-| `wal` | Tamper-evident log | `validate_chain_inner`, `replay_audited_wal_keyed` |
+| `wal` | Single-writer, anchored tamper-evident log | `WalWriter::anchor`, `verify_wal_keyed_against_anchor`, `replay_audited_wal_keyed` |
 | `budget` | CAS conservation | `debit_if_available`, `verify_conservation`, `restore_from_snapshot` |
 | `finance` | Ledger binding | `prove_conservation`, `ConservationProof`, `certify_snapshot`, `ledger_digest` |
 
@@ -57,8 +58,9 @@ See [MIRI.md](MIRI.md) for CI-equivalent `--skip` filters and **why** those test
 | Kernel proptest (ref ≡ optimized) | `src/kernel.rs` | 4 proptests |
 | Policy validation | `src/kernel.rs` | 4 unit tests |
 | WAL tamper / chain | `src/wal.rs` | 14+ unit, 2 proptests |
+| Receipt claim/signature binding | `src/receipt.rs`, `tests/receipt_pipeline.rs` | 4+ tests |
 | Budget concurrency + proptest | `src/budget.rs` | 20+ unit, 2 proptests |
-| Budget Loom model tests | `tests/budget_loom.rs` | 7 Loom tests (`RUSTFLAGS='--cfg loom'`) |
+| Budget Loom model tests | `tests/budget_loom.rs` | 7 Loom tests (`CALYBRIS_LOOM=1`, `loom-model`) |
 | Verify / decode hex | `src/verify.rs` | 10+ unit, 1 proptest |
 | Digest sensitivity | `src/digest.rs` | 3+ unit, 1 proptest |
 | Finance conservation | `src/finance.rs` | 5 unit |
@@ -88,11 +90,25 @@ Use `append_verified_audited` at production boundaries. `append_audited` (unveri
 
 Skipping step 2 is a deployment choice, not a library default — document it in your threat model.
 
+At untrusted Rust boundaries prefer `prescribe_checked`,
+`prescribe_with_trace_checked`, or `prescribe_batch_checked`. The unchecked
+hot-path methods require the caller to have already validated `KernelInput`.
+Keyed WAL deployments must supply at least 32 bytes of HMAC key material.
+
+For WAL completeness, persist `WalWriter::anchor()` outside the WAL and audit
+with `verify_wal_against_anchor` / `verify_wal_keyed_against_anchor` or
+`calybris-verify chain <wal> --anchor <anchor.json>`.
+Use `save_wal_anchor` for fsync-backed atomic anchor replacement.
+Crash recovery should use `recovery_plan_against_anchor` or
+`recovery_plan_keyed_against_anchor` when log completeness matters.
+For large logs, use `visit_verified_wal` / `visit_verified_wal_keyed` to
+process entries with constant memory.
+
 ## 7. External audit readiness (0.5.0)
 
 This release is structured for third-party review:
 
-- Documented invariants I1–I8 with test mapping
+- Documented invariants I1–I10 with test mapping
 - Adversarial WAL/budget/verify tests + 10k proptest CI job
 - Loom budget concurrency (7 scenarios)
 - Miri UB pass on lib + E2E audit pipeline
@@ -124,4 +140,4 @@ This release is structured for third-party review:
 
 ## 11. Reporting findings
 
-See [SECURITY.md](../SECURITY.md). Include reproduction commands and affected invariant (I1–I8).
+See [SECURITY.md](../SECURITY.md). Include reproduction commands and affected invariant (I1–I10).

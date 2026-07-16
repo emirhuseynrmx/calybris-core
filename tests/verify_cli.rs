@@ -7,7 +7,7 @@
 use std::process::Command;
 
 use calybris_core::kernel::{KernelInput, KernelModel, PolicySnapshot, ALL_PROVIDERS, ALL_REGIONS};
-use calybris_core::wal::WalWriter;
+use calybris_core::wal::{WalAnchor, WalWriter};
 
 fn policy_models() -> Vec<KernelModel> {
     vec![
@@ -60,7 +60,7 @@ fn input(sequence: u64) -> KernelInput {
     }
 }
 
-fn write_audited_wal(path: &std::path::Path, entries: u64) {
+fn write_audited_wal(path: &std::path::Path, entries: u64) -> WalAnchor {
     let snapshot = policy();
     let mut wal = WalWriter::open(path).unwrap();
     for sequence in 1..=entries {
@@ -70,6 +70,7 @@ fn write_audited_wal(path: &std::path::Path, entries: u64) {
             .unwrap();
     }
     wal.flush_and_sync().unwrap();
+    wal.anchor()
 }
 
 fn write_policy_artifact(path: &std::path::Path) {
@@ -139,6 +140,31 @@ fn tampered_payload_fails_the_audit() {
 
     let (ok, out) = run(&["chain", wal_path.to_str().unwrap()]);
     assert!(!ok, "tampered chain must fail, got: {out}");
+    assert!(out.contains("CHAIN FAILED"));
+}
+
+#[test]
+fn anchor_rejects_a_cleanly_truncated_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("truncated.wal.jsonl");
+    let anchor_path = dir.path().join("anchor.json");
+    let anchor = write_audited_wal(&wal_path, 3);
+    std::fs::write(&anchor_path, serde_json::to_string_pretty(&anchor).unwrap()).unwrap();
+
+    let content = std::fs::read_to_string(&wal_path).unwrap();
+    let retained = content.lines().take(2).collect::<Vec<_>>().join("\n") + "\n";
+    std::fs::write(&wal_path, retained).unwrap();
+
+    let (ok, out) = run(&["chain", wal_path.to_str().unwrap()]);
+    assert!(ok, "a valid prefix is internally consistent: {out}");
+
+    let (ok, out) = run(&[
+        "chain",
+        wal_path.to_str().unwrap(),
+        "--anchor",
+        anchor_path.to_str().unwrap(),
+    ]);
+    assert!(!ok, "trusted anchor must reject suffix truncation: {out}");
     assert!(out.contains("CHAIN FAILED"));
 }
 

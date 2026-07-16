@@ -48,12 +48,14 @@ pre-trade admission are **reference mappings** onto one API, not three products.
 | Layer | Status | Notes |
 |-------|--------|-------|
 | **`calybris-core` (Rust)** | **Stable** | crates.io: this is the contract |
-| **`calybris` (Python)** | Experimental / pre-1.0 | PyO3 + Pydantic **convenience wrapper** around the kernel |
+| **`calybris` (Python)** | **Production-capable / pre-1.0 API** | First-class PyO3 surface for decisions, signed policy provenance, state proofs, receipts, keyed WAL, anchors, and replay |
 | **`calybris_commerce` (Python)** | Experimental / pre-1.0 | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
 
-Rust owns correctness and replay semantics. Python packages are ergonomic entry
-points for integration and demos; mature them in your stack before treating them
-as production infrastructure.
+Rust still owns correctness and replay semantics; Python calls those exact Rust
+implementations rather than reimplementing security-sensitive logic. Starting
+with 0.5.5, the core Python package exposes the production trust boundary and is
+tested as an installed abi3 wheel. The Python API remains pre-1.0, so pin minor
+versions even though its runtime integrity guarantees match the Rust core.
 
 ## Quickstart (~5 minutes)
 
@@ -90,8 +92,21 @@ without running your engine.
 ```bash
 cargo install calybris-core   # ships the calybris-verify binary
 calybris-verify chain decisions.wal.jsonl
+calybris-verify chain decisions.wal.jsonl --anchor trusted-head.json
 calybris-verify audit decisions.wal.jsonl --policy policy.json
 ```
+
+0.5.5 hardens the production trust boundary:
+
+- `receipt` binds the decision, state evidence, WAL position, and optional
+  Ed25519 receipt signer into one canonical claims digest.
+- `WalAnchor` detects clean suffix truncation when the trusted head is stored
+  outside the WAL file.
+- Sync and async WAL writers enforce one active writer per file.
+- Keyed WAL APIs reject HMAC keys shorter than 32 bytes.
+- `prescribe_checked` and checked batch/trace APIs validate untrusted Rust inputs.
+- Python exposes the same signed policies, state-chain transitions, decision
+  receipts, keyed audited WAL, durable anchors, and replay verification.
 
 0.5.0 adds:
 
@@ -117,10 +132,11 @@ proves trail *integrity*, not confidentiality, policy quality, or input truth.
 | `kernel` | Integer-only decision kernel (~115 ns/decision); `prescribe`, `prescribe_with_trace` for per-constraint rejection counts |
 | `digest` | Canonical tagged byte digests — policy / input / decision / ledger / state |
 | `verify` | Full replay verification and audit bundles; fail-closed `verified_audit_bundle` |
-| `certificate` | One fail-closed envelope binding audit bundle + state + WAL position + signer *(0.5.0)* |
+| `certificate` | Compatibility envelope for 0.5.0 certificate artifacts |
+| `receipt` | Canonical claims digest + optional signature binding decision, state, and WAL evidence *(0.5.5)* |
 | `state` | Domain-state digest trajectories; `verify_trajectory` rejects dropped/reordered/forged steps *(0.5.0)* |
 | `provenance` | Ed25519-signed policies, domain-separated *(0.5.0, feature)* |
-| `wal` | Hash-chained tamper-evident WAL; `append_verified_audited`; optional keyed HMAC |
+| `wal` | Hash-chained WAL; keyed HMAC, trusted head anchors, and single-writer enforcement |
 | `budget` | CAS reserve/commit/release; `remaining + reserved + committed == initial` (Loom + Miri) |
 | `finance` | Ledger digests, conservation proofs and certificates |
 | `proof` | `ProofEnvelope`: policy + input + decision digests + WAL position + budget proof |
@@ -137,7 +153,7 @@ third party can verify a decision trail without running your engine.
 # Rust (stable surface)
 cargo add calybris-core
 
-# Python (experimental wrappers)
+# Python (production-capable core binding; pre-1.0 API)
 pip install calybris
 ```
 
@@ -162,6 +178,10 @@ CodSpeed CI (Linux x86_64, release): ~**8.6M** `prescribe`/sec, ~115 ns/decision
 reproduction recipe are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); run
 `cargo bench --bench kernel_bench` on your own hardware.
 
+0.5.5 also carries a release-blocking production torture suite covering a
+64-model checked kernel, state trajectories, signed receipts, keyed audited WAL,
+suffix-truncation detection, contended budgets, and a 25,000-tenant ledger.
+
 ## Security posture
 
 - `#![forbid(unsafe_code)]` — no `unsafe` in project code.
@@ -169,14 +189,22 @@ reproduction recipe are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); run
   refuse to emit or log a decision that does not replay exactly.
 - Tamper-evident WAL: SHA-256 hash chain, optional HMAC-SHA256 with constant-time
   comparison (`subtle`).
+- Trusted `WalAnchor` verification detects a cleanly removed WAL suffix; the
+  hash chain alone validates only the records still present.
+- Anchored recovery APIs refuse to build a recovery plan from a valid but
+  incomplete WAL prefix.
+- `visit_verified_wal*` streams verified entries, so CLI audit and recovery
+  planning do not retain the complete log in memory.
+- Signed decision receipts bind optional state and WAL evidence to the exact
+  replay-verified decision.
 - Ed25519-signed policy provenance, domain-separated so a signature is
   non-transferable across policies, signers, and timestamps *(0.5.0)*.
 - Byte-exact proof contract ([docs/CALY_PROOF.md](docs/CALY_PROOF.md)) locked by
   golden + conformance vectors and cross-checked in Rust and Python *(0.5.0)*.
 - Concurrency and UB: 7 Loom exhaustive interleavings on budget ops; Miri on
   nightly for the library tests.
-- Supply chain: `cargo-audit` + `cargo-deny` in CI; feature-matrix CI
-  (default / no-default / async / full).
+- Security CI: Semgrep Rust/Python/secrets/security-audit, `cargo-audit`, and
+  `cargo-deny`; feature matrix covers default / no-default / async / full.
 - Documented boundaries: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (what it does
   **not** guarantee) and [docs/KEY_MANAGEMENT.md](docs/KEY_MANAGEMENT.md) (key
   custody and rotation).
@@ -193,7 +221,7 @@ inventory/capacity freshness, and an external audit.
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, trust boundaries, attackers |
 | [docs/KEY_MANAGEMENT.md](docs/KEY_MANAGEMENT.md) | HMAC / Ed25519 key custody and rotation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Throughput provenance and reproduction |
-| [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) | Invariants I1-I8 and test mapping |
+| [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) | Invariants I1-I10 and test mapping |
 | [docs/MIRI.md](docs/MIRI.md) | UB detection scope in CI |
 | [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting, supported versions |

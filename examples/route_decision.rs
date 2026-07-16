@@ -50,21 +50,23 @@ fn main() {
     println!("=========================\n");
 
     // Scenario 1: High-value compliance review
-    let decision = snapshot.prescribe(KernelInput {
-        request_sequence: 1,
-        requested_model_id: 1, // gpt-4o requested
-        input_tokens: 4000,
-        output_tokens: 2000,
-        business_value_microunits: 500_000,
-        budget_limit_microunits: 50_000_000,
-        risk_bps: 2000,
-        confidence_bps: 9000,
-        minimum_quality_bps: 9000, // high quality floor
-        max_p95_latency_ms: 1000,
-        required_capabilities: 0,
-        allowed_provider_mask: ALL_PROVIDERS,
-        required_region_mask: 0,
-    });
+    let decision = snapshot
+        .prescribe_checked(KernelInput {
+            request_sequence: 1,
+            requested_model_id: 1, // gpt-4o requested
+            input_tokens: 4000,
+            output_tokens: 2000,
+            business_value_microunits: 500_000,
+            budget_limit_microunits: 50_000_000,
+            risk_bps: 2000,
+            confidence_bps: 9000,
+            minimum_quality_bps: 9000, // high quality floor
+            max_p95_latency_ms: 1000,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        })
+        .expect("valid scenario input");
     print_and_log(
         &decision,
         1,
@@ -74,21 +76,23 @@ fn main() {
     );
 
     // Scenario 2: Simple support ticket — can be downgraded
-    let decision = snapshot.prescribe(KernelInput {
-        request_sequence: 2,
-        requested_model_id: 1, // gpt-4o requested
-        input_tokens: 500,
-        output_tokens: 200,
-        business_value_microunits: 10_000,
-        budget_limit_microunits: 50_000_000,
-        risk_bps: 500,
-        confidence_bps: 9000,
-        minimum_quality_bps: 6000, // low quality floor — downgrade OK
-        max_p95_latency_ms: 500,
-        required_capabilities: 0,
-        allowed_provider_mask: ALL_PROVIDERS,
-        required_region_mask: 0,
-    });
+    let decision = snapshot
+        .prescribe_checked(KernelInput {
+            request_sequence: 2,
+            requested_model_id: 1, // gpt-4o requested
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 10_000,
+            budget_limit_microunits: 50_000_000,
+            risk_bps: 500,
+            confidence_bps: 9000,
+            minimum_quality_bps: 6000, // low quality floor — downgrade OK
+            max_p95_latency_ms: 500,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        })
+        .expect("valid scenario input");
     print_and_log(
         &decision,
         1,
@@ -98,39 +102,43 @@ fn main() {
     );
 
     // Scenario 3: Budget exhausted
-    let decision = snapshot.prescribe(KernelInput {
-        request_sequence: 3,
-        requested_model_id: 3,
-        input_tokens: 8000,
-        output_tokens: 4000,
-        business_value_microunits: 100_000,
-        budget_limit_microunits: 1, // below every eligible model's rounded cost
-        risk_bps: 1000,
-        confidence_bps: 9000,
-        minimum_quality_bps: 5000,
-        max_p95_latency_ms: 0,
-        required_capabilities: 0,
-        allowed_provider_mask: ALL_PROVIDERS,
-        required_region_mask: 0,
-    });
+    let decision = snapshot
+        .prescribe_checked(KernelInput {
+            request_sequence: 3,
+            requested_model_id: 3,
+            input_tokens: 8000,
+            output_tokens: 4000,
+            business_value_microunits: 100_000,
+            budget_limit_microunits: 1, // below every eligible model's rounded cost
+            risk_bps: 1000,
+            confidence_bps: 9000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        })
+        .expect("valid scenario input");
     print_and_log(&decision, 3, &names, "Budget exhausted (reject)", &mut wal);
 
     // Scenario 4: Risk too high — blocked
-    let decision = snapshot.prescribe(KernelInput {
-        request_sequence: 4,
-        requested_model_id: 1,
-        input_tokens: 1000,
-        output_tokens: 500,
-        business_value_microunits: 200_000,
-        budget_limit_microunits: 50_000_000,
-        risk_bps: 9800, // above hard limit
-        confidence_bps: 9000,
-        minimum_quality_bps: 5000,
-        max_p95_latency_ms: 0,
-        required_capabilities: 0,
-        allowed_provider_mask: ALL_PROVIDERS,
-        required_region_mask: 0,
-    });
+    let decision = snapshot
+        .prescribe_checked(KernelInput {
+            request_sequence: 4,
+            requested_model_id: 1,
+            input_tokens: 1000,
+            output_tokens: 500,
+            business_value_microunits: 200_000,
+            budget_limit_microunits: 50_000_000,
+            risk_bps: 9800, // above hard limit
+            confidence_bps: 9000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        })
+        .expect("valid scenario input");
     print_and_log(
         &decision,
         1,
@@ -148,6 +156,7 @@ fn main() {
     );
     println!("Audit trail: {}", wal_path.display());
 
+    drop(wal);
     let _ = std::fs::remove_file(&wal_path);
 }
 

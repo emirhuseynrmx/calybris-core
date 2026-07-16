@@ -1,6 +1,6 @@
 # Key Management
 
-Calybris uses two independent keys, both **entirely in the caller's custody** —
+Calybris uses independent keys, all **entirely in the caller's custody** —
 the library never generates, stores, or rotates them (see the custody line in
 [THREAT_MODEL.md](THREAT_MODEL.md)). This guide is the operational counterpart:
 what each key is for, and how to hold and rotate it without breaking a proof
@@ -10,6 +10,7 @@ trail.
 |-----|-----------|----------|---------|
 | **WAL chain key** | HMAC-SHA256 | Tamper-*evidence* of a decision log against an insider who can rewrite the file | `wal` (keyed mode) |
 | **Policy signing key** | Ed25519 | Attribution — *which* accountable party approved a policy | `provenance` |
+| **Receipt signing key** | Ed25519 | Authenticity of a complete decision receipt, including state/WAL evidence | `receipt` + `provenance` |
 
 They are unrelated: you can use either, both, or neither. Neither key is ever
 needed to *replay* a decision (that only needs the disclosed policy/input);
@@ -17,9 +18,18 @@ they add tamper-evidence and attribution on top.
 
 ## 1. WAL chain key (HMAC-SHA256)
 
-Without a key the hash chain detects accidents (truncation, bit-rot). **With**
+Without a key the hash chain detects accidents (malformed writes, bit-rot). **With**
 a key it detects a motivated insider who can rewrite the file, because they
 cannot recompute a valid chain without the secret.
+
+Neither mode detects a cleanly removed suffix without a trusted external
+`WalAnchor`; store each finalized head outside the WAL file.
+
+WAL writer locks are keyed by the operating system file identity, so symlink
+and hardlink aliases share one lock. By default the lock files live in the
+current user's secure runtime/cache directory. Services running under multiple
+OS users against the same WAL must set `CALYBRIS_WAL_LOCK_DIR` to one shared,
+access-controlled directory.
 
 ```rust
 use calybris_core::wal::{WalWriter, read_verified_wal_keyed, verify_wal_keyed};
@@ -37,6 +47,9 @@ let (entries, last_hash) = verify_wal_keyed(std::path::Path::new("decisions.json
 **Custody**
 - 32 bytes of CSPRNG output. Store in a secrets manager / KMS / HSM, never in
   source, env files committed to git, or container images.
+- Keyed WAL APIs reject keys shorter than 32 bytes, including empty keys. This
+  prevents a deployment from accidentally labeling a publicly forgeable chain
+  as HMAC-protected.
 - The auditor who verifies the chain needs the same key. If verification is
   performed by a third party you do not want to hand the key to, verify in a
   boundary you control and hand them the *result* (or use signatures instead —
@@ -97,7 +110,19 @@ verify_signed_policy_with_key(&policy, &signed, &trusted)?;
    in-audit policy relies on it. Because the timestamp is signed, verifiers can
    also reject signatures dated after a key's revocation.
 
-## 3. Caveats the keys do not remove
+## 3. Receipt signing key (Ed25519)
+
+Receipt signatures answer a different question from policy signatures:
+"which service attested to this complete decision receipt?" The signed message
+includes the canonical receipt claims digest, so changing the decision, state
+transition, or WAL anchor invalidates the signature.
+
+Use a distinct KMS/HSM key and identity for receipt signing when policy approval
+and runtime attestation belong to different trust domains. Pin the verifying
+key with `verify_receipt_signature(..., Some(&trusted_key))`; never trust only
+the public key embedded in an untrusted receipt.
+
+## 4. Caveats the keys do not remove
 
 - Timestamps are **caller-asserted** — a holder of the signing key can backdate
   `signed_at_epoch_ms`. For non-repudiation of *time*, co-sign with an external
@@ -107,11 +132,11 @@ verify_signed_policy_with_key(&policy, &signed, &trusted)?;
 - A leaked key defeats its guarantee entirely. Rotation cadence and HSM custody
   are your controls; the library gives you the primitives, not the policy.
 
-## 4. Operational checklist
+## 5. Operational checklist
 
 - [ ] Keys generated from a CSPRNG, inside an HSM/KMS where possible.
 - [ ] No key material in source, committed env files, or container images.
-- [ ] HMAC WAL key and Ed25519 signing key are distinct secrets with separate
+- [ ] HMAC WAL, policy-signing, and receipt-signing keys are distinct secrets with separate
       custody and rotation schedules.
 - [ ] Verifying (public) keys published with validity dates; verifiers pin the
       trust anchor rather than trusting the embedded key.
@@ -121,5 +146,6 @@ verify_signed_policy_with_key(&policy, &signed, &trusted)?;
 - [ ] External RFC 3161 timestamping added if non-repudiation of *time* matters.
 - [ ] Payload confidentiality handled separately (keys are integrity, not secrecy).
 
-See also: [CALY_PROOF.md](CALY_PROOF.md) §5 (WAL) and §7 (signatures),
+See also: [CALY_PROOF.md](CALY_PROOF.md) §5 (WAL), §7 (policy signatures),
+and §8 (decision receipts),
 [THREAT_MODEL.md](THREAT_MODEL.md) (A1 file tamperer, A5 signature splicer).

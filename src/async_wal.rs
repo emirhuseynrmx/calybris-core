@@ -7,13 +7,18 @@
 use crate::digest::bytes_to_hex;
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{audit_bundle, verified_audit_bundle};
+use crate::wal::{
+    writer_lock_path, WalAnchor, MAX_WAL_ENTRY_BYTES, MIN_HMAC_KEY_BYTES, WAL_ANCHOR_SCHEMA,
+};
+use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 
+use std::fs::{File as StdFile, OpenOptions as StdOpenOptions};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +41,23 @@ pub enum AsyncWalError {
     DuplicateSequence(u64),
     #[error("WAL audit failed at sequence {sequence}: {reason}")]
     AuditFailed { sequence: u64, reason: String },
+}
+
+fn async_wal_io_error(kind: std::io::ErrorKind, message: impl Into<String>) -> AsyncWalError {
+    AsyncWalError::Io(std::io::Error::new(kind, message.into()))
+}
+
+fn validate_hmac_key(key: &[u8]) -> Result<(), AsyncWalError> {
+    if key.len() < MIN_HMAC_KEY_BYTES {
+        return Err(async_wal_io_error(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "WAL HMAC key must be at least {MIN_HMAC_KEY_BYTES} bytes, found {}",
+                key.len()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// A single entry in the async hash-chained WAL.
@@ -63,6 +85,7 @@ fn compute_hash(
 ) -> Result<String, AsyncWalError> {
     match key {
         Some(k) => {
+            validate_hmac_key(k)?;
             let mut mac = HmacSha256::new_from_slice(k).map_err(|_| {
                 AsyncWalError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -86,6 +109,9 @@ async fn validate_chain_async(
     path: &Path,
     key: Option<&[u8]>,
 ) -> Result<(u64, String), AsyncWalError> {
+    if let Some(key) = key {
+        validate_hmac_key(key)?;
+    }
     let file = File::open(path).await?;
     validate_chain_async_reader(file, key).await
 }
@@ -94,20 +120,37 @@ async fn validate_chain_async_reader(
     file: File,
     key: Option<&[u8]>,
 ) -> Result<(u64, String), AsyncWalError> {
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
 
     let mut expected_sequence = 1_u64;
     let mut expected_prev_hash = "genesis".to_string();
     let mut last_hash = "genesis".to_string();
     let mut last_sequence = 0_u64;
 
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
+    loop {
+        line.clear();
+        let read = (&mut reader)
+            .take((MAX_WAL_ENTRY_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
+            .await?;
+        if read == 0 {
+            break;
+        }
+        if line.len() > MAX_WAL_ENTRY_BYTES {
+            return Err(async_wal_io_error(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "WAL entry exceeds {MAX_WAL_ENTRY_BYTES} bytes: found {}",
+                    line.len()
+                ),
+            ));
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
 
-        let entry: WalEntry<serde_json::Value> = serde_json::from_str(&line)?;
+        let entry: WalEntry<serde_json::Value> = serde_json::from_slice(&line)?;
 
         if entry.sequence != expected_sequence {
             return Err(AsyncWalError::DuplicateSequence(entry.sequence));
@@ -157,13 +200,32 @@ async fn validate_chain_async_reader(
 /// where blocking the executor is unacceptable.
 pub struct AsyncWalWriter<T> {
     file: File,
+    _writer_lock: StdFile,
     #[allow(dead_code)]
     path: PathBuf,
     sequence: u64,
     last_hash: String,
     hmac_key: Option<Vec<u8>>,
     sync_on_append: bool,
+    poisoned: bool,
     _phantom: std::marker::PhantomData<T>,
+}
+
+fn acquire_writer_lock(path: &Path) -> Result<StdFile, AsyncWalError> {
+    let lock_path = writer_lock_path(path)?;
+    let lock_file = StdOpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock_file.try_lock_exclusive().map_err(|_| {
+        async_wal_io_error(
+            std::io::ErrorKind::WouldBlock,
+            format!("WAL already has an active writer: {}", path.display()),
+        )
+    })?;
+    Ok(lock_file)
 }
 
 impl<T: Serialize> AsyncWalWriter<T> {
@@ -187,12 +249,16 @@ impl<T: Serialize> AsyncWalWriter<T> {
         hmac_key: Option<Vec<u8>>,
         sync_on_append: bool,
     ) -> Result<Self, AsyncWalError> {
+        if let Some(key) = hmac_key.as_deref() {
+            validate_hmac_key(key)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(path)
             .await?;
+        let writer_lock = acquire_writer_lock(path)?;
         let mut read_file = file.try_clone().await?;
         read_file.seek(SeekFrom::Start(0)).await?;
         let (sequence, last_hash) =
@@ -200,17 +266,25 @@ impl<T: Serialize> AsyncWalWriter<T> {
 
         Ok(Self {
             file,
+            _writer_lock: writer_lock,
             path: path.to_path_buf(),
             sequence,
             last_hash,
             hmac_key,
             sync_on_append,
+            poisoned: false,
             _phantom: std::marker::PhantomData,
         })
     }
 
     /// Append a record to the WAL. Optionally syncs based on config.
     pub async fn append(&mut self, data: T) -> Result<WalEntry<T>, AsyncWalError> {
+        if self.poisoned {
+            return Err(async_wal_io_error(
+                std::io::ErrorKind::Other,
+                "WAL writer is poisoned after an earlier I/O failure",
+            ));
+        }
         let next_sequence = self.sequence.checked_add(1).ok_or_else(|| {
             AsyncWalError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -226,11 +300,26 @@ impl<T: Serialize> AsyncWalWriter<T> {
             "{{\"sequence\":{},\"previous_hash\":\"{}\",\"entry_hash\":\"{}\",\"data\":{}}}\n",
             next_sequence, previous_hash, entry_hash, data_json
         );
+        if line.len() > MAX_WAL_ENTRY_BYTES {
+            return Err(async_wal_io_error(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "WAL entry exceeds {MAX_WAL_ENTRY_BYTES} bytes: found {}",
+                    line.len()
+                ),
+            ));
+        }
 
-        self.file.write_all(line.as_bytes()).await?;
+        if let Err(error) = self.file.write_all(line.as_bytes()).await {
+            self.poisoned = true;
+            return Err(AsyncWalError::Io(error));
+        }
 
         if self.sync_on_append {
-            self.file.sync_data().await?;
+            if let Err(error) = self.file.sync_data().await {
+                self.poisoned = true;
+                return Err(AsyncWalError::Io(error));
+            }
         }
 
         self.sequence = next_sequence;
@@ -246,8 +335,20 @@ impl<T: Serialize> AsyncWalWriter<T> {
 
     /// Flush and fsync to disk.
     pub async fn flush_and_sync(&mut self) -> Result<(), AsyncWalError> {
-        self.file.flush().await?;
-        self.file.sync_data().await?;
+        if self.poisoned {
+            return Err(async_wal_io_error(
+                std::io::ErrorKind::Other,
+                "WAL writer is poisoned after an earlier I/O failure",
+            ));
+        }
+        if let Err(error) = self.file.flush().await {
+            self.poisoned = true;
+            return Err(AsyncWalError::Io(error));
+        }
+        if let Err(error) = self.file.sync_data().await {
+            self.poisoned = true;
+            return Err(AsyncWalError::Io(error));
+        }
         Ok(())
     }
 
@@ -259,6 +360,17 @@ impl<T: Serialize> AsyncWalWriter<T> {
     /// Last hash in the chain.
     pub fn last_hash(&self) -> &str {
         &self.last_hash
+    }
+
+    /// Capture the current trusted WAL head.
+    #[must_use]
+    pub fn anchor(&self) -> WalAnchor {
+        WalAnchor {
+            schema_version: WAL_ANCHOR_SCHEMA.to_string(),
+            sequence: self.sequence,
+            last_hash: self.last_hash.clone(),
+            keyed: self.hmac_key.is_some(),
+        }
     }
 }
 
@@ -321,9 +433,76 @@ pub async fn verify_async_wal_keyed(
     validate_chain_async(path, Some(key)).await
 }
 
+async fn verify_async_anchor(
+    path: &Path,
+    key: Option<&[u8]>,
+    anchor: &WalAnchor,
+) -> Result<(u64, String), AsyncWalError> {
+    if anchor.schema_version != WAL_ANCHOR_SCHEMA {
+        return Err(AsyncWalError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unknown WAL anchor schema: {}", anchor.schema_version),
+        )));
+    }
+    if anchor.keyed != key.is_some() {
+        return Err(async_wal_io_error(
+            std::io::ErrorKind::InvalidInput,
+            "WAL anchor keyed mode does not match verifier mode",
+        ));
+    }
+    let (sequence, hash) = validate_chain_async(path, key).await?;
+    if sequence != anchor.sequence || hash != anchor.last_hash {
+        return Err(async_wal_io_error(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "WAL anchor mismatch: expected sequence {} hash {}, found sequence {} hash {}",
+                anchor.sequence, anchor.last_hash, sequence, hash
+            ),
+        ));
+    }
+    Ok((sequence, hash))
+}
+
+/// Verify an async WAL against a trusted external head anchor.
+pub async fn verify_async_wal_against_anchor(
+    path: &Path,
+    anchor: &WalAnchor,
+) -> Result<(u64, String), AsyncWalError> {
+    verify_async_anchor(path, None, anchor).await
+}
+
+/// Verify a keyed async WAL against a trusted external head anchor.
+pub async fn verify_async_wal_keyed_against_anchor(
+    path: &Path,
+    key: &[u8],
+    anchor: &WalAnchor,
+) -> Result<(u64, String), AsyncWalError> {
+    verify_async_anchor(path, Some(key), anchor).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_HMAC_KEY: &[u8; 32] = b"calybris-test-hmac-key-000000001";
+
+    fn assert_io_error<T>(
+        result: Result<T, AsyncWalError>,
+        expected_kind: std::io::ErrorKind,
+        expected_message: &str,
+    ) {
+        match result {
+            Err(AsyncWalError::Io(error)) => {
+                assert_eq!(error.kind(), expected_kind);
+                assert!(
+                    error.to_string().contains(expected_message),
+                    "unexpected error: {error}"
+                );
+            }
+            Err(error) => panic!("expected async WAL I/O error, got: {error}"),
+            Ok(_) => panic!("expected async WAL I/O error, got success"),
+        }
+    }
 
     #[tokio::test]
     async fn async_append_and_verify() {
@@ -351,7 +530,7 @@ mod tests {
     async fn async_keyed_wal() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("keyed-async.jsonl");
-        let key = b"async-secret-key";
+        let key = TEST_HMAC_KEY;
 
         {
             let mut wal = AsyncWalWriter::<serde_json::Value>::open_keyed(&path, key)
@@ -366,6 +545,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_short_hmac_key_is_rejected_for_empty_wal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("short-key.jsonl");
+        assert_io_error(
+            AsyncWalWriter::<serde_json::Value>::open_keyed(&path, b"short").await,
+            std::io::ErrorKind::InvalidInput,
+            "at least 32 bytes, found 5",
+        );
+    }
+
+    #[tokio::test]
     async fn async_sync_on_append() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("sync-append.jsonl");
@@ -377,6 +567,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wal.sequence(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_second_writer_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("single-writer.jsonl");
+        let _first = AsyncWalWriter::<serde_json::Value>::open(&path)
+            .await
+            .unwrap();
+        assert_io_error(
+            AsyncWalWriter::<serde_json::Value>::open(&path).await,
+            std::io::ErrorKind::WouldBlock,
+            "active writer",
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(any(unix, windows))]
+    async fn async_hard_link_alias_shares_writer_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("hard-link.jsonl");
+        let alias = dir.path().join("hard-link-alias.jsonl");
+        std::fs::write(&path, "").unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        let _writer = AsyncWalWriter::<serde_json::Value>::open(&path)
+            .await
+            .unwrap();
+
+        assert_io_error(
+            AsyncWalWriter::<serde_json::Value>::open(&alias).await,
+            std::io::ErrorKind::WouldBlock,
+            "active writer",
+        );
+    }
+
+    #[tokio::test]
+    async fn async_anchor_detects_clean_suffix_truncation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("anchored.jsonl");
+        let anchor = {
+            let mut wal = AsyncWalWriter::<serde_json::Value>::open(&path)
+                .await
+                .unwrap();
+            wal.append(serde_json::json!({"n": 1})).await.unwrap();
+            wal.append(serde_json::json!({"n": 2})).await.unwrap();
+            wal.flush_and_sync().await.unwrap();
+            wal.anchor()
+        };
+        let content = std::fs::read_to_string(&path).unwrap();
+        let retained = content.lines().take(1).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&path, retained).unwrap();
+
+        assert_eq!(verify_async_wal(&path).await.unwrap().0, 1);
+        assert_io_error(
+            verify_async_wal_against_anchor(&path, &anchor).await,
+            std::io::ErrorKind::InvalidData,
+            "WAL anchor mismatch",
+        );
+    }
+
+    #[tokio::test]
+    async fn async_oversized_wal_line_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("oversized.jsonl");
+        std::fs::write(&path, vec![b'x'; MAX_WAL_ENTRY_BYTES + 1]).unwrap();
+        assert_io_error(
+            verify_async_wal(&path).await,
+            std::io::ErrorKind::InvalidData,
+            "WAL entry exceeds",
+        );
     }
 
     #[tokio::test]

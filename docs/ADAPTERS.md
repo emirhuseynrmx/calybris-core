@@ -102,7 +102,8 @@ python bindings/python/examples/novamart_benchmark.py --orders 50000
 
 ```bash
 cargo run --example quickstart
-cargo run --example production_gateway
+# Requires two 32-byte hex keys from your secret manager:
+cargo run --example production_gateway --features full
 cargo run --example llm_routing
 cargo run --example replay_audit
 cargo run --example pretrade_guard

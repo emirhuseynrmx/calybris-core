@@ -59,7 +59,7 @@ fn main() {
         required_region_mask: 0,
     };
 
-    let decision = snapshot.prescribe(input);
+    let decision = snapshot.prescribe_checked(input).expect("validated input");
 
     println!("Action:    {:?}", decision.action);
     println!("Selected:  model_id={}", decision.selected_model_id);

@@ -15,7 +15,17 @@ import json
 from pathlib import Path
 
 import pytest
-from calybris import ALL_PROVIDERS, ALL_REGIONS, KernelInput, KernelModel, PolicySnapshot
+from calybris import (
+    ALL_PROVIDERS,
+    ALL_REGIONS,
+    KernelInput,
+    KernelModel,
+    PolicySnapshot,
+    ReceiptState,
+    ReceiptWal,
+    StateChain,
+    public_key_from_signing_key,
+)
 
 # tests/fixtures/caly_proof_v1.json lives at the repo root, two levels up from
 # python/tests/. Resolve robustly so the test works from any CWD.
@@ -129,3 +139,30 @@ def test_verified_bundle_is_fail_closed(golden: dict) -> None:
     bundle = policy.verified_audit_bundle(request, decision)
     assert bundle["replay_valid"] is True
     assert bundle["policy_digest_hex"] == golden["policy_digest_hex"]
+
+
+def test_python_reproduces_rust_golden_signed_receipt(golden: dict) -> None:
+    """Receipt claims and Ed25519 signature must match Rust byte for byte."""
+    policy = fixture_policy()
+    request = fixture_input()
+    decision = policy.prescribe(request)
+    expected = golden["receipt"]
+
+    chain = StateChain.genesis((1_000_000).to_bytes(8, "little"))
+    transition = chain.advance((999_000).to_bytes(8, "little"))
+    receipt = policy.issue_receipt(
+        request,
+        decision,
+        state=ReceiptState.from_transition(transition),
+        wal=ReceiptWal(expected["wal_sequence"], expected["wal_entry_hash"]),
+    )
+    signing_key = bytes([11]) * 32
+    receipt.sign(signing_key, "receipt-service:golden", 1_783_000_000_001)
+
+    assert transition.digest_before_hex == expected["state_digest_before_hex"]
+    assert transition.digest_after_hex == expected["state_digest_after_hex"]
+    assert receipt.claims_digest_hex == expected["claims_digest_hex"]
+    assert receipt.public_key_hex == expected["public_key_hex"]
+    assert receipt.signature_hex == expected["signature_hex"]
+    receipt.verify(policy, request, decision)
+    receipt.verify_signature(public_key_from_signing_key(signing_key))

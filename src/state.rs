@@ -110,6 +110,7 @@ impl StateChain {
 /// An [`AuditBundle`] extended with the state trajectory of the decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct StatefulAuditBundle {
     /// The stateless decision proof (policy/input/decision digests + replay).
     pub audit: AuditBundle,

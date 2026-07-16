@@ -66,11 +66,13 @@
 The single claim of the proof system is **integrity of a disclosed decision
 trail**: given the policy, input, and decision, anyone can independently
 confirm the decision is the exact deterministic output of that policy on that
-input, and that a logged sequence was not altered, truncated, or reordered.
+input, and that the disclosed records were not altered or reordered. Clean
+suffix truncation additionally requires a trusted external `WalAnchor`.
 Sharp edges of that claim:
 
 **Protects against** — silent tampering (canonical digests recomputed from
-disclosed artifacts); log alteration/truncation/reorder/gaps (hash chain);
+disclosed artifacts); log alteration/reorder/gaps (hash chain); clean suffix
+truncation when checked against a trusted external WAL anchor;
 outsider forgery (keyed HMAC chain); "that's not the decision" (deterministic
 replay); cross-version/platform drift (golden + conformance vectors);
 repudiating the in-force policy (Ed25519-signed policy digest); splicing a
@@ -101,6 +103,9 @@ inserting/dropping a state transition (state-digest chain).
    `append_verified_audited` + fsync.
 9. **Fixed-point, not float.** Kernel types are integer-only; float payloads
    need exact round-tripping (CALY_PROOF §5.1) or the guarantee weakens.
+10. **A hash chain cannot detect a cleanly removed suffix by itself.** Store
+    `WalWriter::anchor()` outside the WAL and verify with
+    `verify_wal*_against_anchor` when completeness matters.
 
 ### A5 — Certificate/signature splicer
 - **Capability:** Reuse a valid signature or certificate on a different policy,
@@ -122,6 +127,13 @@ inserting/dropping a state transition (state-digest chain).
 
 1. Enable `wal` feature with **HMAC key** from a secrets manager.
 2. Always use `read_verified_wal_keyed` / `replay_audited_wal_keyed` — never `read_wal` on external paths.
-3. Call `verify_decision` or `replay_audited_wal` before acting on historical entries.
-4. Run `prove_conservation` on budget engine at reconciliation boundaries.
-5. Pin crate version and verify `Cargo.lock` in CI (`--locked`).
+3. Persist each trusted `WalAnchor` in separate durable storage and verify it
+   before recovery or audit.
+4. Use `DecisionReceipt` when state and WAL evidence must be authenticated as
+   one claim set.
+5. If multiple OS service accounts can write the same WAL, configure one
+   shared access-controlled `CALYBRIS_WAL_LOCK_DIR`; file-identity locks then
+   cover canonical paths, symlinks, and hardlinks.
+6. Call `verify_decision` or `replay_audited_wal` before acting on historical entries.
+7. Run `prove_conservation` on budget engine at reconciliation boundaries.
+8. Pin crate version and verify `Cargo.lock` in CI (`--locked`).

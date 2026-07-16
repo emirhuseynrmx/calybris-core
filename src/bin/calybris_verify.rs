@@ -3,12 +3,12 @@
 //! An auditor does not run your decision engine; they run this:
 //!
 //! ```text
-//! calybris-verify chain  decisions.wal.jsonl [--hmac-key-hex HEX]
-//! calybris-verify audit  decisions.wal.jsonl [--policy policy.json] [--hmac-key-hex HEX]
+//! calybris-verify chain  decisions.wal.jsonl [--anchor anchor.json] [--hmac-key-hex HEX]
+//! calybris-verify audit  decisions.wal.jsonl [--policy policy.json] [--anchor anchor.json] [--hmac-key-hex HEX]
 //! calybris-verify policy policy.json
 //! ```
 //!
-//! - `chain`  — hash-chain integrity (tamper/truncation/reorder detection).
+//! - `chain`  — hash-chain integrity; with `--anchor`, clean suffix-truncation detection.
 //! - `audit`  — chain + per-entry digest checks on audited records; with
 //!   `--policy`, additionally recomputes the policy digest and replays every
 //!   decision through the kernel (full CALY-PROOF verification).
@@ -32,8 +32,10 @@ use std::process::ExitCode;
 
 use calybris_core::digest::{decision_digest, digest_to_hex, input_digest, policy_digest};
 use calybris_core::kernel::{KernelModel, PolicySnapshot};
-use calybris_core::wal::{read_verified_wal, read_verified_wal_keyed, AuditedRecord};
-use calybris_core::wal::{verify_wal, verify_wal_keyed};
+use calybris_core::wal::{
+    verify_wal, verify_wal_against_anchor, verify_wal_keyed, verify_wal_keyed_against_anchor,
+    visit_verified_wal, visit_verified_wal_keyed, AuditedRecord, WalAnchor, MIN_HMAC_KEY_BYTES,
+};
 
 #[derive(serde::Deserialize)]
 struct PolicyArtifact {
@@ -69,24 +71,44 @@ fn load_policy(path: &str) -> Result<PolicySnapshot, String> {
     artifact.into_snapshot()
 }
 
+fn load_anchor(path: &str) -> Result<WalAnchor, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read WAL anchor {path}: {error}"))?;
+    serde_json::from_str(&raw).map_err(|error| format!("cannot parse WAL anchor {path}: {error}"))
+}
+
 fn parse_hex_key(hex_key: &str) -> Result<Vec<u8>, String> {
     let hex_key = hex_key.trim();
     if hex_key.len() % 2 != 0 {
         return Err("HMAC key hex must have even length".to_string());
     }
-    (0..hex_key.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex_key[i..i + 2], 16)
-                .map_err(|_| format!("invalid hex at offset {i}"))
-        })
-        .collect()
+    let mut key = Vec::with_capacity(hex_key.len() / 2);
+    for (index, pair) in hex_key.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let high = nibble(pair[0]).ok_or_else(|| format!("invalid hex at offset {}", index * 2))?;
+        let low =
+            nibble(pair[1]).ok_or_else(|| format!("invalid hex at offset {}", index * 2 + 1))?;
+        key.push((high << 4) | low);
+    }
+    if key.len() < MIN_HMAC_KEY_BYTES {
+        return Err(format!(
+            "HMAC key must be at least {MIN_HMAC_KEY_BYTES} bytes ({} hex chars)",
+            MIN_HMAC_KEY_BYTES * 2
+        ));
+    }
+    Ok(key)
 }
 
 struct Args {
     command: String,
     target: String,
     policy: Option<String>,
+    anchor: Option<String>,
     hmac_key: Option<Vec<u8>>,
     json: bool,
 }
@@ -94,13 +116,18 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut positional = Vec::new();
     let mut policy = None;
+    let mut anchor = None;
     let mut hmac_key = None;
     let mut json = false;
-    let mut iter = std::env::args().skip(1);
+    // argv[0] is intentionally discarded and never used for a security decision.
+    let mut iter = std::env::args().skip(1); // nosemgrep: rust.lang.security.args.args
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--policy" => {
                 policy = Some(iter.next().ok_or("--policy requires a path")?);
+            }
+            "--anchor" => {
+                anchor = Some(iter.next().ok_or("--anchor requires a path")?);
             }
             "--hmac-key-hex" => {
                 let raw = iter.next().ok_or("--hmac-key-hex requires a value")?;
@@ -118,6 +145,7 @@ fn parse_args() -> Result<Args, String> {
         command: positional[0].clone(),
         target: positional[1].clone(),
         policy,
+        anchor,
         hmac_key,
         json,
     })
@@ -133,18 +161,20 @@ fn usage() {
     eprintln!(
         "calybris-verify — independent CALY-PROOF v1 auditor\n\n\
          USAGE:\n\
-         \x20 calybris-verify chain  <wal.jsonl> [--hmac-key-hex HEX]\n\
-         \x20 calybris-verify audit  <wal.jsonl> [--policy policy.json] [--hmac-key-hex HEX]\n\
+         \x20 calybris-verify chain  <wal.jsonl> [--anchor anchor.json] [--hmac-key-hex HEX]\n\
+         \x20 calybris-verify audit  <wal.jsonl> [--policy policy.json] [--anchor anchor.json] [--hmac-key-hex HEX]\n\
          \x20 calybris-verify policy <policy.json>\n\n\
          Exit codes: 0 verified, 1 verification failure, 2 usage error.\n\
          Spec: docs/CALY_PROOF.md"
     );
 }
 
-fn cmd_chain(path: &Path, key: Option<&[u8]>, json: bool) -> ExitCode {
-    let result = match key {
-        Some(key) => verify_wal_keyed(path, key),
-        None => verify_wal(path),
+fn cmd_chain(path: &Path, key: Option<&[u8]>, anchor: Option<&WalAnchor>, json: bool) -> ExitCode {
+    let result = match (key, anchor) {
+        (Some(key), Some(anchor)) => verify_wal_keyed_against_anchor(path, key, anchor),
+        (None, Some(anchor)) => verify_wal_against_anchor(path, anchor),
+        (Some(key), None) => verify_wal_keyed(path, key),
+        (None, None) => verify_wal(path),
     };
     match result {
         Ok((entries, last_hash)) => {
@@ -174,28 +204,15 @@ fn cmd_audit(
     path: &Path,
     policy: Option<PolicySnapshot>,
     key: Option<&[u8]>,
+    anchor: Option<&WalAnchor>,
     json: bool,
 ) -> ExitCode {
     type Record = AuditedRecord<serde_json::Value>;
-    let entries = match key {
-        Some(key) => read_verified_wal_keyed::<Record>(path, key),
-        None => read_verified_wal::<Record>(path),
-    };
-    let entries = match entries {
-        Ok(entries) => entries,
-        Err(error) => {
-            if json {
-                emit_json("audit", false, &format!("chain/parse: {error}"));
-            } else {
-                eprintln!("AUDIT FAILED (chain/parse): {error}");
-            }
-            return ExitCode::FAILURE;
-        }
-    };
-
     let expected_policy_hex = policy.as_ref().map(|p| digest_to_hex(&policy_digest(p)));
     let mut failures = 0_u64;
-    for entry in &entries {
+    let mut entries = 0_u64;
+    let mut inspect = |entry: calybris_core::wal::WalEntry<Record>| {
+        entries += 1;
         let record = &entry.data;
         let mut problems = Vec::new();
         if digest_to_hex(&input_digest(&record.input)) != record.audit.input_digest_hex {
@@ -219,6 +236,31 @@ fn cmd_audit(
             failures += 1;
             eprintln!("seq {}: {}", entry.sequence, problems.join(", "));
         }
+    };
+    let head = match key {
+        Some(key) => visit_verified_wal_keyed::<Record, _>(path, key, &mut inspect),
+        None => visit_verified_wal::<Record, _>(path, &mut inspect),
+    };
+    let head = match head {
+        Ok(head) => head,
+        Err(error) => {
+            if json {
+                emit_json("audit", false, &format!("chain/parse: {error}"));
+            } else {
+                eprintln!("AUDIT FAILED (chain/parse): {error}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(anchor) = anchor {
+        if let Err(error) = anchor.verify_head(head.0, head.1, key.is_some()) {
+            if json {
+                emit_json("audit", false, &format!("anchor: {error}"));
+            } else {
+                eprintln!("AUDIT FAILED (anchor): {error}");
+            }
+            return ExitCode::FAILURE;
+        }
     }
 
     let mode = if policy.is_some() {
@@ -231,10 +273,10 @@ fn cmd_audit(
             emit_json(
                 "audit",
                 true,
-                &format!("{} entries verified ({mode})", entries.len()),
+                &format!("{entries} entries verified ({mode})"),
             );
         } else {
-            println!("AUDIT OK: {} entries verified ({mode})", entries.len());
+            println!("AUDIT OK: {entries} entries verified ({mode})");
         }
         ExitCode::SUCCESS
     } else {
@@ -242,13 +284,10 @@ fn cmd_audit(
             emit_json(
                 "audit",
                 false,
-                &format!("{failures}/{} entries failed ({mode})", entries.len()),
+                &format!("{failures}/{entries} entries failed ({mode})"),
             );
         } else {
-            eprintln!(
-                "AUDIT FAILED: {failures}/{} entries failed ({mode})",
-                entries.len()
-            );
+            eprintln!("AUDIT FAILED: {failures}/{entries} entries failed ({mode})");
         }
         ExitCode::FAILURE
     }
@@ -289,10 +328,33 @@ fn main() -> ExitCode {
     };
 
     match args.command.as_str() {
-        "chain" => cmd_chain(Path::new(&args.target), args.hmac_key.as_deref(), args.json),
+        "chain" => {
+            let anchor = match args.anchor.as_deref().map(load_anchor) {
+                Some(Ok(anchor)) => Some(anchor),
+                Some(Err(error)) => {
+                    eprintln!("error: {error}");
+                    return ExitCode::FAILURE;
+                }
+                None => None,
+            };
+            cmd_chain(
+                Path::new(&args.target),
+                args.hmac_key.as_deref(),
+                anchor.as_ref(),
+                args.json,
+            )
+        }
         "audit" => {
             let policy = match args.policy.as_deref().map(load_policy) {
                 Some(Ok(policy)) => Some(policy),
+                Some(Err(error)) => {
+                    eprintln!("error: {error}");
+                    return ExitCode::FAILURE;
+                }
+                None => None,
+            };
+            let anchor = match args.anchor.as_deref().map(load_anchor) {
+                Some(Ok(anchor)) => Some(anchor),
                 Some(Err(error)) => {
                     eprintln!("error: {error}");
                     return ExitCode::FAILURE;
@@ -303,6 +365,7 @@ fn main() -> ExitCode {
                 Path::new(&args.target),
                 policy,
                 args.hmac_key.as_deref(),
+                anchor.as_ref(),
                 args.json,
             )
         }
@@ -311,5 +374,21 @@ fn main() -> ExitCode {
             usage();
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_key_parser_rejects_unicode_without_panicking() {
+        let unicode_64_bytes = format!("{}x", "€".repeat(21));
+        assert!(parse_hex_key(&unicode_64_bytes).is_err());
+    }
+
+    #[test]
+    fn hmac_key_parser_rejects_short_keys() {
+        assert!(parse_hex_key("00").is_err());
     }
 }

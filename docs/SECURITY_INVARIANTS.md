@@ -67,3 +67,19 @@ Mid-operation snapshots are not linearizable — multi-step reserve/commit/relea
 **Code:** `src/finance.rs` — `conservation_status_for_snapshot`, `certify_snapshot`, `BudgetEngine::rotate_certificate_baseline`.
 
 **Tests:** `ledger_digest_tenant_order_independent`, `prove_conservation_ok_after_mixed_ops`, `certify_snapshot_is_immutable_binding`, `certify_ledger_binds_committed_delta_to_snapshot`, `certificate_baseline_is_monotonic`, `prove_and_certify_are_internally_consistent`.
+
+## I9 — Receipt claim binding
+
+**Invariant:** A `DecisionReceipt` is issued only after exact replay succeeds. Malformed or zero-position state/WAL anchors return an error and never panic. Its canonical digest binds the length-prefixed schema identifier, policy/input/decision digests, policy epochs, replay status, and optional state and WAL anchors. With `provenance`, the signature also binds signer identity and signing time. Serialized security artifacts reject unknown fields.
+
+**Code:** `src/receipt.rs` — `issue_receipt`, `receipt_claims_digest`, `verify_receipt`, `sign_receipt`.
+
+**Tests:** `receipt_verifies_and_binds_all_anchors`, `malformed_anchors_are_rejected_during_issuance_without_panicking`, `receipt_json_rejects_unknown_fields`, `tampered_state_or_wal_claim_fails`, `signed_receipt_rejects_claim_and_signer_tampering`, `golden_signed_receipt_is_reproduced_byte_for_byte`, `receipt_pipeline`, and the Python golden receipt test.
+
+## I10 — Anchored, single-writer WAL
+
+**Invariant:** Only one active writer may own a WAL file identity. A trusted `WalAnchor` stored outside the WAL binds the expected sequence and head hash, detecting clean suffix truncation that internal chain validation alone cannot detect. Keyed APIs reject HMAC keys shorter than 32 bytes. Encoded entries above 16 MiB are rejected before JSON parsing. After an append, flush, or sync I/O error, the writer is poisoned and refuses further writes.
+
+**Code:** `src/wal.rs`, `src/async_wal.rs` — writer lock acquisition, `anchor`, `verify_wal_against_anchor*`, poisoned writer checks.
+
+**Tests:** `second_writer_is_rejected`, `clean_suffix_truncation_requires_anchor`, `short_hmac_keys_are_rejected_even_for_empty_wals`, `anchored_recovery_rejects_clean_suffix_truncation`, async equivalents, and `verify_cli` anchored truncation coverage.

@@ -202,7 +202,13 @@ fn run_child_order(
         required_region_mask: 0,
     };
 
-    let (decision, trace) = policy.prescribe_with_trace(input);
+    let (decision, trace) = match policy.prescribe_with_trace_checked(input) {
+        Ok(result) => result,
+        Err(error) => {
+            println!("  outcome: BLOCKED invalid input: {error}\n");
+            return GateOutcome::PolicyRejected;
+        }
+    };
     assert_eq!(
         verify_decision(policy, input, &decision),
         VerifyResult::Valid

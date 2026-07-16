@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         required_region_mask: 0,
     };
 
-    let decision = snapshot.prescribe(input);
+    let decision = snapshot.prescribe_checked(input)?;
     assert_eq!(
         verify_decision(&snapshot, input, &decision),
         VerifyResult::Valid

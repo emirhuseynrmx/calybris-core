@@ -12,16 +12,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: python -m pip install semgrep==1.170.0
+
+      - name: Rust, Python, secrets, and security audit
+        run: >
+          semgrep scan
+          --config p/rust
+          --config p/python
+          --config p/secrets
+          --config p/security-audit
+          --metrics off
+          --error
+          --exclude target
+          .
+
   supply-chain:
     name: Supply chain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/
@@ -29,26 +56,47 @@ jobs:
             target/
           key: ${{ runner.os }}-security-${{ hashFiles('Cargo.lock') }}
 
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@39a94a55762594a042dd4e34891f325e509fe332 # cargo-audit
 
       - name: Cargo audit
         run: cargo audit
 
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@afc483d62172accfff644fa56e82b4dab50727fc # cargo-deny
 
       - name: Cargo deny
         run: cargo deny check --config deny.toml
+
+  python-security:
+    name: Python security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install audit tools
+        run: python -m pip install bandit==1.9.4 pip-audit==2.10.1
+
+      - name: Bandit
+        run: bandit -r python/calybris python/calybris_commerce -q
+
+      - name: Python dependency audit
+        run: pip-audit . --strict --progress-spinner off
 
   adversarial:
     name: Extended adversarial tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/
@@ -68,12 +116,14 @@ jobs:
     name: Loom budget concurrency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/
@@ -82,23 +132,23 @@ jobs:
           key: ${{ runner.os }}-loom-${{ hashFiles('Cargo.lock') }}
 
       - name: Loom model tests
-        run: cargo test --locked --test budget_loom
+        run: cargo test --locked --features loom-model --test budget_loom
         env:
-          RUSTFLAGS: --cfg loom
+          CALYBRIS_LOOM: "1"
           LOOM_MAX_PREEMPTIONS: 3
 
   miri:
     name: Miri (UB detection)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           components: miri
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/

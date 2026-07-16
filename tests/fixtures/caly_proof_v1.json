@@ -16,5 +16,14 @@
     "payload_2": {"k": 2, "v": "beta"},
     "entry_1_hash": "a7acef39aa56cd6e769a5ebae74a7c9dcd30d9d8c15e391773d55334848117f4",
     "entry_2_hash": "32330ff6107c82b689e701f24e9099d1559f2d112fa026196705eadcff3a807f"
+  },
+  "receipt": {
+    "state_digest_before_hex": "76e002c95754f27f2d48435904ecfd2984835702117d402df9c2d8cad67991cc",
+    "state_digest_after_hex": "4a73b7c44d4cf2f2080d44aa7044125b6dc3e757d03766765342f504a4137e44",
+    "wal_sequence": 2,
+    "wal_entry_hash": "32330ff6107c82b689e701f24e9099d1559f2d112fa026196705eadcff3a807f",
+    "claims_digest_hex": "48c30fd50085a3c3a303958d30130be6d3cd912fad93a6601a4fefb0d0984b3c",
+    "public_key_hex": "66be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a",
+    "signature_hex": "9c28e885bb802f38e174dcf76eb1f74f13640ca3c0bc6e9eee797dfba6780f6f8042a4970222a1106253f8467a4a58ec3d65509ddee425c908b375e92568d00a"
   }
 }

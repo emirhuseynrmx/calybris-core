@@ -13,6 +13,6 @@ See [SECURITY.md](../SECURITY.md) in the repository root for the full policy.
 
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | Yes |
+| 0.5.x   | Security fixes |
 | 0.4.x   | Best effort |
 | < 0.4   | No |

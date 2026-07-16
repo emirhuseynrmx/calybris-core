@@ -13,6 +13,7 @@ use crate::verify::{verify_decision, VerifyResult};
 /// stored, or transmitted to an external auditor.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ProofEnvelope {
     pub proof_version: u16,
 

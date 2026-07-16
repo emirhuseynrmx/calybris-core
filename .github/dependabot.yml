@@ -24,3 +24,14 @@ updates:
       actions:
         patterns:
           - actions/*
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      python-runtime:
+        patterns:
+          - pydantic
+          - typing-extensions

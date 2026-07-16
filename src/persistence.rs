@@ -26,7 +26,11 @@ pub enum PersistenceError {
 /// parent directory. This prevents partial writes and ensures the rename is
 /// durable even on power loss.
 pub fn save_snapshot(snapshot: &BudgetSnapshot, path: &Path) -> Result<(), PersistenceError> {
-    let json = serde_json::to_string_pretty(snapshot)?;
+    save_json_atomic(snapshot, path)
+}
+
+fn save_json_atomic<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), PersistenceError> {
+    let json = serde_json::to_string_pretty(value)?;
     let tmp = path.with_extension("tmp");
 
     let mut file = std::fs::OpenOptions::new()
@@ -46,6 +50,22 @@ pub fn save_snapshot(snapshot: &BudgetSnapshot, path: &Path) -> Result<(), Persi
         }
     }
     Ok(())
+}
+
+/// Save a trusted WAL head anchor with fsync-backed atomic replacement.
+#[cfg(feature = "wal")]
+pub fn save_wal_anchor(
+    anchor: &crate::wal::WalAnchor,
+    path: &Path,
+) -> Result<(), PersistenceError> {
+    save_json_atomic(anchor, path)
+}
+
+/// Load a trusted WAL head anchor.
+#[cfg(feature = "wal")]
+pub fn load_wal_anchor(path: &Path) -> Result<crate::wal::WalAnchor, PersistenceError> {
+    let data = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&data)?)
 }
 
 /// Load a budget snapshot from a JSON file.
@@ -102,22 +122,39 @@ fn recovery_plan_inner(
     snapshot_path: &Path,
     wal_path: &Path,
     key: Option<&[u8]>,
+    anchor: Option<&crate::wal::WalAnchor>,
 ) -> Result<RecoveryPlan, PersistenceError> {
     let snapshot = load_snapshot(snapshot_path)?;
+    let high = snapshot.wal_high_watermark.unwrap_or(0);
+    let mut total_wal_entries = 0_usize;
+    let mut entries_to_replay = 0_usize;
 
-    let entries = if let Some(k) = key {
-        crate::wal::read_verified_wal_keyed::<serde_json::Value>(wal_path, k)
+    let head = if let Some(k) = key {
+        crate::wal::visit_verified_wal_keyed::<serde_json::Value, _>(wal_path, k, |entry| {
+            total_wal_entries += 1;
+            if entry.sequence > high {
+                entries_to_replay += 1;
+            }
+        })
     } else {
-        crate::wal::read_verified_wal::<serde_json::Value>(wal_path)
+        crate::wal::visit_verified_wal::<serde_json::Value, _>(wal_path, |entry| {
+            total_wal_entries += 1;
+            if entry.sequence > high {
+                entries_to_replay += 1;
+            }
+        })
     }
     .map_err(|e| PersistenceError::Io(std::io::Error::other(e.to_string())))?;
 
-    let high = snapshot.wal_high_watermark.unwrap_or(0);
-    let entries_to_replay = entries.iter().filter(|e| e.sequence > high).count();
+    if let Some(anchor) = anchor {
+        anchor
+            .verify_head(head.0, head.1, key.is_some())
+            .map_err(|e| PersistenceError::Io(std::io::Error::other(e.to_string())))?;
+    }
 
     Ok(RecoveryPlan {
         snapshot,
-        total_wal_entries: entries.len(),
+        total_wal_entries,
         entries_to_replay,
         wal_high_watermark: high,
     })
@@ -132,7 +169,7 @@ pub fn recovery_plan(
     snapshot_path: &Path,
     wal_path: &Path,
 ) -> Result<RecoveryPlan, PersistenceError> {
-    recovery_plan_inner(snapshot_path, wal_path, None)
+    recovery_plan_inner(snapshot_path, wal_path, None, None)
 }
 
 /// Recovery plan with chain-verified WAL read (HMAC-keyed).
@@ -142,7 +179,28 @@ pub fn recovery_plan_keyed(
     wal_path: &Path,
     key: &[u8],
 ) -> Result<RecoveryPlan, PersistenceError> {
-    recovery_plan_inner(snapshot_path, wal_path, Some(key))
+    recovery_plan_inner(snapshot_path, wal_path, Some(key), None)
+}
+
+/// Recovery plan with an unkeyed WAL pinned to a trusted external head.
+#[cfg(feature = "wal")]
+pub fn recovery_plan_against_anchor(
+    snapshot_path: &Path,
+    wal_path: &Path,
+    anchor: &crate::wal::WalAnchor,
+) -> Result<RecoveryPlan, PersistenceError> {
+    recovery_plan_inner(snapshot_path, wal_path, None, Some(anchor))
+}
+
+/// Recovery plan with a keyed WAL pinned to a trusted external head.
+#[cfg(feature = "wal")]
+pub fn recovery_plan_keyed_against_anchor(
+    snapshot_path: &Path,
+    wal_path: &Path,
+    key: &[u8],
+    anchor: &crate::wal::WalAnchor,
+) -> Result<RecoveryPlan, PersistenceError> {
+    recovery_plan_inner(snapshot_path, wal_path, Some(key), Some(anchor))
 }
 
 /// A recovery plan describing what needs to happen to restore state.
@@ -299,6 +357,60 @@ mod tests {
         ignore = "miri/windows: tempfile directory creation is unsupported"
     )]
     #[cfg(feature = "wal")]
+    fn anchored_recovery_rejects_clean_suffix_truncation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let snap_path = dir.path().join("snap.json");
+        let wal_path = dir.path().join("wal.jsonl");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        checkpoint(&engine, &snap_path).unwrap();
+
+        let anchor = {
+            let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+            wal.append(serde_json::json!({"a": 1})).unwrap();
+            wal.append(serde_json::json!({"b": 2})).unwrap();
+            wal.flush_and_sync().unwrap();
+            wal.anchor()
+        };
+        let contents = std::fs::read_to_string(&wal_path).unwrap();
+        let prefix = contents.lines().take(1).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&wal_path, prefix).unwrap();
+
+        assert!(recovery_plan(&snap_path, &wal_path).is_ok());
+        assert!(recovery_plan_against_anchor(&snap_path, &wal_path, &anchor).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
+    #[cfg(feature = "wal")]
+    fn wal_anchor_atomic_save_roundtrip_and_replace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("anchor.json");
+        let mut anchor = crate::wal::WalAnchor {
+            schema_version: crate::wal::WAL_ANCHOR_SCHEMA.to_string(),
+            sequence: 1,
+            last_hash: "11".repeat(32),
+            keyed: true,
+        };
+        save_wal_anchor(&anchor, &path).unwrap();
+        assert_eq!(load_wal_anchor(&path).unwrap(), anchor);
+
+        anchor.sequence = 2;
+        anchor.last_hash = "22".repeat(32);
+        save_wal_anchor(&anchor, &path).unwrap();
+        assert_eq!(load_wal_anchor(&path).unwrap(), anchor);
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "miri/windows: tempfile directory creation is unsupported"
+    )]
+    #[cfg(feature = "wal")]
     fn recovery_plan_no_watermark_replays_all() {
         let dir = tempfile::TempDir::new().unwrap();
         let snap_path = dir.path().join("snap.json");
@@ -317,5 +429,24 @@ mod tests {
         let plan = recovery_plan(&snap_path, &wal_path).unwrap();
         assert_eq!(plan.entries_to_replay, 2);
         assert_eq!(plan.wal_high_watermark, 0);
+    }
+
+    #[test]
+    fn snapshot_can_replace_an_existing_checkpoint() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("replace.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+
+        checkpoint(&engine, &path).unwrap();
+        assert!(matches!(
+            engine.top_up_tenant("desk", 500_000),
+            crate::budget::TopUpResult::ToppedUp { .. }
+        ));
+        let replaced = checkpoint(&engine, &path).unwrap();
+        let loaded = load_snapshot(&path).unwrap();
+
+        assert_eq!(loaded.version, replaced.version);
+        assert_eq!(loaded.tenants[0].initial_microcents, 1_500_000);
     }
 }

@@ -1,7 +1,8 @@
 //! Sync primitives for budget concurrency.
 //!
-//! Under `cfg(loom)`, mutexes and atomics use `loom::sync` for model checking.
-//! `Arc` stays `std::sync::Arc` (loom's `Arc` does not support `HashMap` keys).
+//! When the build script enables `cfg(loom)` through `CALYBRIS_LOOM`, mutexes
+//! and atomics use `loom::sync` for model checking. `Arc` stays
+//! `std::sync::Arc` (loom's `Arc` does not support `HashMap` keys).
 
 #[cfg(loom)]
 pub use loom::sync::atomic::{AtomicI64, AtomicU64, Ordering};
