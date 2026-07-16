@@ -116,6 +116,9 @@ jobs:
         run: cargo doc --locked --no-deps
 
       - name: Examples
+        env:
+          CALYBRIS_WAL_HMAC_KEY_HEX: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+          CALYBRIS_RECEIPT_SIGNING_KEY_HEX: 1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100
         run: |
           cargo run --locked --example quickstart
           cargo run --locked --example llm_routing
@@ -125,7 +128,7 @@ jobs:
           cargo run --locked --example budget_guard
           cargo run --locked --example simple_kernel
           cargo run --locked --example verify_wal
-          cargo run --locked --example production_gateway
+          cargo run --locked --example production_gateway --features full
 
   python-binding:
     name: Python binding (${{ matrix.os }}, py${{ matrix.python-version }})
