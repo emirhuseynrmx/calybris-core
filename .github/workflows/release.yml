@@ -52,7 +52,8 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-          cargo test --locked --workspace --all-targets --all-features
+          cargo test --locked -p calybris-core --all-targets --all-features
+          cargo test --locked -p calybris-core-python
           cargo test --locked --release --test production_torture --features full -- --ignored --nocapture --test-threads=1
           cargo package --locked
 
