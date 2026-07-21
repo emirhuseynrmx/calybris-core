@@ -372,6 +372,15 @@ class DecisionReceipt:
         decision: KernelDecision,
     ) -> None: ...
     def verify_signature(self, trusted_public_key: bytes) -> None: ...
+    def verify_full(
+        self,
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        trusted_public_key: bytes,
+        expected_state: ReceiptState,
+        expected_wal: ReceiptWal,
+    ) -> None: ...
     def verify_wal(self, sequence: int, entry_hash: str) -> None: ...
     def verify_state(
         self,

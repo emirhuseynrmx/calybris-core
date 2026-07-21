@@ -32,6 +32,7 @@ from calybris.types import (
 )
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 
 def _make_policy(**overrides) -> _core.PolicySnapshot:
@@ -64,6 +65,23 @@ def _make_policy(**overrides) -> _core.PolicySnapshot:
         )
         .build()
     )
+
+
+def test_python_models_reject_unknown_fields_and_coercion() -> None:
+    valid = {
+        "model_id": 1,
+        "provider_id": 0,
+        "quality_bps": 9_000,
+        "risk_ceiling_bps": 9_500,
+        "p95_latency_ms": 200,
+        "region_mask": ALL_REGIONS,
+        "input_cost_microunits_per_million_tokens": 250,
+        "output_cost_microunits_per_million_tokens": 1_000,
+    }
+    with pytest.raises(ValidationError):
+        ModelSpec(**valid, unexpected=True)
+    with pytest.raises(ValidationError):
+        ModelSpec(**{**valid, "model_id": "1"})
 
 
 def _make_request(seq: int = 1, model_id: int = 1) -> _core.KernelInput:

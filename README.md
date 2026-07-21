@@ -53,9 +53,11 @@ pre-trade admission are **reference mappings** onto one API, not three products.
 
 Rust still owns correctness and replay semantics; Python calls those exact Rust
 implementations rather than reimplementing security-sensitive logic. Starting
-with 0.5.5, the core Python package exposes the production trust boundary and is
+with 0.5.7, the core Python package exposes the production trust boundary and is
 tested as an installed abi3 wheel. The Python API remains pre-1.0, so pin minor
 versions even though its runtime integrity guarantees match the Rust core.
+See the [0.5.7 trust-release migration](docs/TRUST_RELEASE_0.5.7.md) for the
+canonical production path and CALY-PROOF v1 compatibility boundary.
 
 ## Quickstart (~5 minutes)
 
@@ -96,10 +98,15 @@ calybris-verify chain decisions.wal.jsonl --anchor trusted-head.json
 calybris-verify audit decisions.wal.jsonl --policy policy.json
 ```
 
-0.5.5 hardens the production trust boundary:
+0.5.7 hardens the production trust boundary:
 
-- `receipt` binds the decision, state evidence, WAL position, and optional
-  Ed25519 receipt signer into one canonical claims digest.
+- `receipt::verify_receipt_full` verifies replay, claims, trusted signature,
+  state anchor, and WAL anchor as one fail-closed operation.
+- Trusted policy construction canonicalizes catalog order, reserves model ID 0,
+  and rejects catalogs that cannot fit public decision counters.
+- Ledger digests bind WAL watermarks; coordinated checkpoints commit immutable
+  snapshot/anchor generations behind one atomic manifest.
+- Audited WAL replay resolves the exact policy per record across policy rotations.
 - `WalAnchor` detects clean suffix truncation when the trusted head is stored
   outside the WAL file.
 - Sync and async WAL writers enforce one active writer per file.
@@ -133,15 +140,15 @@ proves trail *integrity*, not confidentiality, policy quality, or input truth.
 | `digest` | Canonical tagged byte digests — policy / input / decision / ledger / state |
 | `verify` | Full replay verification and audit bundles; fail-closed `verified_audit_bundle` |
 | `certificate` | Compatibility envelope for 0.5.0 certificate artifacts |
-| `receipt` | Canonical claims digest + optional signature binding decision, state, and WAL evidence *(0.5.5)* |
+| `receipt` | Canonical claims digest + `verify_receipt_full` binding replay, signature, state, and WAL evidence *(0.5.7)* |
 | `state` | Domain-state digest trajectories; `verify_trajectory` rejects dropped/reordered/forged steps *(0.5.0)* |
 | `provenance` | Ed25519-signed policies, domain-separated *(0.5.0, feature)* |
 | `wal` | Hash-chained WAL; keyed HMAC, trusted head anchors, and single-writer enforcement |
 | `budget` | CAS reserve/commit/release; `remaining + reserved + committed == initial` (Loom + Miri) |
 | `finance` | Ledger digests, conservation proofs and certificates |
-| `proof` | `ProofEnvelope`: policy + input + decision digests + WAL position + budget proof |
+| `proof` | Compatibility packaging for CALY-PROOF v1 attachments; new production integrations should use `receipt` |
 | `builder` / `config` | Hard-to-misuse constructors with validation |
-| `persistence` | fsync-backed snapshot save/load, crash `recovery_plan` |
+| `persistence` | fsync-backed snapshots plus generation-manifest coordinated WAL checkpoints |
 | `async_wal` / `instrument` | Tokio WAL *(feature `async`)*, tracing spans *(feature `observability`)* |
 
 Ships a `calybris-verify` auditor CLI (`chain` / `audit` / `policy`, `--json`) so a
@@ -178,7 +185,7 @@ CodSpeed CI (Linux x86_64, release): ~**8.6M** `prescribe`/sec, ~115 ns/decision
 reproduction recipe are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); run
 `cargo bench --bench kernel_bench` on your own hardware.
 
-0.5.5 also carries a release-blocking production torture suite covering a
+0.5.7 carries a release-blocking production torture suite covering a
 64-model checked kernel, state trajectories, signed receipts, keyed audited WAL,
 suffix-truncation detection, contended budgets, and a 25,000-tenant ledger.
 

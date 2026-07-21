@@ -8,7 +8,8 @@ use crate::digest::bytes_to_hex;
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{audit_bundle, verified_audit_bundle};
 use crate::wal::{
-    writer_lock_path, WalAnchor, MAX_WAL_ENTRY_BYTES, MIN_HMAC_KEY_BYTES, WAL_ANCHOR_SCHEMA,
+    writer_lock_path, WalAnchor, MAX_WAL_ENTRY_BYTES, MAX_WAL_PAYLOAD_BYTES, MIN_HMAC_KEY_BYTES,
+    WAL_ANCHOR_SCHEMA,
 };
 use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
@@ -150,7 +151,7 @@ async fn validate_chain_async_reader(
             continue;
         }
 
-        let entry: WalEntry<serde_json::Value> = serde_json::from_slice(&line)?;
+        let entry: WalEntry<Box<serde_json::value::RawValue>> = serde_json::from_slice(&line)?;
 
         if entry.sequence != expected_sequence {
             return Err(AsyncWalError::DuplicateSequence(entry.sequence));
@@ -164,8 +165,7 @@ async fn validate_chain_async_reader(
             });
         }
 
-        let data_str = serde_json::to_string(&entry.data)?;
-        let computed = compute_hash(&entry.previous_hash, &data_str, key)?;
+        let computed = compute_hash(&entry.previous_hash, entry.data.get(), key)?;
         if computed
             .as_bytes()
             .ct_eq(entry.entry_hash.as_bytes())
@@ -293,6 +293,15 @@ impl<T: Serialize> AsyncWalWriter<T> {
         })?;
 
         let data_json = serde_json::to_string(&data)?;
+        if data_json.len() > MAX_WAL_PAYLOAD_BYTES {
+            return Err(async_wal_io_error(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "WAL payload exceeds {MAX_WAL_PAYLOAD_BYTES} bytes: found {}",
+                    data_json.len()
+                ),
+            ));
+        }
         let entry_hash = compute_hash(&self.last_hash, &data_json, self.hmac_key.as_deref())?;
         let previous_hash = self.last_hash.clone();
 
@@ -637,6 +646,21 @@ mod tests {
             std::io::ErrorKind::InvalidData,
             "WAL entry exceeds",
         );
+    }
+
+    #[tokio::test]
+    async fn async_oversized_payload_is_rejected_before_writer_state_advances() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("oversized-payload.jsonl");
+        let mut wal = AsyncWalWriter::<String>::open(&path).await.unwrap();
+        let payload = "x".repeat(MAX_WAL_PAYLOAD_BYTES);
+        assert_io_error(
+            wal.append(payload).await,
+            std::io::ErrorKind::InvalidInput,
+            "WAL payload exceeds",
+        );
+        assert_eq!(wal.sequence(), 0);
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
     }
 
     #[tokio::test]

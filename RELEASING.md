@@ -35,8 +35,8 @@ artifacts on one auditable version.
 2. Create a signed tag:
 
    ```bash
-   git tag -s v0.5.5 -m "Calybris 0.5.5"
-   git push origin v0.5.5
+   git tag -s v0.5.7 -m "Calybris 0.5.7"
+   git push origin v0.5.7
    ```
 
 3. The release workflow rebuilds and tests an installed wheel, builds the
@@ -47,8 +47,8 @@ artifacts on one auditable version.
 ## Verify
 
 ```bash
-cargo install calybris-core --version 0.5.5
-python -m pip install calybris==0.5.5
-gh attestation verify calybris-0.5.5-*.whl -R emirhuseynrmx/calybris-core
+cargo install calybris-core --version 0.5.7
+python -m pip install calybris==0.5.7
+gh attestation verify calybris-0.5.7-*.whl -R emirhuseynrmx/calybris-core
 sha256sum --check SHA256SUMS
 ```

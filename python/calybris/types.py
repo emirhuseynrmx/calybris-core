@@ -6,9 +6,16 @@ must not be mutated after the fact.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+STRICT_CONFIG = ConfigDict(frozen=True, extra="forbid", strict=True)
+U16 = Annotated[int, Field(ge=0, le=2**16 - 1)]
+U32 = Annotated[int, Field(ge=0, le=2**32 - 1)]
+U64 = Annotated[int, Field(ge=0, le=2**64 - 1)]
+I64 = Annotated[int, Field(ge=-(2**63), le=2**63 - 1)]
+SHA256_HEX = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 class ModelSpec(BaseModel):
@@ -18,9 +25,9 @@ class ModelSpec(BaseModel):
     values use the same units as the Rust kernel.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
-    model_id: int = Field(..., ge=0, description="Unique model identifier.")
+    model_id: int = Field(..., ge=1, le=2**32 - 1, description="Unique model identifier.")
     provider_id: int = Field(..., ge=0, le=63, description="Provider index (0–63).")
     quality_bps: int = Field(
         ...,
@@ -34,14 +41,14 @@ class ModelSpec(BaseModel):
     enabled: bool = Field(
         default=True, description="Disabled models are skipped during evaluation."
     )
-    p95_latency_ms: int = Field(..., ge=0, description="95th-percentile latency in milliseconds.")
-    capabilities: int = Field(default=0, ge=0, description="Capability bitmask.")
-    region_mask: int = Field(..., ge=0, description="Region availability bitmask.")
+    p95_latency_ms: U32 = Field(..., description="95th-percentile latency in milliseconds.")
+    capabilities: U64 = Field(default=0, description="Capability bitmask.")
+    region_mask: U64 = Field(..., description="Region availability bitmask.")
     input_cost_microunits_per_million_tokens: int = Field(
-        ..., ge=0, description="Input cost per million tokens (1 cent = 1 000 000 microunits)."
+        ..., ge=0, le=2**64 - 1, description="Input cost per million tokens (1 cent = 1 000 000 microunits)."
     )
     output_cost_microunits_per_million_tokens: int = Field(
-        ..., ge=0, description="Output cost per million tokens."
+        ..., ge=0, le=2**64 - 1, description="Output cost per million tokens."
     )
 
 
@@ -52,23 +59,23 @@ class Decision(BaseModel):
     ``KernelDecision`` struct.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
-    request_sequence: int
+    request_sequence: U64
     action: str
-    action_code: int
+    action_code: int = Field(ge=0, le=255)
     reason: str
-    reason_code: int
-    selected_model_id: int
-    selected_model_index: int
-    estimated_cost_microunits: int
-    expected_utility_microunits: int
-    counterfactual_model_id: int
-    counterfactual_utility_microunits: int
-    evaluated_models: int
-    eligible_models: int
-    policy_epoch: int
-    catalog_epoch: int
+    reason_code: U16
+    selected_model_id: U32
+    selected_model_index: U16
+    estimated_cost_microunits: U64
+    expected_utility_microunits: I64
+    counterfactual_model_id: U32
+    counterfactual_utility_microunits: I64
+    evaluated_models: U16
+    eligible_models: U16
+    policy_epoch: U64
+    catalog_epoch: U64
 
     def is_executable(self) -> bool:
         """True when a model was selected (execute or substitute)."""
@@ -105,17 +112,17 @@ class VerifyResult(BaseModel):
     - ``"digest_mismatch"``: ``expected_hex``, ``actual_hex``.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     status: Literal["valid", "mismatch", "digest_mismatch"]
     expected_action: str | None = None
     actual_action: str | None = None
-    expected_model_id: int | None = None
-    actual_model_id: int | None = None
+    expected_model_id: U32 | None = None
+    actual_model_id: U32 | None = None
     expected_reason: str | None = None
     actual_reason: str | None = None
-    expected_hex: str | None = None
-    actual_hex: str | None = None
+    expected_hex: SHA256_HEX | None = None
+    actual_hex: SHA256_HEX | None = None
 
     @property
     def is_valid(self) -> bool:
@@ -128,41 +135,41 @@ class VerifyResult(BaseModel):
 class DecisionTrace(BaseModel):
     """Per-constraint rejection histogram from a prescribe evaluation."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
-    disabled: int = 0
-    quality: int = 0
-    risk_ceiling: int = 0
-    latency: int = 0
-    capability: int = 0
-    provider: int = 0
-    region: int = 0
-    budget: int = 0
-    utility: int = 0
-    evaluated_models: int
-    eligible_models: int
+    disabled: U16 = 0
+    quality: U16 = 0
+    risk_ceiling: U16 = 0
+    latency: U16 = 0
+    capability: U16 = 0
+    provider: U16 = 0
+    region: U16 = 0
+    budget: U16 = 0
+    utility: U16 = 0
+    evaluated_models: U16
+    eligible_models: U16
 
 
 class ProofEnvelope(BaseModel):
     """Single proof package binding a decision to digests and optional evidence."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
-    proof_version: int
-    policy_digest_hex: str
-    input_digest_hex: str
-    decision_digest_hex: str
+    proof_version: Literal[1]
+    policy_digest_hex: SHA256_HEX
+    input_digest_hex: SHA256_HEX
+    decision_digest_hex: SHA256_HEX
     replay_valid: bool
-    wal_sequence: int | None = None
-    wal_entry_hash: str | None = None
-    budget_snapshot_version: int | None = None
-    ledger_digest_hex: str | None = None
+    wal_sequence: U64 | None = None
+    wal_entry_hash: SHA256_HEX | None = None
+    budget_snapshot_version: U64 | None = None
+    ledger_digest_hex: SHA256_HEX | None = None
     action: str
     reason: str
-    selected_model_id: int
-    counterfactual_model_id: int
-    estimated_cost_microunits: int
-    expected_utility_microunits: int
+    selected_model_id: U32
+    counterfactual_model_id: U32
+    estimated_cost_microunits: U64
+    expected_utility_microunits: I64
 
 
 class AuditBundle(BaseModel):
@@ -172,25 +179,25 @@ class AuditBundle(BaseModel):
     given the same input — this is the fail-closed proof of determinism.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
-    schema_version: str = Field(
+    schema_version: Literal["calybris.audit.v1"] = Field(
         default="calybris.audit.v1",
         description="Stable schema tag for long-term audit storage.",
     )
-    digest_algorithm: str = Field(
+    digest_algorithm: Literal["sha256"] = Field(
         default="sha256",
         description="Digest algorithm used for all bundle fields.",
     )
-    proof_version: int = Field(default=1, description="Proof format version.")
-    policy_epoch: int = Field(default=0, description="Policy epoch at decision time.")
-    catalog_epoch: int = Field(default=0, description="Catalog epoch at decision time.")
-    created_by: str = Field(default="calybris", description="Producer label.")
-    policy_digest_hex: str = Field(
+    proof_version: Literal[1] = Field(default=1, description="Proof format version.")
+    policy_epoch: U64 = Field(default=0, description="Policy epoch at decision time.")
+    catalog_epoch: U64 = Field(default=0, description="Catalog epoch at decision time.")
+    created_by: Literal["calybris"] = Field(default="calybris", description="Producer label.")
+    policy_digest_hex: SHA256_HEX = Field(
         ..., description="Hex-encoded canonical policy digest (64 chars)."
     )
-    input_digest_hex: str = Field(..., description="Hex-encoded canonical input digest (64 chars).")
-    decision_digest_hex: str = Field(
+    input_digest_hex: SHA256_HEX = Field(..., description="Hex-encoded canonical input digest (64 chars).")
+    decision_digest_hex: SHA256_HEX = Field(
         ..., description="Hex-encoded canonical decision digest (64 chars)."
     )
     replay_valid: bool = Field(

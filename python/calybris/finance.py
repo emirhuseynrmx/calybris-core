@@ -10,15 +10,16 @@ from __future__ import annotations
 from os import PathLike
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from . import _core
+from .types import STRICT_CONFIG
 
 MICROCENTS_PER_CENT: int = _core.MICROCENTS_PER_CENT
 
 
 class BudgetReservationResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     status: str
     reservation_id: int | None = None
@@ -33,7 +34,7 @@ class BudgetReservationResult(BaseModel):
 
 
 class BudgetSettlementResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     status: str
     remaining_microcents: int | None = None
@@ -50,7 +51,7 @@ class BudgetSettlementResult(BaseModel):
 
 
 class BudgetTopUpResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     status: str
     added_microcents: int | None = None
@@ -59,7 +60,7 @@ class BudgetTopUpResult(BaseModel):
 
 
 class ConservationCheck(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     status: str
     tenant_id: str | None = None
@@ -71,7 +72,7 @@ class ConservationCheck(BaseModel):
 
 
 class TenantLedger(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     tenant_id: str
     initial_microcents: int
@@ -81,7 +82,7 @@ class TenantLedger(BaseModel):
 
 
 class BudgetSnapshot(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     version: int
     active_reservations: int
@@ -90,7 +91,7 @@ class BudgetSnapshot(BaseModel):
 
 
 class ConservationProof(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     ledger_digest_hex: str
     snapshot_version: int
@@ -102,7 +103,7 @@ class ConservationProof(BaseModel):
 
 
 class FinancialCertificate(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     snapshot_version: int
     ledger_digest_hex: str

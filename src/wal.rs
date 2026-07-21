@@ -27,7 +27,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub const MIN_HMAC_KEY_BYTES: usize = 32;
 /// Maximum encoded WAL line accepted by readers.
 pub const MAX_WAL_ENTRY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_WAL_PAYLOAD_BYTES: usize = MAX_WAL_ENTRY_BYTES - 512;
+pub(crate) const MAX_WAL_PAYLOAD_BYTES: usize = MAX_WAL_ENTRY_BYTES - 512;
 
 /// A single entry in the hash-chained WAL.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +164,33 @@ pub struct WalReplayVerdict {
     pub policy_digest_match: bool,
     pub input_digest_match: bool,
     pub decision_digest_match: bool,
+}
+
+/// Resolves the exact immutable policy used by one audited WAL record.
+///
+/// Returning an owned snapshot is cheap because model storage is `Arc` backed,
+/// and avoids lifetime restrictions for database- or cache-backed resolvers.
+pub trait PolicyResolver {
+    fn resolve(
+        &self,
+        policy_epoch: u64,
+        catalog_epoch: u64,
+        policy_digest_hex: &str,
+    ) -> Option<PolicySnapshot>;
+}
+
+impl<F> PolicyResolver for F
+where
+    F: for<'a> Fn(u64, u64, &'a str) -> Option<PolicySnapshot>,
+{
+    fn resolve(
+        &self,
+        policy_epoch: u64,
+        catalog_epoch: u64,
+        policy_digest_hex: &str,
+    ) -> Option<PolicySnapshot> {
+        self(policy_epoch, catalog_epoch, policy_digest_hex)
+    }
 }
 
 impl<M> WalWriter<AuditedRecord<M>>
@@ -576,7 +603,7 @@ fn validate_chain_reader<R: BufRead>(
             continue;
         }
 
-        let entry: WalEntry<serde_json::Value> = serde_json::from_slice(&line)?;
+        let entry: WalEntry<Box<serde_json::value::RawValue>> = serde_json::from_slice(&line)?;
 
         if entry.sequence != expected_sequence {
             return Err(WalError::DuplicateSequence(entry.sequence));
@@ -590,8 +617,7 @@ fn validate_chain_reader<R: BufRead>(
             });
         }
 
-        let data_str = serde_json::to_string(&entry.data)?;
-        let computed = compute_hash(&entry.previous_hash, &data_str, key)?;
+        let computed = compute_hash(&entry.previous_hash, entry.data.get(), key)?;
         // Constant-time comparison to prevent timing side-channel on keyed WAL
         if computed
             .as_bytes()
@@ -655,7 +681,8 @@ where
             continue;
         }
 
-        let value_entry: WalEntry<serde_json::Value> = serde_json::from_slice(&line)?;
+        let value_entry: WalEntry<Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&line)?;
 
         if value_entry.sequence != expected_sequence {
             return Err(WalError::DuplicateSequence(value_entry.sequence));
@@ -669,8 +696,7 @@ where
             });
         }
 
-        let data_str = serde_json::to_string(&value_entry.data)?;
-        let computed = compute_hash(&value_entry.previous_hash, &data_str, key)?;
+        let computed = compute_hash(&value_entry.previous_hash, value_entry.data.get(), key)?;
         if computed
             .as_bytes()
             .ct_eq(value_entry.entry_hash.as_bytes())
@@ -823,11 +849,53 @@ where
 {
     let entries = read_verified_wal_inner::<AuditedRecord<M>>(path, key)?;
     let expected_policy = digest_to_hex(&policy_digest(snapshot));
+    verify_audited_entries(entries, &|policy_epoch, catalog_epoch, digest: &str| {
+        (policy_epoch == snapshot.policy_epoch
+            && catalog_epoch == snapshot.catalog_epoch
+            && digest == expected_policy)
+            .then(|| snapshot.clone())
+    })
+}
 
+/// Replay a policy-rotating audited WAL, resolving the exact policy per record.
+pub fn replay_audited_wal_with_resolver<M, R>(
+    path: &Path,
+    resolver: &R,
+    key: Option<&[u8]>,
+) -> Result<Vec<WalReplayVerdict>, WalError>
+where
+    M: for<'de> Deserialize<'de>,
+    R: PolicyResolver,
+{
+    let entries = read_verified_wal_inner::<AuditedRecord<M>>(path, key)?;
+    verify_audited_entries(entries, resolver)
+}
+
+fn verify_audited_entries<M, R>(
+    entries: Vec<WalEntry<AuditedRecord<M>>>,
+    resolver: &R,
+) -> Result<Vec<WalReplayVerdict>, WalError>
+where
+    R: PolicyResolver,
+{
     let mut verdicts = Vec::with_capacity(entries.len());
     for entry in entries {
         let bundle = &entry.data.audit;
-        let replay = verify_decision(snapshot, entry.data.input, &entry.data.decision);
+        let snapshot = resolver
+            .resolve(
+                bundle.policy_epoch,
+                bundle.catalog_epoch,
+                &bundle.policy_digest_hex,
+            )
+            .ok_or_else(|| WalError::AuditFailed {
+                sequence: entry.sequence,
+                reason: format!(
+                    "policy not resolved for epoch={} catalog_epoch={} digest={}",
+                    bundle.policy_epoch, bundle.catalog_epoch, bundle.policy_digest_hex
+                ),
+            })?;
+        let expected_policy = digest_to_hex(&policy_digest(&snapshot));
+        let replay = verify_decision(&snapshot, entry.data.input, &entry.data.decision);
         let replay_valid = replay == VerifyResult::Valid;
         let policy_digest_match = bundle.policy_digest_hex == expected_policy;
         let input_digest_match = bundle.input_digest_hex
@@ -917,6 +985,24 @@ mod tests {
         assert_eq!(entries[0].data.model, "gpt-4o");
         assert_eq!(entries[1].data.model, "mini");
         assert_eq!(entries[1].previous_hash, entries[0].entry_hash);
+    }
+
+    #[test]
+    fn chain_verification_hashes_the_original_data_lexeme() {
+        let (_dir, path) = temp_wal("raw-json-lexeme");
+        let raw_data = r#"{"b":1, "a":2.0}"#;
+        let entry_hash = compute_hash("genesis", raw_data, None).unwrap();
+        let line = format!(
+            "{{\"sequence\":1,\"previous_hash\":\"genesis\",\"entry_hash\":\"{entry_hash}\",\"data\":{raw_data}}}\n"
+        );
+        std::fs::write(&path, line).unwrap();
+
+        assert_eq!(
+            WalWriter::<serde_json::Value>::validate_chain(&path)
+                .unwrap()
+                .0,
+            1
+        );
     }
 
     #[test]
@@ -1248,6 +1334,71 @@ mod tests {
         let verdicts = replay_audited_wal(&path, &snapshot).unwrap();
         assert_eq!(verdicts.len(), 1);
         assert!(verdicts[0].replay_valid);
+    }
+
+    #[test]
+    fn audited_replay_resolves_policy_per_record() {
+        use crate::kernel::*;
+
+        let (_dir, path) = temp_wal("policy-rotation-replay");
+        let models = vec![KernelModel {
+            model_id: 1,
+            provider_id: 0,
+            quality_bps: 9000,
+            risk_ceiling_bps: 9500,
+            enabled: 1,
+            p95_latency_ms: 200,
+            capabilities: 0,
+            region_mask: ALL_REGIONS,
+            input_cost_microunits_per_million_tokens: 100,
+            output_cost_microunits_per_million_tokens: 400,
+        }];
+        let first =
+            PolicySnapshot::try_new_trusted(1, 10, 9600, 5500, 3500, 0, models.clone()).unwrap();
+        let second = PolicySnapshot::try_new_trusted(2, 20, 9600, 5500, 3500, 0, models).unwrap();
+        let input = |sequence| KernelInput {
+            request_sequence: sequence,
+            requested_model_id: 1,
+            input_tokens: 500,
+            output_tokens: 200,
+            business_value_microunits: 50_000,
+            budget_limit_microunits: 10_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+        {
+            let mut wal = WalWriter::open(&path).unwrap();
+            for (policy, sequence) in [(&first, 1), (&second, 2)] {
+                let request = input(sequence);
+                wal.append_verified_audited(
+                    policy,
+                    request,
+                    policy.prescribe(request),
+                    serde_json::Value::Null,
+                )
+                .unwrap();
+            }
+            wal.flush_and_sync().unwrap();
+        }
+
+        let resolver_first = first.clone();
+        let resolver_second = second.clone();
+        let resolver =
+            move |policy_epoch, catalog_epoch, _digest: &str| match (policy_epoch, catalog_epoch) {
+                (1, 10) => Some(resolver_first.clone()),
+                (2, 20) => Some(resolver_second.clone()),
+                _ => None,
+            };
+        let verdicts =
+            replay_audited_wal_with_resolver::<serde_json::Value, _>(&path, &resolver, None)
+                .unwrap();
+        assert_eq!(verdicts.len(), 2);
+        assert!(verdicts.iter().all(|verdict| verdict.replay_valid));
     }
 
     #[test]

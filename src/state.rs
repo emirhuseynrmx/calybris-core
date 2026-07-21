@@ -74,6 +74,13 @@ pub struct StateChain {
     last_digest: [u8; 32],
 }
 
+/// State-chain mutation errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum StateAdvanceError {
+    #[error("state trajectory step counter exhausted")]
+    StepOverflow,
+}
+
 impl StateChain {
     /// Anchor the chain at step 0 with the initial state.
     pub fn genesis(initial_state_bytes: &[u8]) -> Self {
@@ -86,16 +93,28 @@ impl StateChain {
     /// Record a transition to the next state. Returns the proof material to
     /// embed in the decision's audit bundle.
     pub fn advance(&mut self, next_state_bytes: &[u8]) -> StateTransition {
-        let step = self.step.saturating_add(1);
+        self.try_advance(next_state_bytes)
+            .expect("state trajectory step counter exhausted")
+    }
+
+    /// Record a transition, failing closed instead of repeating `u64::MAX`.
+    pub fn try_advance(
+        &mut self,
+        next_state_bytes: &[u8],
+    ) -> Result<StateTransition, StateAdvanceError> {
+        let step = self
+            .step
+            .checked_add(1)
+            .ok_or(StateAdvanceError::StepOverflow)?;
         let digest_before = self.last_digest;
         let digest_after = state_digest(step, next_state_bytes);
         self.step = step;
         self.last_digest = digest_after;
-        StateTransition {
+        Ok(StateTransition {
             step,
             digest_before,
             digest_after,
-        }
+        })
     }
 
     pub fn step(&self) -> u64 {
@@ -166,7 +185,12 @@ pub fn verify_trajectory(bundles: &[StatefulAuditBundle]) -> Result<(), Trajecto
             return Err(TrajectoryError::ReplayInvalid { step: bundle.step });
         }
         if let Some(previous) = previous {
-            let expected = previous.step.saturating_add(1);
+            let Some(expected) = previous.step.checked_add(1) else {
+                return Err(TrajectoryError::NonMonotonicStep {
+                    expected: u64::MAX,
+                    found: bundle.step,
+                });
+            };
             if bundle.step != expected {
                 return Err(TrajectoryError::NonMonotonicStep {
                     expected,
@@ -249,6 +273,20 @@ mod tests {
         let bundles = trajectory(&[1_000_000, 999_000, 998_000, 990_000]);
         assert_eq!(bundles.len(), 3);
         verify_trajectory(&bundles).unwrap();
+    }
+
+    #[test]
+    fn state_chain_fails_closed_at_step_overflow() {
+        let mut chain = StateChain {
+            step: u64::MAX,
+            last_digest: [7; 32],
+        };
+        assert_eq!(
+            chain.try_advance(b"next"),
+            Err(StateAdvanceError::StepOverflow)
+        );
+        assert_eq!(chain.step(), u64::MAX);
+        assert_eq!(chain.last_digest(), [7; 32]);
     }
 
     #[test]

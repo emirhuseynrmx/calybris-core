@@ -199,6 +199,53 @@ mod tests {
     }
 
     #[test]
+    fn decision_identity_is_catalog_order_independent() {
+        let legacy = snap();
+        let a = PolicySnapshot::try_new_trusted(
+            legacy.policy_epoch,
+            legacy.catalog_epoch,
+            legacy.hard_risk_limit_bps,
+            legacy.minimum_confidence_bps,
+            legacy.risk_penalty_multiplier_bps,
+            legacy.latency_penalty_microunits_per_ms,
+            legacy.models().to_vec(),
+        )
+        .unwrap();
+        let mut reversed_models = legacy.models().to_vec();
+        reversed_models.reverse();
+        let b = PolicySnapshot::try_new_trusted(
+            a.policy_epoch,
+            a.catalog_epoch,
+            a.hard_risk_limit_bps,
+            a.minimum_confidence_bps,
+            a.risk_penalty_multiplier_bps,
+            a.latency_penalty_microunits_per_ms,
+            reversed_models,
+        )
+        .unwrap();
+        let input = KernelInput {
+            request_sequence: 7,
+            requested_model_id: 1,
+            input_tokens: 100,
+            output_tokens: 50,
+            business_value_microunits: 10_000,
+            budget_limit_microunits: 1_000_000,
+            risk_bps: 500,
+            confidence_bps: 8000,
+            minimum_quality_bps: 5000,
+            max_p95_latency_ms: 0,
+            required_capabilities: 0,
+            allowed_provider_mask: ALL_PROVIDERS,
+            required_region_mask: 0,
+        };
+
+        let first = a.prescribe(input);
+        let second = b.prescribe(input);
+        assert_eq!(first, second);
+        assert_eq!(decision_digest(&first), decision_digest(&second));
+    }
+
+    #[test]
     fn digests_are_deterministic() {
         let snap = snap();
         let input = KernelInput {

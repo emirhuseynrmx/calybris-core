@@ -19,6 +19,7 @@ from calybris import (
     ProvenanceError,
     ReceiptError,
     ReceiptState,
+    ReceiptWal,
     StateChain,
     StateTrajectoryError,
     WalAnchor,
@@ -106,6 +107,37 @@ def test_receipt_tampering_is_detected() -> None:
         tampered.verify(engine.policy, request, decision)
     with pytest.raises(ReceiptError):
         tampered.verify_signature(TRUSTED_PUBLIC_KEY)
+
+
+def test_receipt_full_verification_requires_all_trust_anchors() -> None:
+    engine = CalybrisEngine(_policy())
+    request = _request()
+    decision = engine.prescribe(request)
+    state = ReceiptState(1, "11" * 32, "22" * 32)
+    wal = ReceiptWal(9, "33" * 32)
+    receipt = engine.issue_receipt(request, decision, state=state, wal=wal)
+    receipt.sign(SIGNING_KEY, "decision-service:test", 1_700_000_000_001)
+
+    receipt.verify_full(
+        engine.policy,
+        request,
+        decision,
+        TRUSTED_PUBLIC_KEY,
+        state,
+        wal,
+    )
+
+    incomplete = engine.issue_receipt(request, decision, state=state)
+    incomplete.sign(SIGNING_KEY, "decision-service:test", 1_700_000_000_001)
+    with pytest.raises(ReceiptError, match="WAL anchor mismatch"):
+        incomplete.verify_full(
+            engine.policy,
+            request,
+            decision,
+            TRUSTED_PUBLIC_KEY,
+            state,
+            wal,
+        )
 
 
 def test_security_artifact_json_is_strict_and_repr_is_panic_free(tmp_path: Path) -> None:

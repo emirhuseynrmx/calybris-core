@@ -27,6 +27,8 @@ pub const ALL_PROVIDERS: u64 = u64::MAX;
 pub const ALL_REGIONS: u64 = u64::MAX;
 /// Maximum representable provider ID. IDs >= 64 are unconditionally rejected.
 pub const MAX_PROVIDER_ID: u16 = 63;
+/// Largest catalog whose count and zero-based indices fit the public `u16` decision fields.
+pub const MAX_CATALOG_MODELS: usize = u16::MAX as usize;
 
 /// A candidate model in the decision catalog.
 #[repr(C)]
@@ -363,6 +365,17 @@ pub enum PolicyError {
     },
 }
 
+/// Additional trust-boundary validation errors for canonical policy construction.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TrustPolicyError {
+    #[error("policy validation failed: {0}")]
+    Policy(#[from] PolicyError),
+    #[error("model catalog has {len} entries; maximum is {max}")]
+    CatalogTooLarge { len: usize, max: usize },
+    #[error("model_id 0 is reserved for decisions with no selected model")]
+    ReservedModelId,
+}
+
 type RejectionCounts = RejectionHistogram;
 
 impl PolicySnapshot {
@@ -523,6 +536,44 @@ impl PolicySnapshot {
         latency_penalty_microunits_per_ms: u64,
         models: Vec<KernelModel>,
     ) -> Result<Self, PolicyError> {
+        let snapshot = Self::new_unchecked(
+            policy_epoch,
+            catalog_epoch,
+            hard_risk_limit_bps,
+            minimum_confidence_bps,
+            risk_penalty_multiplier_bps,
+            latency_penalty_microunits_per_ms,
+            models,
+        );
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Build a validated, canonically ordered policy for new trust-boundary integrations.
+    ///
+    /// Unlike the legacy [`try_new`](Self::try_new) constructor, this reserves
+    /// model ID zero for rejected decisions and rejects catalogs that cannot be
+    /// represented exactly by the public `u16` decision counters. The legacy
+    /// constructor remains available so v1 artifacts can still be replayed.
+    pub fn try_new_trusted(
+        policy_epoch: u64,
+        catalog_epoch: u64,
+        hard_risk_limit_bps: u16,
+        minimum_confidence_bps: u16,
+        risk_penalty_multiplier_bps: u16,
+        latency_penalty_microunits_per_ms: u64,
+        mut models: Vec<KernelModel>,
+    ) -> Result<Self, TrustPolicyError> {
+        if models.len() > MAX_CATALOG_MODELS {
+            return Err(TrustPolicyError::CatalogTooLarge {
+                len: models.len(),
+                max: MAX_CATALOG_MODELS,
+            });
+        }
+        if models.iter().any(|model| model.model_id == 0) {
+            return Err(TrustPolicyError::ReservedModelId);
+        }
+        models.sort_by_key(|model| model.model_id);
         let snapshot = Self::new_unchecked(
             policy_epoch,
             catalog_epoch,
@@ -1295,6 +1346,25 @@ mod tests {
             snap.validate(),
             Err(PolicyError::DuplicateModelId { model_id: 1 })
         );
+    }
+
+    #[test]
+    fn model_id_zero_is_reserved_for_rejection() {
+        assert!(matches!(
+            PolicySnapshot::try_new_trusted(1, 1, 9_600, 5_500, 3_500, 0, vec![base_model(0, 1)]),
+            Err(TrustPolicyError::ReservedModelId)
+        ));
+    }
+
+    #[test]
+    fn catalog_larger_than_decision_counters_is_rejected() {
+        let models = (1..=u32::from(u16::MAX) + 1)
+            .map(|model_id| base_model(model_id, 1))
+            .collect();
+        assert!(matches!(
+            PolicySnapshot::try_new_trusted(1, 1, 9_600, 5_500, 3_500, 0, models),
+            Err(TrustPolicyError::CatalogTooLarge { .. })
+        ));
     }
 
     #[test]

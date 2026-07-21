@@ -24,7 +24,7 @@
 //! - `committed_lifetime` — cumulative spend since tenant creation (monotonic, never decreases)
 //! - `initial` — total budget ever granted (`ensure_tenant` + [`top_up_tenant`](crate::budget::BudgetEngine::top_up_tenant))
 
-use crate::sync::{Arc, AtomicI64, AtomicU64, Mutex, Ordering};
+use crate::sync::{Arc, AtomicI64, AtomicU64, Mutex, Ordering, RwLock};
 use std::collections::HashMap;
 
 /// Budget reservation result.
@@ -160,6 +160,8 @@ fn try_increment_reserved_total(
 /// Metadata maps are mutex-protected; each operation acquires only the locks it needs.
 /// [`restore_from_snapshot`](Self::restore_from_snapshot) is exclusive recovery — not concurrent with hot-path ops.
 pub struct BudgetEngine {
+    /// Mutations take a shared guard; snapshots and restores take an exclusive guard.
+    checkpoint_gate: RwLock<()>,
     tenant_budgets: Mutex<HashMap<Arc<str>, Arc<AtomicI64>>>,
     initial_microcents: Mutex<HashMap<Arc<str>, i64>>,
     committed_microcents: Mutex<HashMap<Arc<str>, i64>>,
@@ -343,6 +345,7 @@ fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreErr
 impl BudgetEngine {
     pub fn new() -> Self {
         Self {
+            checkpoint_gate: RwLock::new(()),
             tenant_budgets: Mutex::new(HashMap::new()),
             initial_microcents: Mutex::new(HashMap::new()),
             committed_microcents: Mutex::new(HashMap::new()),
@@ -357,6 +360,10 @@ impl BudgetEngine {
 
     /// Set a per-tenant exposure cap on open reservation holds (`0` removes the cap).
     pub fn set_max_reserved_microcents(&self, tenant_id: &str, max_microcents: i64) {
+        let _mutation = self
+            .checkpoint_gate
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let key: Arc<str> = Arc::from(tenant_id);
         let mut limits = self
             .max_reserved_microcents
@@ -428,6 +435,10 @@ impl BudgetEngine {
     /// operations may hold cloned state across a clear/replace and corrupt restored ledgers.
     pub fn restore_from_snapshot(&self, snap: BudgetSnapshot) -> Result<(), RestoreError> {
         validate_snapshot_for_restore(&snap)?;
+        let _checkpoint = self
+            .checkpoint_gate
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         {
             let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
             reservations.clear();
@@ -477,6 +488,10 @@ impl BudgetEngine {
         if budget_microcents < 0 {
             return;
         }
+        let _mutation = self
+            .checkpoint_gate
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut budgets = self
             .tenant_budgets
             .lock()
@@ -513,6 +528,10 @@ impl BudgetEngine {
         if amount_microcents <= 0 {
             return TopUpResult::InvalidAmount;
         }
+        let _mutation = self
+            .checkpoint_gate
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
 
         let key: Arc<str> = Arc::from(tenant_id);
 
@@ -597,6 +616,10 @@ impl BudgetEngine {
     /// Lock order: reservations → budgets → initials → committed (matches hot path).
     #[must_use]
     pub fn snapshot(&self) -> BudgetSnapshot {
+        let _checkpoint = self
+            .checkpoint_gate
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
         let budgets = self
             .tenant_budgets
@@ -676,6 +699,10 @@ impl BudgetEngine {
                 None,
             );
         }
+        let _mutation = self
+            .checkpoint_gate
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
 
         let key: Arc<str> = Arc::from(tenant_id);
         let (budget, reserved_total) = {
@@ -765,6 +792,10 @@ impl BudgetEngine {
         if actual_microcents < 0 {
             return BudgetSettlement::InvalidAmount;
         }
+        let _mutation = self
+            .checkpoint_gate
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
 
         let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
         let Some(reservation) = reservations.remove(&reservation_id) else {
@@ -817,10 +848,15 @@ impl BudgetEngine {
                     };
                 }
             }
-            std::cmp::Ordering::Less => {
-                budget.fetch_add(-delta, Ordering::AcqRel);
-            }
+            std::cmp::Ordering::Less => {}
             std::cmp::Ordering::Equal => {}
+        }
+
+        committed_guard.insert(tenant_key.clone(), new_committed);
+        drop(committed_guard);
+
+        if delta < 0 {
+            budget.fetch_add(-delta, Ordering::AcqRel);
         }
 
         {
@@ -833,9 +869,6 @@ impl BudgetEngine {
             }
         }
 
-        committed_guard.insert(tenant_key, new_committed);
-        drop(committed_guard);
-
         let remaining = budget.load(Ordering::Acquire);
         BudgetSettlement::Committed {
             remaining_microcents: remaining,
@@ -845,6 +878,10 @@ impl BudgetEngine {
 
     /// Release a reservation, returning the full reserved amount to the tenant's budget.
     pub fn release(&self, reservation_id: u64) -> BudgetSettlement {
+        let _mutation = self
+            .checkpoint_gate
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
         let Some((_, reservation)) = reservations.remove_entry(&reservation_id) else {
             return BudgetSettlement::MissingReservation;
@@ -995,6 +1032,41 @@ mod tests {
         let snap = engine.snapshot();
         assert_eq!(snap.tenants.len(), 2);
         assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri: concurrency stress test")]
+    fn snapshots_are_linearizable_with_reservation_mutations() {
+        let engine = Arc::new(BudgetEngine::new());
+        engine.ensure_tenant("desk", 1_000_000);
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let writer_engine = Arc::clone(&engine);
+        let writer_running = Arc::clone(&running);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..20_000 {
+                let (_, id) = writer_engine.try_reserve("desk", 1);
+                if let Some(id) = id {
+                    let _ = writer_engine.release(id);
+                }
+            }
+            writer_running.store(false, std::sync::atomic::Ordering::Release);
+        });
+
+        while running.load(std::sync::atomic::Ordering::Acquire) {
+            let snapshot = engine.snapshot();
+            assert_eq!(
+                conservation_status_for_snapshot(&snapshot),
+                ConservationStatus::Balanced
+            );
+            let reserved: i64 = snapshot
+                .tenants
+                .iter()
+                .map(|tenant| tenant.reserved_microcents)
+                .sum();
+            assert_eq!(snapshot.active_reservations as i64, reserved);
+        }
+        writer.join().unwrap();
     }
 
     #[test]

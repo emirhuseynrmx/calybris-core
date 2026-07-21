@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-07-22
+
+### Added
+- Canonical trusted policy construction with stable catalog ordering, reserved
+  rejection sentinel `model_id=0`, and a hard limit matching public decision counters.
+- Full receipt verification that combines replay, claims integrity, trusted-key
+  signature verification, state anchoring, and WAL anchoring in one fail-closed call.
+- Recovery-aware ledger digests bind the exact WAL high watermark while preserving
+  legacy digest identity for snapshots that carry no WAL claim.
+- Linearizable budget snapshots during concurrent reserve, commit, release, top-up,
+  and tenant mutations.
+- Generation-based coordinated checkpoints: WAL fsync, immutable snapshot and anchor
+  files, then an atomically committed manifest verified on recovery.
+- Atomic JSON persistence uses collision-resistant, exclusively created temporary
+  files and cleans up abandoned files on every error path, including concurrent writers.
+- Policy-rotating audited WAL replay through a record-level `PolicyResolver`.
+- Sync and async WAL verification hashes the original JSON `data` lexeme rather
+  than a deserialized/re-serialized value, eliminating key-order, whitespace,
+  and numeric-lexeme ambiguity.
+- Async WAL writers reject oversized payloads before hashing or allocating the
+  encoded entry, matching the synchronous writer's resource-exhaustion guard.
+- Checked state-chain advancement that rejects step-counter exhaustion.
+- Strict Python schemas: unknown-field rejection, strict types, bounded Rust-width
+  integers, literal schema versions, and lowercase SHA-256 digest validation.
+
+### Security
+- Financial certificates recompute conservation from the frozen snapshot and no
+  longer trust a caller-provided boolean claim.
+- Python policy creation now uses the canonical trusted constructor.
+- Commerce percentage-to-basis-point conversion uses decimal rounding instead of
+  binary-float truncation.
+- Added adversarial tests for catalog permutations, reserved sentinels, counter
+  limits, receipt mutation, WAL watermark binding, checkpoint generations,
+  concurrent snapshot isolation, policy rotation, and state-step overflow.
+
+### Compatibility
+- Existing CALY-PROOF v1 constructors and artifact surfaces remain available for
+  replay compatibility. New integrations should use trusted policy construction,
+  decision receipts, `verify_full`, and coordinated checkpoint APIs.
+- The release is patch-semver compatible with 0.5.5; no existing public Rust item
+  was removed or changed incompatibly.
+
 ## [0.5.5] - 2026-07-16
 
 ### Added

@@ -452,7 +452,7 @@ impl PyPolicySnapshot {
         models: Vec<PyKernelModel>,
     ) -> PyResult<Self> {
         let models = models.into_iter().map(KernelModel::from).collect();
-        PolicySnapshot::try_new(
+        PolicySnapshot::try_new_trusted(
             policy_epoch,
             catalog_epoch,
             hard_risk_limit_bps,

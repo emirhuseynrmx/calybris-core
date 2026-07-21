@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core-python"
-version = "0.5.5"
+version = "0.5.7"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-calybris-core-rs = { package = "calybris-core", path = "../..", version = "0.5.5", default-features = false, features = ["wal", "provenance"] }
+calybris-core-rs = { package = "calybris-core", path = "../..", version = "0.5.7", default-features = false, features = ["wal", "provenance"] }
 ed25519-dalek = "2"
 # abi3-py310: build against the CPython stable ABI so ONE wheel per platform
 # covers Python 3.10+ — turns a 16-wheel matrix into ~4 and works on future

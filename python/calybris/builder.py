@@ -6,11 +6,11 @@ the final Rust-backed object (``PolicySnapshot`` or ``KernelInput``).
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from calybris import _core
 from calybris.errors import InputValidationError, PolicyValidationError
-from calybris.types import ModelSpec
+from calybris.types import STRICT_CONFIG, ModelSpec
 
 _MAX_BPS = 10_000
 
@@ -32,7 +32,7 @@ class EngineConfig(BaseModel):
     says otherwise.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     hard_risk_limit_bps: int = Field(
         default=9_600,

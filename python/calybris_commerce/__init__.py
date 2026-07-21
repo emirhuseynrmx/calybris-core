@@ -54,6 +54,7 @@ Quick start::
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal
 
 from calybris import (
@@ -67,8 +68,8 @@ from calybris import (
     _core,
 )
 from calybris import __version__ as _calybris_version
-from calybris.types import DecisionTrace, ModelSpec
-from pydantic import BaseModel, ConfigDict, Field
+from calybris.types import STRICT_CONFIG, DecisionTrace, ModelSpec
+from pydantic import BaseModel, Field
 
 #
 # Each bit represents a cargo handling capability. Suppliers declare which
@@ -123,6 +124,11 @@ __version__ = _calybris_version
 ADAPTER_STATUS = "preview"
 
 
+def _percentage_to_bps(value: float) -> int:
+    """Convert a validated percentage without binary-float truncation."""
+    return int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
 class SupplierSpec(BaseModel):
     """One fulfillment provider in the routing catalog.
 
@@ -135,7 +141,7 @@ class SupplierSpec(BaseModel):
     the kernel's per-token cost model is normalised so 1 order = 1M units.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     supplier_id: int = Field(..., ge=1, description="Unique supplier identifier.")
     name: str = Field(..., description="Human-readable supplier name (for logging).")
@@ -197,7 +203,7 @@ class OrderInput(BaseModel):
     kernel's risk gate.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     order_id: str = Field(..., description="Platform order ID for tracing.")
     order_sequence: int = Field(
@@ -269,7 +275,7 @@ class RouteResult(BaseModel):
     the policy, input, and decision — sufficient for external audit.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     order_id: str
     status: Literal["accepted", "substituted", "rejected"]
@@ -328,7 +334,7 @@ class BatchRouteResult(BaseModel):
     :meth:`EcomEngine.route_batch`. It is empty in the default ``"compact"`` mode.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_CONFIG
 
     results: list[RouteResult]
     rejection_histogram: dict[str, int] = Field(default_factory=dict)
@@ -398,8 +404,8 @@ class SupplierPolicy:
             ModelSpec(
                 model_id=s.supplier_id,
                 provider_id=s.provider_group,
-                quality_bps=int(s.reliability_pct * 100),
-                risk_ceiling_bps=int(s.risk_tolerance_pct * 100),
+                quality_bps=_percentage_to_bps(s.reliability_pct),
+                risk_ceiling_bps=_percentage_to_bps(s.risk_tolerance_pct),
                 enabled=s.enabled,
                 p95_latency_ms=s.sla_hours,
                 capabilities=s.capabilities,
@@ -428,8 +434,8 @@ class SupplierPolicy:
             raise PolicyValidationError("supplier catalog has no enabled suppliers")
 
         config = EngineConfig(
-            hard_risk_limit_bps=int(self._max_return_risk_pct * 100),
-            minimum_confidence_bps=int(self._min_confidence_pct * 100),
+            hard_risk_limit_bps=_percentage_to_bps(self._max_return_risk_pct),
+            minimum_confidence_bps=_percentage_to_bps(self._min_confidence_pct),
             risk_penalty_multiplier_bps=self._risk_penalty_bps,
             latency_penalty_microunits_per_ms=self._latency_penalty_per_ms(),
         )
@@ -491,10 +497,10 @@ class EcomEngine:
             .budget(order.budget_limit_microunits)
             .value(order.order_value_microunits)
             .risk(
-                bps=int(order.return_risk_pct * 100),
-                confidence_bps=int(order.confidence_pct * 100),
+                bps=_percentage_to_bps(order.return_risk_pct),
+                confidence_bps=_percentage_to_bps(order.confidence_pct),
             )
-            .quality(minimum_bps=int(order.minimum_reliability_pct * 100))
+            .quality(minimum_bps=_percentage_to_bps(order.minimum_reliability_pct))
             .latency(max_p95_ms=order.max_delivery_hours)
             .capabilities(order.required_capabilities)
             .regions(order.required_regions)

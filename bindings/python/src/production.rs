@@ -7,8 +7,9 @@ use calybris_core_rs::persistence::{
 };
 use calybris_core_rs::provenance::{sign_policy, verify_signed_policy_with_key, SignedPolicy};
 use calybris_core_rs::receipt::{
-    issue_receipt, sign_receipt, verify_receipt, verify_receipt_signature, verify_receipt_state,
-    verify_receipt_wal, DecisionReceipt, ReceiptAnchors, ReceiptState, ReceiptWal,
+    issue_receipt, sign_receipt, verify_receipt, verify_receipt_full, verify_receipt_signature,
+    verify_receipt_state, verify_receipt_wal, DecisionReceipt, ReceiptAnchors, ReceiptState,
+    ReceiptWal,
 };
 use calybris_core_rs::state::{
     stateful_audit_bundle, verify_trajectory, StateChain, StateTransition, StatefulAuditBundle,
@@ -602,6 +603,28 @@ impl PyDecisionReceipt {
     fn verify_signature(&self, trusted_public_key: &[u8]) -> PyResult<()> {
         let trusted = verifying_key(trusted_public_key)?;
         verify_receipt_signature(&self.inner, Some(&trusted)).map_err(receipt_error)
+    }
+
+    fn verify_full(
+        &self,
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+        trusted_public_key: &[u8],
+        expected_state: &PyReceiptState,
+        expected_wal: &PyReceiptWal,
+    ) -> PyResult<()> {
+        let trusted = verifying_key(trusted_public_key)?;
+        verify_receipt_full(
+            &self.inner,
+            &snapshot.inner,
+            validate_input(input)?,
+            &decision.inner,
+            &trusted,
+            &expected_state.inner,
+            &expected_wal.inner,
+        )
+        .map_err(receipt_error)
     }
 
     fn verify_wal(&self, sequence: u64, entry_hash: &str) -> PyResult<()> {

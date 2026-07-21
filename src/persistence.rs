@@ -7,7 +7,48 @@
 
 use crate::budget::{BudgetEngine, BudgetSnapshot, RestoreError};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempFileGuard(Option<PathBuf>);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Schema for the atomically committed snapshot/WAL generation manifest.
+#[cfg(feature = "wal")]
+pub const CHECKPOINT_MANIFEST_SCHEMA: &str = "calybris.checkpoint-manifest.v1";
+
+/// The final commit record for one durable checkpoint generation.
+#[cfg(feature = "wal")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointManifest {
+    pub schema_version: String,
+    pub snapshot_file: String,
+    pub wal_anchor_file: String,
+    pub snapshot_version: u64,
+    pub ledger_digest_hex: String,
+    pub wal_sequence: u64,
+    pub wal_hash: String,
+    pub wal_keyed: bool,
+}
+
+/// A fully verified snapshot/WAL generation.
+#[cfg(feature = "wal")]
+#[derive(Debug, Clone)]
+pub struct CoordinatedCheckpoint {
+    pub manifest: CheckpointManifest,
+    pub snapshot: BudgetSnapshot,
+    pub anchor: crate::wal::WalAnchor,
+}
 
 /// Persistence error types.
 #[derive(Debug, thiserror::Error)]
@@ -31,18 +72,14 @@ pub fn save_snapshot(snapshot: &BudgetSnapshot, path: &Path) -> Result<(), Persi
 
 fn save_json_atomic<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), PersistenceError> {
     let json = serde_json::to_string_pretty(value)?;
-    let tmp = path.with_extension("tmp");
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tmp)?;
+    let (tmp, mut file) = create_unique_temp_file(path)?;
+    let mut guard = TempFileGuard(Some(tmp.clone()));
     file.write_all(json.as_bytes())?;
-    file.sync_data()?;
+    file.sync_all()?;
     drop(file);
 
     std::fs::rename(&tmp, path)?;
+    guard.0 = None;
 
     if let Some(parent) = path.parent() {
         if let Ok(dir) = std::fs::File::open(parent) {
@@ -50,6 +87,31 @@ fn save_json_atomic<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), P
         }
     }
     Ok(())
+}
+
+fn create_unique_temp_file(path: &Path) -> Result<(PathBuf, std::fs::File), PersistenceError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot");
+    for _ in 0..32 {
+        let nonce = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".{filename}.tmp.{}.{nonce}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(PersistenceError::Io(error)),
+        }
+    }
+    Err(PersistenceError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique checkpoint temp file",
+    )))
 }
 
 /// Save a trusted WAL head anchor with fsync-backed atomic replacement.
@@ -99,6 +161,115 @@ pub fn checkpoint_with_wal(
     snapshot.wal_high_watermark = Some(wal_sequence);
     save_snapshot(&snapshot, path)?;
     Ok(snapshot)
+}
+
+/// Durably commit a generation in WAL -> snapshot -> manifest order.
+///
+/// The WAL is flushed and synced first. Snapshot and anchor files are immutable,
+/// generation-specific files; the manifest is atomically replaced last and is
+/// therefore the only recovery commit point. Callers must route each logical
+/// ledger mutation and its WAL append through the same application-level
+/// admission boundary used for this checkpoint.
+#[cfg(feature = "wal")]
+pub fn checkpoint_coordinated<T: serde::Serialize>(
+    engine: &BudgetEngine,
+    wal: &mut crate::wal::WalWriter<T>,
+    directory: &Path,
+) -> Result<CoordinatedCheckpoint, PersistenceError> {
+    std::fs::create_dir_all(directory)?;
+    wal.flush_and_sync()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    let anchor = wal.anchor();
+    let mut snapshot = engine.snapshot();
+    snapshot.wal_high_watermark = Some(anchor.sequence);
+
+    let snapshot_file = format!(
+        "snapshot-v{}-wal-{}.json",
+        snapshot.version, anchor.sequence
+    );
+    let wal_anchor_file = format!(
+        "wal-anchor-v{}-wal-{}.json",
+        snapshot.version, anchor.sequence
+    );
+    save_snapshot(&snapshot, &directory.join(&snapshot_file))?;
+    save_wal_anchor(&anchor, &directory.join(&wal_anchor_file))?;
+
+    let manifest = CheckpointManifest {
+        schema_version: CHECKPOINT_MANIFEST_SCHEMA.to_string(),
+        snapshot_file,
+        wal_anchor_file,
+        snapshot_version: snapshot.version,
+        ledger_digest_hex: crate::digest::digest_to_hex(&crate::finance::ledger_digest(&snapshot)),
+        wal_sequence: anchor.sequence,
+        wal_hash: anchor.last_hash.clone(),
+        wal_keyed: anchor.keyed,
+    };
+    save_json_atomic(&manifest, &directory.join("checkpoint-manifest.json"))?;
+    Ok(CoordinatedCheckpoint {
+        manifest,
+        snapshot,
+        anchor,
+    })
+}
+
+/// Load the last committed generation and fail closed on any cross-file mismatch.
+#[cfg(feature = "wal")]
+pub fn load_coordinated_checkpoint(
+    directory: &Path,
+) -> Result<CoordinatedCheckpoint, PersistenceError> {
+    let manifest_data = std::fs::read_to_string(directory.join("checkpoint-manifest.json"))?;
+    let manifest: CheckpointManifest = serde_json::from_str(&manifest_data)?;
+    if manifest.schema_version != CHECKPOINT_MANIFEST_SCHEMA {
+        return Err(invalid_recovery_data(format!(
+            "unknown checkpoint manifest schema: {}",
+            manifest.schema_version
+        )));
+    }
+    validate_generation_filename(&manifest.snapshot_file)?;
+    validate_generation_filename(&manifest.wal_anchor_file)?;
+
+    let snapshot = load_snapshot(&directory.join(&manifest.snapshot_file))?;
+    let anchor = load_wal_anchor(&directory.join(&manifest.wal_anchor_file))?;
+    let digest = crate::digest::digest_to_hex(&crate::finance::ledger_digest(&snapshot));
+    if snapshot.version != manifest.snapshot_version
+        || snapshot.wal_high_watermark != Some(manifest.wal_sequence)
+        || digest != manifest.ledger_digest_hex
+    {
+        return Err(invalid_recovery_data(
+            "checkpoint snapshot does not match committed manifest",
+        ));
+    }
+    anchor
+        .verify_head(
+            manifest.wal_sequence,
+            manifest.wal_hash.clone(),
+            manifest.wal_keyed,
+        )
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    Ok(CoordinatedCheckpoint {
+        manifest,
+        snapshot,
+        anchor,
+    })
+}
+
+#[cfg(feature = "wal")]
+fn validate_generation_filename(filename: &str) -> Result<(), PersistenceError> {
+    let mut components = Path::new(filename).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(invalid_recovery_data(
+            "checkpoint manifest contains an unsafe generation filename",
+        )),
+    }
+}
+
+#[cfg(feature = "wal")]
+fn invalid_recovery_data(message: impl Into<String>) -> PersistenceError {
+    PersistenceError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
 }
 
 /// Restore engine state from a snapshot file.
@@ -305,6 +476,44 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_commits_a_verified_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": "reserve"})).unwrap();
+
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        let recovered = load_coordinated_checkpoint(dir.path()).unwrap();
+
+        assert_eq!(recovered.manifest, committed.manifest);
+        assert_eq!(recovered.snapshot, committed.snapshot);
+        assert_eq!(recovered.snapshot.wal_high_watermark, Some(1));
+        assert_eq!(recovered.anchor.sequence, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_rejects_a_torn_committed_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": "reserve"})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+
+        std::fs::write(
+            dir.path().join(&committed.manifest.snapshot_file),
+            b"{\"torn\":",
+        )
+        .unwrap();
+        assert!(load_coordinated_checkpoint(dir.path()).is_err());
+    }
+
+    #[test]
     #[cfg_attr(
         all(miri, windows),
         ignore = "miri/windows: tempfile directory creation is unsupported"
@@ -448,5 +657,30 @@ mod tests {
 
         assert_eq!(loaded.version, replaced.version);
         assert_eq!(loaded.tenants[0].initial_microcents, 1_500_000);
+    }
+
+    #[test]
+    fn concurrent_atomic_saves_do_not_share_a_temp_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("snapshot.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let engine = BudgetEngine::new();
+                    engine.ensure_tenant(&format!("desk-{index}"), 1_000_000);
+                    let snapshot = engine.snapshot();
+                    barrier.wait();
+                    save_snapshot(&snapshot, &path)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert_eq!(load_snapshot(&path).unwrap().tenants.len(), 1);
     }
 }
