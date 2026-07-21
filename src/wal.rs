@@ -73,7 +73,9 @@ pub enum WalError {
         expected: String,
         found: String,
     },
-    #[error("WAL duplicate sequence: {0}")]
+    /// A non-contiguous sequence was observed. The legacy variant name is
+    /// retained for patch-semver compatibility.
+    #[error("WAL sequence continuity violation: found {0}")]
     DuplicateSequence(u64),
     #[error("WAL audit failed at sequence {sequence}: {reason}")]
     AuditFailed { sequence: u64, reason: String },
@@ -1577,6 +1579,30 @@ mod tests {
 
         let result = verify_wal(&path);
         assert!(matches!(result, Err(WalError::DuplicateSequence(1))));
+    }
+
+    #[test]
+    fn sequence_gap_reports_a_continuity_violation() {
+        let (_dir, path) = temp_wal("sequence-gap");
+        {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            for cost in [1, 2] {
+                wal.append(TestDecision {
+                    model: "a".into(),
+                    cost,
+                })
+                .unwrap();
+            }
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let with_gap = content.replacen("\"sequence\":2", "\"sequence\":3", 1);
+        assert_ne!(content, with_gap);
+        std::fs::write(&path, with_gap).unwrap();
+
+        let error = verify_wal(&path).unwrap_err();
+        assert!(matches!(error, WalError::DuplicateSequence(3)));
+        assert!(error.to_string().contains("sequence continuity violation"));
     }
 
     #[test]

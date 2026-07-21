@@ -38,7 +38,9 @@ pub enum AsyncWalError {
         expected: String,
         found: String,
     },
-    #[error("WAL duplicate sequence: {0}")]
+    /// A non-contiguous sequence was observed. The legacy variant name is
+    /// retained for patch-semver compatibility.
+    #[error("WAL sequence continuity violation: found {0}")]
     DuplicateSequence(u64),
     #[error("WAL audit failed at sequence {sequence}: {reason}")]
     AuditFailed { sequence: u64, reason: String },

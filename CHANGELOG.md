@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact policy epoch, catalog epoch, and digest for every WAL record.
 - CLI `--json` verdicts use the JSON serializer so paths and OS errors containing
   control characters remain valid single-line JSON.
+- CLI policy and anchor preflight failures honor `--json`, including `chain` and
+  `audit` early-exit paths.
 - Sync and async WAL verification hashes the original JSON `data` lexeme rather
   than a deserialized/re-serialized value, eliminating key-order, whitespace,
   and numeric-lexeme ambiguity.
@@ -43,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added adversarial tests for catalog permutations, reserved sentinels, counter
   limits, receipt mutation, WAL watermark binding, checkpoint generations,
   concurrent snapshot isolation, policy rotation, and state-step overflow.
+- Sync and async WAL diagnostics describe both duplicate and skipped record IDs as
+  sequence continuity violations while retaining the v1 error variant for compatibility.
 
 ### Compatibility
 - Existing CALY-PROOF v1 constructors and artifact surfaces remain available for

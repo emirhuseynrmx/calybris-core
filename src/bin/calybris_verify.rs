@@ -352,7 +352,11 @@ fn main() -> ExitCode {
             let anchor = match args.anchor.as_deref().map(load_anchor) {
                 Some(Ok(anchor)) => Some(anchor),
                 Some(Err(error)) => {
-                    eprintln!("error: {error}");
+                    if args.json {
+                        emit_json("chain", false, &format!("anchor: {error}"));
+                    } else {
+                        eprintln!("error: {error}");
+                    }
                     return ExitCode::FAILURE;
                 }
                 None => None,
@@ -382,7 +386,11 @@ fn main() -> ExitCode {
             let anchor = match args.anchor.as_deref().map(load_anchor) {
                 Some(Ok(anchor)) => Some(anchor),
                 Some(Err(error)) => {
-                    eprintln!("error: {error}");
+                    if args.json {
+                        emit_json("audit", false, &format!("anchor: {error}"));
+                    } else {
+                        eprintln!("error: {error}");
+                    }
                     return ExitCode::FAILURE;
                 }
                 None => None,

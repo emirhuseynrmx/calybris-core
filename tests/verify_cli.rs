@@ -122,6 +122,54 @@ fn json_verdict_escapes_control_characters() {
 }
 
 #[test]
+fn chain_json_reports_anchor_load_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("missing.wal.jsonl");
+    let anchor_path = dir.path().join("missing\nanchor.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_calybris-verify"))
+        .args([
+            "chain",
+            wal_path.to_str().unwrap(),
+            "--anchor",
+            anchor_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("run calybris-verify");
+
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty(), "JSON mode wrote plain stderr");
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["command"], "chain");
+    assert_eq!(verdict["ok"], false);
+    assert!(verdict["detail"].as_str().unwrap().contains("anchor:"));
+}
+
+#[test]
+fn audit_json_reports_anchor_load_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("missing.wal.jsonl");
+    let anchor_path = dir.path().join("missing\nanchor.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_calybris-verify"))
+        .args([
+            "audit",
+            wal_path.to_str().unwrap(),
+            "--anchor",
+            anchor_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("run calybris-verify");
+
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty(), "JSON mode wrote plain stderr");
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["command"], "audit");
+    assert_eq!(verdict["ok"], false);
+    assert!(verdict["detail"].as_str().unwrap().contains("anchor:"));
+}
+
+#[test]
 fn audit_accepts_repeated_policy_artifacts_for_rotated_wal() {
     let dir = tempfile::tempdir().unwrap();
     let wal_path = dir.path().join("rotated.wal.jsonl");
