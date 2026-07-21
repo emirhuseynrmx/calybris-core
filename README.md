@@ -96,6 +96,7 @@ cargo install calybris-core   # ships the calybris-verify binary
 calybris-verify chain decisions.wal.jsonl
 calybris-verify chain decisions.wal.jsonl --anchor trusted-head.json
 calybris-verify audit decisions.wal.jsonl --policy policy.json
+calybris-verify audit rotated.wal.jsonl --policy policy-v1.json --policy policy-v2.json --json
 ```
 
 0.5.7 hardens the production trust boundary:
@@ -106,7 +107,8 @@ calybris-verify audit decisions.wal.jsonl --policy policy.json
   and rejects catalogs that cannot fit public decision counters.
 - Ledger digests bind WAL watermarks; coordinated checkpoints commit immutable
   snapshot/anchor generations behind one atomic manifest.
-- Audited WAL replay resolves the exact policy per record across policy rotations.
+- Library and CLI WAL replay resolve the exact policy per record across policy
+  rotations; CLI `--json` verdicts use standards-compliant JSON escaping.
 - `WalAnchor` detects clean suffix truncation when the trusted head is stored
   outside the WAL file.
 - Sync and async WAL writers enforce one active writer per file.

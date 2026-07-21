@@ -17,7 +17,8 @@ would break stored proofs and downstream Rust APIs.
   `load_coordinated_checkpoint`. The WAL is fsynced first, immutable snapshot and
   anchor generation files are written next, and the manifest is committed last.
 - Use `replay_audited_wal_with_resolver` when a WAL spans more than one policy or
-  catalog epoch.
+  catalog epoch. The verifier CLI accepts one `--policy` argument per historical
+  policy and resolves the exact epoch, catalog epoch, and digest per record.
 
 The application must place each logical ledger mutation and its corresponding
 WAL append behind the same admission boundary used for coordinated checkpoints.

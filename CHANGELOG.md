@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Atomic JSON persistence uses collision-resistant, exclusively created temporary
   files and cleans up abandoned files on every error path, including concurrent writers.
 - Policy-rotating audited WAL replay through a record-level `PolicyResolver`.
+- `calybris-verify audit` accepts repeated `--policy` artifacts and resolves the
+  exact policy epoch, catalog epoch, and digest for every WAL record.
+- CLI `--json` verdicts use the JSON serializer so paths and OS errors containing
+  control characters remain valid single-line JSON.
 - Sync and async WAL verification hashes the original JSON `data` lexeme rather
   than a deserialized/re-serialized value, eliminating key-order, whitespace,
   and numeric-lexeme ambiguity.

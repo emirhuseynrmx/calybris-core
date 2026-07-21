@@ -39,7 +39,20 @@ fn policy_models() -> Vec<KernelModel> {
 }
 
 fn policy() -> PolicySnapshot {
-    PolicySnapshot::try_new(3, 9, 9_600, 5_500, 3_500, 2, policy_models()).unwrap()
+    policy_at(3, 9)
+}
+
+fn policy_at(policy_epoch: u64, catalog_epoch: u64) -> PolicySnapshot {
+    PolicySnapshot::try_new(
+        policy_epoch,
+        catalog_epoch,
+        9_600,
+        5_500,
+        3_500,
+        2,
+        policy_models(),
+    )
+    .unwrap()
 }
 
 fn input(sequence: u64) -> KernelInput {
@@ -74,9 +87,13 @@ fn write_audited_wal(path: &std::path::Path, entries: u64) -> WalAnchor {
 }
 
 fn write_policy_artifact(path: &std::path::Path) {
+    write_policy_artifact_at(path, 3, 9);
+}
+
+fn write_policy_artifact_at(path: &std::path::Path, policy_epoch: u64, catalog_epoch: u64) {
     let artifact = serde_json::json!({
-        "policy_epoch": 3,
-        "catalog_epoch": 9,
+        "policy_epoch": policy_epoch,
+        "catalog_epoch": catalog_epoch,
         "hard_risk_limit_bps": 9_600,
         "minimum_confidence_bps": 5_500,
         "risk_penalty_multiplier_bps": 3_500,
@@ -84,6 +101,61 @@ fn write_policy_artifact(path: &std::path::Path) {
         "models": policy_models(),
     });
     std::fs::write(path, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
+}
+
+#[test]
+fn json_verdict_escapes_control_characters() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_policy = dir.path().join("missing\npolicy.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_calybris-verify"))
+        .args(["policy", missing_policy.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run calybris-verify");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let verdict: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("invalid JSON verdict: {error}; output={stdout:?}"));
+    assert_eq!(verdict["command"], "policy");
+    assert_eq!(verdict["ok"], false);
+    assert!(verdict["detail"].as_str().unwrap().contains('\n'));
+}
+
+#[test]
+fn audit_accepts_repeated_policy_artifacts_for_rotated_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("rotated.wal.jsonl");
+    let first_policy_path = dir.path().join("policy-3.json");
+    let second_policy_path = dir.path().join("policy-4.json");
+    let first = policy_at(3, 9);
+    let second = policy_at(4, 10);
+    let mut wal = WalWriter::open(&wal_path).unwrap();
+    for (sequence, snapshot) in [(1, &first), (2, &second)] {
+        let request = input(sequence);
+        wal.append_verified_audited(
+            snapshot,
+            request,
+            snapshot.prescribe(request),
+            "rotation-test",
+        )
+        .unwrap();
+    }
+    wal.flush_and_sync().unwrap();
+    drop(wal);
+    write_policy_artifact_at(&first_policy_path, 3, 9);
+    write_policy_artifact_at(&second_policy_path, 4, 10);
+
+    let (ok, out) = run(&[
+        "audit",
+        wal_path.to_str().unwrap(),
+        "--policy",
+        first_policy_path.to_str().unwrap(),
+        "--policy",
+        second_policy_path.to_str().unwrap(),
+    ]);
+    assert!(ok, "rotated audit failed: {out}");
+    assert!(out.contains("AUDIT OK: 2 entries"));
+    assert!(out.contains("kernel replay"));
 }
 
 fn run(args: &[&str]) -> (bool, String) {
