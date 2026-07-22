@@ -117,7 +117,6 @@ fn parse_hex<const N: usize>(field: &'static str, value: &str) -> Result<[u8; N]
         let nibble = |byte: u8| match byte {
             b'0'..=b'9' => Some(byte - b'0'),
             b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
             _ => None,
         };
         let high = nibble(pair[0]).ok_or_else(|| ReceiptError::Malformed {
@@ -519,6 +518,21 @@ mod tests {
             receipt_claims_digest(&receipt),
             Err(ReceiptError::Malformed {
                 field: "policy_digest_hex",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn receipt_rejects_uppercase_noncanonical_digest_encoding() {
+        let (snapshot, input, decision) = fixture();
+        let mut receipt = issue_receipt(&snapshot, input, &decision, anchors()).unwrap();
+        receipt.state.as_mut().unwrap().state_digest_before_hex = "AB".repeat(32);
+
+        assert!(matches!(
+            receipt_claims_digest(&receipt),
+            Err(ReceiptError::Malformed {
+                field: "state_digest_before_hex",
                 ..
             })
         ));

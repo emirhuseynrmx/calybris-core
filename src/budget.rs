@@ -15,9 +15,9 @@
 //! ```
 //!
 //! Holds after each **completed** reserve / commit / release / top-up and at reconciliation
-//! boundaries (`verify_conservation`, `prove_conservation`). Multi-step operations update
-//! `reserved_total`, `remaining`, and maps in separate steps — a snapshot taken mid-operation
-//! is not a linearizable transaction view and may show a transient imbalance.
+//! boundaries (`verify_conservation`, `prove_conservation`). Mutations take a shared
+//! `checkpoint_gate` guard and snapshots take its exclusive guard, so a snapshot waits for
+//! in-flight mutations and is a linearizable, conservation-balanced transaction view.
 //!
 //! - `remaining` — spendable balance right now
 //! - `reserved` — sum of active (uncommitted) holds
@@ -196,11 +196,14 @@ pub struct TenantLedger {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct BudgetSnapshot {
-    /// Monotonic recovery epoch assigned when this snapshot was captured.
+    /// Tagged recovery allocator fence assigned when this snapshot was captured.
     ///
     /// Recovery-aware snapshots encode the next reservation allocator position
     /// in this field. This preserves the public 0.5.x snapshot shape while
     /// preventing a restored engine from reusing a pre-checkpoint reservation ID.
+    /// The high tag bit means serialized values exceed JavaScript's exact integer
+    /// range; JavaScript consumers must use a BigInt-aware JSON parser and must not
+    /// round-trip this field through `Number`.
     pub version: u64,
     pub tenants: Vec<TenantLedger>,
     pub active_reservations: usize,
@@ -299,6 +302,28 @@ pub enum RestoreError {
     DuplicateTenant { tenant_id: String },
 }
 
+/// Error migrating a pre-0.5.7 snapshot into the recovery-aware format.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LegacySnapshotMigrationError {
+    #[error("snapshot is already recovery-aware")]
+    AlreadyRecoveryAware,
+    #[error("trusted next reservation ID must be in 1..={max}, found {value}")]
+    InvalidAllocatorFence { value: u64, max: u64 },
+    #[error("legacy snapshot is not recovery-eligible: {0}")]
+    InvalidSnapshot(#[from] RestoreError),
+}
+
+/// Precise format and ledger errors for recovery-aware restores.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RecoverySnapshotError {
+    #[error("legacy snapshot requires explicit migration with a trusted allocator fence")]
+    LegacySnapshotRequiresMigration,
+    #[error("invalid recovery allocator fence: {value}")]
+    InvalidAllocatorFence { value: u64 },
+    #[error("snapshot is not recovery-eligible: {0}")]
+    InvalidSnapshot(#[from] RestoreError),
+}
+
 const RECOVERY_SNAPSHOT_TAG: u64 = 1 << 63;
 const RECOVERY_ALLOCATOR_MASK: u64 = RECOVERY_SNAPSHOT_TAG - 1;
 
@@ -314,8 +339,12 @@ fn allocator_from_snapshot_version(version: u64) -> Result<u64, RestoreError> {
     Ok(next_id)
 }
 
-fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreError> {
+pub(crate) fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreError> {
     allocator_from_snapshot_version(snap.version)?;
+    validate_snapshot_ledger(snap)
+}
+
+fn validate_snapshot_ledger(snap: &BudgetSnapshot) -> Result<(), RestoreError> {
     if snap.active_reservations > 0 {
         return Err(RestoreError::ActiveReservations {
             count: snap.active_reservations,
@@ -362,6 +391,30 @@ fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreErr
     }
 }
 
+/// Convert an untagged 0.5.x snapshot into the recovery-aware 0.5.7 format.
+///
+/// `trusted_next_reservation_id` must be greater than every reservation ID that
+/// may have been issued before the snapshot was taken. That fence cannot be
+/// reconstructed from the legacy snapshot itself, so guessing is unsafe and
+/// this function fails closed when no positive fence is supplied.
+pub fn migrate_legacy_snapshot(
+    mut snapshot: BudgetSnapshot,
+    trusted_next_reservation_id: u64,
+) -> Result<BudgetSnapshot, LegacySnapshotMigrationError> {
+    if snapshot.version & RECOVERY_SNAPSHOT_TAG != 0 {
+        return Err(LegacySnapshotMigrationError::AlreadyRecoveryAware);
+    }
+    if trusted_next_reservation_id == 0 || trusted_next_reservation_id > RECOVERY_ALLOCATOR_MASK {
+        return Err(LegacySnapshotMigrationError::InvalidAllocatorFence {
+            value: trusted_next_reservation_id,
+            max: RECOVERY_ALLOCATOR_MASK,
+        });
+    }
+    validate_snapshot_ledger(&snapshot)?;
+    snapshot.version = RECOVERY_SNAPSHOT_TAG | trusted_next_reservation_id;
+    Ok(snapshot)
+}
+
 impl BudgetEngine {
     pub fn new() -> Self {
         Self {
@@ -400,7 +453,7 @@ impl BudgetEngine {
         }
     }
 
-    /// Current snapshot epoch (incremented on each [`snapshot`](Self::snapshot)).
+    /// Last emitted tagged recovery allocator fence, or zero before any snapshot.
     #[must_use]
     pub fn snapshot_version(&self) -> u64 {
         self.snapshot_version.load(Ordering::Acquire)
@@ -517,6 +570,27 @@ impl BudgetEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = restored_committed_total;
         Ok(())
+    }
+
+    /// Restore with precise recovery-format diagnostics.
+    ///
+    /// Use this at new trust boundaries. The compatibility
+    /// [`restore_from_snapshot`](Self::restore_from_snapshot) method retains
+    /// its 0.5.x error type and therefore cannot name the legacy-format case.
+    pub fn restore_from_recovery_snapshot(
+        &self,
+        snap: BudgetSnapshot,
+    ) -> Result<(), RecoverySnapshotError> {
+        if snap.version & RECOVERY_SNAPSHOT_TAG == 0 {
+            return Err(RecoverySnapshotError::LegacySnapshotRequiresMigration);
+        }
+        let fence = snap.version & RECOVERY_ALLOCATOR_MASK;
+        if fence == 0 {
+            return Err(RecoverySnapshotError::InvalidAllocatorFence { value: fence });
+        }
+        validate_snapshot_ledger(&snap)?;
+        self.restore_from_snapshot(snap)
+            .map_err(RecoverySnapshotError::InvalidSnapshot)
     }
 
     /// Initialize a tenant with a budget in microcents.
@@ -715,7 +789,7 @@ impl BudgetEngine {
 
     /// Verify conservation on a point-in-time snapshot.
     ///
-    /// Intended for audit/reconciliation after completed operations — not mid-flight CAS steps.
+    /// The snapshot gate waits for in-flight mutations before the frozen view is read.
     #[must_use]
     pub fn verify_conservation(&self) -> ConservationStatus {
         conservation_status_for_snapshot(&self.snapshot())
@@ -1334,6 +1408,37 @@ mod tests {
             BudgetSettlement::MissingReservation
         );
         assert_eq!(recovered.reserved_microcents("desk"), 100_000);
+    }
+
+    #[test]
+    fn legacy_snapshot_migration_requires_and_binds_a_trusted_allocator_fence() {
+        let source = BudgetEngine::new();
+        source.ensure_tenant("desk", 1_000_000);
+        let mut legacy = source.snapshot();
+        legacy.version = 7;
+
+        assert!(migrate_legacy_snapshot(legacy.clone(), 0).is_err());
+        let migrated = migrate_legacy_snapshot(legacy, 100).unwrap();
+        let recovered = BudgetEngine::new();
+        recovered.restore_from_snapshot(migrated).unwrap();
+        let (_, reservation_id) = recovered.try_reserve("desk", 100_000);
+
+        assert_eq!(reservation_id, Some(100));
+    }
+
+    #[test]
+    fn recovery_restore_reports_legacy_format_without_ledger_error_aliasing() {
+        let legacy = BudgetSnapshot {
+            version: 7,
+            tenants: vec![],
+            active_reservations: 0,
+            wal_high_watermark: None,
+        };
+        let engine = BudgetEngine::new();
+        assert_eq!(
+            engine.restore_from_recovery_snapshot(legacy),
+            Err(RecoverySnapshotError::LegacySnapshotRequiresMigration)
+        );
     }
 
     #[test]

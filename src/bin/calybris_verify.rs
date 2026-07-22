@@ -38,6 +38,7 @@ use calybris_core::wal::{
 };
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PolicyArtifact {
     policy_epoch: u64,
     catalog_epoch: u64,
@@ -50,7 +51,7 @@ struct PolicyArtifact {
 
 impl PolicyArtifact {
     fn into_snapshot(self) -> Result<PolicySnapshot, String> {
-        PolicySnapshot::try_new(
+        PolicySnapshot::try_new_trusted(
             self.policy_epoch,
             self.catalog_epoch,
             self.hard_risk_limit_bps,

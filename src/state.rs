@@ -3,17 +3,18 @@
 //! [`crate::kernel::PolicySnapshot::prescribe`] is memoryless — each decision
 //! is independently replayable. Real deployments carry state between
 //! decisions: accumulated exposure, budget, open positions. This module makes
-//! the *trajectory* provable: every decision records a digest of the domain
-//! state before and after it, chained so that a verifier can confirm not just
-//! each decision but the whole sequence — no state transition can be
-//! inserted, dropped, or reordered without breaking the chain.
+//! the state *linkage* provable: every decision records a digest of the domain
+//! state before and after it, chained so a verifier can detect inserted,
+//! dropped, or reordered transitions. Linkage verification does not replay or
+//! authenticate the embedded [`crate::verify::AuditBundle`]; callers must
+//! verify each bundle from its disclosed policy, input, and decision evidence.
 //!
 //! The caller supplies the canonical byte encoding of its state (integer
 //! fields in a fixed order; see the float rule in `docs/CALY_PROOF.md` §5.1).
 //! The digest layout is specified in `docs/CALY_PROOF.md` §6.
 //!
 //! ```
-//! use calybris_core::state::{StateChain, verify_complete_trajectory};
+//! use calybris_core::state::{StateChain, verify_complete_trajectory_linkage};
 //! # use calybris_core::kernel::*;
 //! # use calybris_core::state::stateful_audit_bundle;
 //! # let policy = PolicySnapshot::try_new(1, 1, 9_600, 5_500, 3_500, 2, vec![KernelModel {
@@ -33,7 +34,7 @@
 //! let transition = chain.advance(&999_000_u64.to_le_bytes());
 //! let proof = stateful_audit_bundle(&policy, input, &decision, &transition).unwrap();
 //!
-//! verify_complete_trajectory(
+//! verify_complete_trajectory_linkage(
 //!     &1_000_000_u64.to_le_bytes(),
 //!     1,
 //!     std::slice::from_ref(&proof),
@@ -184,6 +185,15 @@ pub enum TrajectoryError {
 /// step. New trust-boundary integrations should use
 /// [`verify_complete_trajectory`] or [`verify_trajectory_fragment`].
 pub fn verify_trajectory(bundles: &[StatefulAuditBundle]) -> Result<(), TrajectoryError> {
+    verify_trajectory_linkage(bundles)
+}
+
+/// Verify structural trajectory linkage only.
+///
+/// This checks step continuity, state-digest linkage, and the stored replay
+/// flag. It does **not** recompute the embedded audit digests or replay each
+/// decision because [`StatefulAuditBundle`] does not disclose those inputs.
+pub fn verify_trajectory_linkage(bundles: &[StatefulAuditBundle]) -> Result<(), TrajectoryError> {
     let mut previous: Option<&StatefulAuditBundle> = None;
     for bundle in bundles {
         if !bundle.audit.replay_valid {
@@ -220,6 +230,15 @@ pub fn verify_trajectory_fragment(
     anchor_digest_hex: &str,
     bundles: &[StatefulAuditBundle],
 ) -> Result<(), TrajectoryError> {
+    verify_trajectory_fragment_linkage(anchor_step, anchor_digest_hex, bundles)
+}
+
+/// Verify structural linkage for a non-empty fragment against a trusted anchor.
+pub fn verify_trajectory_fragment_linkage(
+    anchor_step: u64,
+    anchor_digest_hex: &str,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
     let first = bundles.first().ok_or(TrajectoryError::NonMonotonicStep {
         expected: anchor_step.saturating_add(1),
         found: anchor_step,
@@ -239,7 +258,7 @@ pub fn verify_trajectory_fragment(
     if first.state_digest_before_hex != anchor_digest_hex {
         return Err(TrajectoryError::BrokenChain { step: first.step });
     }
-    verify_trajectory(bundles)
+    verify_trajectory_linkage(bundles)
 }
 
 /// Verify a complete trajectory from trusted genesis through an expected final step.
@@ -252,8 +271,19 @@ pub fn verify_complete_trajectory(
     expected_final_step: u64,
     bundles: &[StatefulAuditBundle],
 ) -> Result<(), TrajectoryError> {
+    verify_complete_trajectory_linkage(initial_state_bytes, expected_final_step, bundles)
+}
+
+/// Verify structural linkage from trusted genesis through a trusted final step.
+///
+/// This is a linkage proof, not a per-bundle replay or signature verifier.
+pub fn verify_complete_trajectory_linkage(
+    initial_state_bytes: &[u8],
+    expected_final_step: u64,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
     let genesis_digest = digest_to_hex(&state_digest(0, initial_state_bytes));
-    verify_trajectory_fragment(0, &genesis_digest, bundles)?;
+    verify_trajectory_fragment_linkage(0, &genesis_digest, bundles)?;
     let final_step = bundles
         .last()
         .ok_or(TrajectoryError::NonMonotonicStep {
@@ -338,6 +368,8 @@ mod tests {
         assert_eq!(bundles.len(), 3);
         verify_trajectory(&bundles).unwrap();
         verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 3, &bundles).unwrap();
+        verify_trajectory_linkage(&bundles).unwrap();
+        verify_complete_trajectory_linkage(&1_000_000_u64.to_le_bytes(), 3, &bundles).unwrap();
     }
 
     #[test]

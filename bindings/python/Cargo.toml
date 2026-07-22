@@ -13,6 +13,7 @@ publish = false
 [lib]
 name = "calybris_core"
 crate-type = ["cdylib", "rlib"]
+doc = false
 
 [features]
 default = []

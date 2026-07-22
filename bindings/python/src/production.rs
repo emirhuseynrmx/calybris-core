@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use calybris_core_rs::digest::bytes_to_hex;
 use calybris_core_rs::persistence::{
-    checkpoint, checkpoint_with_wal, load_wal_anchor, recovery_plan, recovery_plan_against_anchor,
-    recovery_plan_keyed, recovery_plan_keyed_against_anchor, restore, save_wal_anchor,
+    checkpoint, checkpoint_with_wal, load_wal_anchor, migrate_legacy_snapshot_file, recovery_plan,
+    recovery_plan_against_anchor, recovery_plan_keyed, recovery_plan_keyed_against_anchor, restore,
+    save_wal_anchor,
 };
 use calybris_core_rs::provenance::{sign_policy, verify_signed_policy_with_key, SignedPolicy};
 use calybris_core_rs::receipt::{
@@ -118,9 +119,14 @@ fn exact_key<const N: usize>(field: &str, value: &[u8]) -> PyResult<[u8; N]> {
 }
 
 fn validate_hex32(field: &str, value: &str) -> PyResult<()> {
-    if value.len() != 64 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+    if value.len() != 64
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         return Err(ArtifactValidationError::new_err(format!(
-            "{field} must contain exactly 64 ASCII hex characters"
+            "{field} must contain exactly 64 lowercase ASCII hex characters"
         )));
     }
     Ok(())
@@ -1059,6 +1065,19 @@ impl PyPolicySnapshot {
 
 #[pymethods]
 impl PyBudgetEngine {
+    #[staticmethod]
+    fn migrate_legacy_snapshot_file<'py>(
+        py: Python<'py>,
+        source: PathBuf,
+        destination: PathBuf,
+        trusted_next_reservation_id: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let snapshot =
+            migrate_legacy_snapshot_file(&source, &destination, trusted_next_reservation_id)
+                .map_err(persistence_error)?;
+        json_value_to_dict(py, serde_json::to_value(snapshot).map_err(runtime_error)?)
+    }
+
     fn checkpoint<'py>(&self, py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
         let snapshot = checkpoint(&self.inner, &path).map_err(persistence_error)?;
         json_value_to_dict(py, serde_json::to_value(snapshot).map_err(runtime_error)?)

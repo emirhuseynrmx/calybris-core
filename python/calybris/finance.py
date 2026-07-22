@@ -8,12 +8,12 @@ systems, and any workflow that needs reserve/commit/release semantics.
 from __future__ import annotations
 
 from os import PathLike
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from . import _core
-from .types import STRICT_CONFIG
+from .types import I64, SHA256_HEX, STRICT_CONFIG, U64
 
 MICROCENTS_PER_CENT: int = _core.MICROCENTS_PER_CENT
 
@@ -21,12 +21,19 @@ MICROCENTS_PER_CENT: int = _core.MICROCENTS_PER_CENT
 class BudgetReservationResult(BaseModel):
     model_config = STRICT_CONFIG
 
-    status: str
-    reservation_id: int | None = None
-    remaining_microcents: int | None = None
-    required_microcents: int | None = None
-    current_reserved_microcents: int | None = None
-    max_reserved_microcents: int | None = None
+    status: Literal[
+        "reserved",
+        "insufficient",
+        "missing_tenant",
+        "missing_reservation",
+        "exposure_limit_exceeded",
+        "overflow",
+    ]
+    reservation_id: U64 | None = None
+    remaining_microcents: I64 | None = None
+    required_microcents: I64 | None = None
+    current_reserved_microcents: I64 | None = None
+    max_reserved_microcents: I64 | None = None
 
     @property
     def is_reserved(self) -> bool:
@@ -36,10 +43,18 @@ class BudgetReservationResult(BaseModel):
 class BudgetSettlementResult(BaseModel):
     model_config = STRICT_CONFIG
 
-    status: str
-    remaining_microcents: int | None = None
-    actual_microcents: int | None = None
-    returned_microcents: int | None = None
+    status: Literal[
+        "committed",
+        "released",
+        "overrun",
+        "invalid_amount",
+        "missing_reservation",
+        "missing_tenant",
+        "overflow",
+    ]
+    remaining_microcents: I64 | None = None
+    actual_microcents: I64 | None = None
+    returned_microcents: I64 | None = None
 
     @property
     def is_committed(self) -> bool:
@@ -53,18 +68,18 @@ class BudgetSettlementResult(BaseModel):
 class BudgetTopUpResult(BaseModel):
     model_config = STRICT_CONFIG
 
-    status: str
-    added_microcents: int | None = None
-    new_initial_microcents: int | None = None
-    remaining_microcents: int | None = None
+    status: Literal["topped_up", "missing_tenant", "invalid_amount", "overflow"]
+    added_microcents: I64 | None = None
+    new_initial_microcents: I64 | None = None
+    remaining_microcents: I64 | None = None
 
 
 class ConservationCheck(BaseModel):
     model_config = STRICT_CONFIG
 
-    status: str
+    status: Literal["balanced", "violation", "aggregate_overflow"]
     tenant_id: str | None = None
-    delta_microcents: int | None = None
+    delta_microcents: I64 | None = None
 
     @property
     def is_balanced(self) -> bool:
@@ -75,45 +90,45 @@ class TenantLedger(BaseModel):
     model_config = STRICT_CONFIG
 
     tenant_id: str
-    initial_microcents: int
-    remaining_microcents: int
-    reserved_microcents: int
-    committed_microcents: int
+    initial_microcents: I64
+    remaining_microcents: I64
+    reserved_microcents: I64
+    committed_microcents: I64
 
 
 class BudgetSnapshot(BaseModel):
     model_config = STRICT_CONFIG
 
-    version: int
-    active_reservations: int
-    wal_high_watermark: int | None = None
+    version: U64
+    active_reservations: U64
+    wal_high_watermark: U64 | None = None
     tenants: list[TenantLedger] = Field(default_factory=list)
 
 
 class ConservationProof(BaseModel):
     model_config = STRICT_CONFIG
 
-    ledger_digest_hex: str
-    snapshot_version: int
-    tenant_count: int
-    active_reservations: int
-    total_initial_microcents: int
-    total_committed_microcents: int
+    ledger_digest_hex: SHA256_HEX
+    snapshot_version: U64
+    tenant_count: U64
+    active_reservations: U64
+    total_initial_microcents: I64
+    total_committed_microcents: I64
     aggregate_totals_representable: bool
 
 
 class FinancialCertificate(BaseModel):
     model_config = STRICT_CONFIG
 
-    snapshot_version: int
-    ledger_digest_hex: str
-    tenant_count: int
-    active_reservations: int
+    snapshot_version: U64
+    ledger_digest_hex: SHA256_HEX
+    tenant_count: U64
+    active_reservations: U64
     conservation_balanced: bool
-    total_initial_microcents: int
-    total_committed_microcents: int
+    total_initial_microcents: I64
+    total_committed_microcents: I64
     aggregate_totals_representable: bool
-    committed_since_last_certificate: int
+    committed_since_last_certificate: I64
 
 
 class BudgetGuard:
@@ -207,6 +222,26 @@ class BudgetGuard:
     def restore(self, path: str | PathLike[str]) -> BudgetSnapshot:
         """Restore a validated snapshot during exclusive recovery."""
         return BudgetSnapshot.model_validate(self._engine.restore(path))
+
+    @staticmethod
+    def migrate_legacy_snapshot_file(
+        source: str | PathLike[str],
+        destination: str | PathLike[str],
+        trusted_next_reservation_id: int,
+    ) -> BudgetSnapshot:
+        """Migrate an untagged snapshot to a distinct recovery-aware file.
+
+        The allocator fence must come from trusted durable history and be
+        greater than every reservation ID previously issued. It must never be
+        guessed from the legacy snapshot itself.
+        """
+        return BudgetSnapshot.model_validate(
+            _core.BudgetEngine.migrate_legacy_snapshot_file(
+                source,
+                destination,
+                trusted_next_reservation_id,
+            )
+        )
 
     def verify_conservation(self) -> ConservationCheck:
         return ConservationCheck.model_validate(self._engine.verify_conservation())

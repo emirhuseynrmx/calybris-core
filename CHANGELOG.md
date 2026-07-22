@@ -17,10 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recovery-aware snapshot versions encode the next reservation allocator
   position; restore rejects untagged legacy snapshots, preventing
   delayed-settlement ABA without changing the public 0.5.x snapshot shape.
+- Explicit Rust and Python legacy-snapshot migration writes only to a distinct
+  atomic output file and requires a caller-supplied durable allocator fence.
+- Recovery-aware restore diagnostics distinguish legacy-format migration from
+  ledger-value failures while preserving the original compatibility API.
 - Linearizable budget snapshots during concurrent reserve, commit, release, top-up,
   and tenant mutations.
+- Checkpoint commits reject active or otherwise unrestorable snapshots, and
+  recovery rejects a snapshot watermark beyond the verified WAL head.
 - Complete and anchored-fragment trajectory verifiers distinguish whole histories
   from valid but truncated fragments.
+- Explicit `*_trajectory_linkage` APIs state that trajectory verification is
+  structural and that per-bundle replay/authentication remains a separate step.
 - Generation-based coordinated checkpoints: WAL fsync, immutable snapshot and anchor
   files, then an atomically committed manifest verified on recovery.
 - Atomic JSON persistence uses collision-resistant, exclusively created temporary
@@ -44,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producer, replay claim, and lowercase digest encoding before WAL replay.
 - Strict Python schemas: unknown-field rejection, strict types, bounded Rust-width
   integers, literal schema versions, and lowercase SHA-256 digest validation.
+- Scoped certificate verification binds trusted state/WAL anchors; compatibility
+  certificate verification now also binds policy and catalog epochs.
+- `PolicyBuilder::build_trusted` preserves precise trust-boundary errors without
+  changing the legacy `BuildError` compatibility surface.
 
 ### Security
 - Financial certificates recompute conservation from the frozen snapshot and no
@@ -51,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python policy creation now uses the canonical trusted constructor.
 - Rust `PolicyBuilder` now uses the same trusted constructor and rejects
   non-canonical enabled flags.
+- Receipt, provenance, native Python anchor, and finance-model trust boundaries
+  consistently require canonical lowercase digest encodings and bounded values.
 - Commerce percentage-to-basis-point conversion uses decimal rounding instead of
   binary-float truncation.
 - Added adversarial tests for catalog permutations, reserved sentinels, counter

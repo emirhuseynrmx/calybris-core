@@ -152,11 +152,17 @@ def plan_recovery(
 
 
 def verify_state_trajectory(bundles: list[_core.StatefulAuditBundle]) -> None:
-    """Verify adjacency inside an unanchored compatibility fragment.
+    """Verify structural adjacency inside an unanchored compatibility fragment.
 
-    This does not prove genesis or an expected terminal step. New trust
-    boundaries should call :func:`verify_complete_state_trajectory`.
+    This does not replay or authenticate embedded audit bundles and does not
+    prove genesis or an expected terminal step. New code should prefer the
+    explicitly named :func:`verify_state_trajectory_linkage` surface.
     """
+    _core.verify_state_trajectory(bundles)
+
+
+def verify_state_trajectory_linkage(bundles: list[_core.StatefulAuditBundle]) -> None:
+    """Verify structural linkage only; per-bundle replay remains separate."""
     _core.verify_state_trajectory(bundles)
 
 
@@ -165,7 +171,7 @@ def verify_complete_state_trajectory(
     expected_final_step: int,
     bundles: list[_core.StatefulAuditBundle],
 ) -> None:
-    """Verify a non-empty trajectory from trusted genesis to a trusted final step."""
+    """Verify structural linkage from trusted genesis to a trusted final step."""
     _core.verify_complete_state_trajectory(
         initial_state_bytes,
         expected_final_step,
@@ -173,10 +179,28 @@ def verify_complete_state_trajectory(
     )
 
 
+def verify_complete_state_trajectory_linkage(
+    initial_state_bytes: bytes,
+    expected_final_step: int,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify complete structural linkage; per-bundle replay remains separate."""
+    verify_complete_state_trajectory(initial_state_bytes, expected_final_step, bundles)
+
+
 def verify_state_trajectory_fragment(
     anchor_step: int,
     anchor_digest_hex: str,
     bundles: list[_core.StatefulAuditBundle],
 ) -> None:
-    """Verify a non-empty trajectory fragment against a trusted anchor."""
+    """Verify structural linkage for a fragment against a trusted anchor."""
     _core.verify_state_trajectory_fragment(anchor_step, anchor_digest_hex, bundles)
+
+
+def verify_state_trajectory_fragment_linkage(
+    anchor_step: int,
+    anchor_digest_hex: str,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify anchored structural linkage; per-bundle replay remains separate."""
+    verify_state_trajectory_fragment(anchor_step, anchor_digest_hex, bundles)

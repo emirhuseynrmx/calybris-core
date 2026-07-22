@@ -332,3 +332,44 @@ fn policy_command_prints_canonical_digest() {
         calybris_core::digest::digest_to_hex(&calybris_core::digest::policy_digest(&policy())),
     );
 }
+
+#[test]
+fn policy_command_rejects_unknown_artifact_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy_path = dir.path().join("policy.json");
+    let artifact = serde_json::json!({
+        "policy_epoch": 3,
+        "catalog_epoch": 9,
+        "hard_risk_limit_bps": 9_600,
+        "minimum_confidence_bps": 5_500,
+        "risk_penalty_multiplier_bps": 3_500,
+        "latency_penalty_microunits_per_ms": 2,
+        "models": policy_models(),
+        "unsigned_claim": "must not be ignored",
+    });
+    std::fs::write(&policy_path, serde_json::to_string(&artifact).unwrap()).unwrap();
+
+    let (ok, _) = run(&["policy", policy_path.to_str().unwrap()]);
+    assert!(!ok);
+}
+
+#[test]
+fn policy_command_uses_trusted_policy_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy_path = dir.path().join("policy.json");
+    let mut models = policy_models();
+    models[0].model_id = 0;
+    let artifact = serde_json::json!({
+        "policy_epoch": 3,
+        "catalog_epoch": 9,
+        "hard_risk_limit_bps": 9_600,
+        "minimum_confidence_bps": 5_500,
+        "risk_penalty_multiplier_bps": 3_500,
+        "latency_penalty_microunits_per_ms": 2,
+        "models": models,
+    });
+    std::fs::write(&policy_path, serde_json::to_string(&artifact).unwrap()).unwrap();
+
+    let (ok, out) = run(&["policy", policy_path.to_str().unwrap()]);
+    assert!(!ok, "reserved model ID was accepted: {out}");
+}

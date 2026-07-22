@@ -232,6 +232,7 @@ inventory/capacity freshness, and an external audit.
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, trust boundaries, attackers |
 | [docs/KEY_MANAGEMENT.md](docs/KEY_MANAGEMENT.md) | HMAC / Ed25519 key custody and rotation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Throughput provenance and reproduction |
+| [docs/MIGRATING_0.5.5_TO_0.5.7.md](docs/MIGRATING_0.5.5_TO_0.5.7.md) | Fail-closed persisted-ledger migration and rollback |
 | [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) | Invariants I1-I10 and test mapping |
 | [docs/MIRI.md](docs/MIRI.md) | UB detection scope in CI |
 | [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |

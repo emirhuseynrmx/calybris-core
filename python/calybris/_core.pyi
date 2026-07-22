@@ -232,6 +232,12 @@ class BudgetEngine:
     """CAS reserve/commit/release ledger with conservation proofs."""
 
     def __init__(self) -> None: ...
+    @staticmethod
+    def migrate_legacy_snapshot_file(
+        source: str | PathLike[str],
+        destination: str | PathLike[str],
+        trusted_next_reservation_id: int,
+    ) -> dict[str, Any]: ...
     def ensure_tenant(self, tenant_id: str, budget_microcents: int) -> None: ...
     def set_max_reserved_microcents(
         self, tenant_id: str, max_microcents: int

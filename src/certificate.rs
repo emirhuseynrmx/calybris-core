@@ -132,9 +132,9 @@ pub enum CertificateError {
 }
 
 /// Verify a certificate against the disclosed policy, input, and decision:
-/// recomputes all three digests, confirms the decision replays, and checks
-/// the stored `replay_valid` flag. Signature verification is separate (see
-/// `verify_certificate_signature`.
+/// recomputes all three digests, binds the disclosed policy/catalog epochs,
+/// confirms the decision replays, and checks the stored `replay_valid` flag.
+/// Signature verification is separate (see `verify_certificate_signature`).
 pub fn verify_certificate(
     certificate: &DecisionCertificate,
     snapshot: &PolicySnapshot,
@@ -149,6 +149,11 @@ pub fn verify_certificate(
     if !certificate.replay_valid {
         return Err(CertificateError::ReplayFlagFalse);
     }
+    if certificate.policy_epoch != decision.policy_epoch
+        || certificate.catalog_epoch != decision.catalog_epoch
+    {
+        return Err(CertificateError::ReplayInvalid);
+    }
     if certificate.policy_digest_hex != digest_to_hex(&policy_digest(snapshot)) {
         return Err(CertificateError::PolicyDigestMismatch);
     }
@@ -160,6 +165,44 @@ pub fn verify_certificate(
     }
     if verify_decision(snapshot, input, decision) != VerifyResult::Valid {
         return Err(CertificateError::ReplayInvalid);
+    }
+    Ok(())
+}
+
+/// Why scoped certificate verification failed.
+///
+/// Unlike [`CertificateError`], this surface also binds the optional state and
+/// WAL anchors to caller-trusted values. The compatibility verifier
+/// [`verify_certificate`] intentionally verifies only policy/input/decision
+/// replay evidence.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CertificateScopedError {
+    #[error(transparent)]
+    Certificate(#[from] CertificateError),
+    #[error("state anchor mismatch")]
+    StateAnchorMismatch,
+    #[error("WAL anchor mismatch")]
+    WalAnchorMismatch,
+}
+
+/// Verify replay evidence and bind state/WAL anchors to trusted expectations.
+///
+/// Passing `None` requires the corresponding certificate anchor to be absent;
+/// an embedded anchor is never treated as self-authenticating evidence.
+pub fn verify_certificate_scoped(
+    certificate: &DecisionCertificate,
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: &KernelDecision,
+    expected_state: Option<&CertificateState>,
+    expected_wal: Option<&CertificateWal>,
+) -> Result<(), CertificateScopedError> {
+    verify_certificate(certificate, snapshot, input, decision)?;
+    if certificate.state.as_ref() != expected_state {
+        return Err(CertificateScopedError::StateAnchorMismatch);
+    }
+    if certificate.wal.as_ref() != expected_wal {
+        return Err(CertificateScopedError::WalAnchorMismatch);
     }
     Ok(())
 }
@@ -299,6 +342,88 @@ mod tests {
         assert_eq!(
             verify_certificate(&cert, &other, request, &decision),
             Err(CertificateError::PolicyDigestMismatch)
+        );
+    }
+
+    #[test]
+    fn certificate_verifier_binds_policy_and_catalog_epochs() {
+        let policy = policy();
+        let request = input();
+        let decision = policy.prescribe(request);
+        let certificate =
+            issue_certificate(&policy, request, &decision, CertificateAnchors::default()).unwrap();
+
+        let mut tampered = certificate.clone();
+        tampered.policy_epoch += 1;
+        assert!(verify_certificate(&tampered, &policy, request, &decision).is_err());
+
+        let mut tampered = certificate;
+        tampered.catalog_epoch += 1;
+        assert!(verify_certificate(&tampered, &policy, request, &decision).is_err());
+    }
+
+    #[test]
+    fn scoped_certificate_verifier_binds_state_and_wal_anchors() {
+        let policy = policy();
+        let request = input();
+        let decision = policy.prescribe(request);
+        let state = CertificateState {
+            step: 7,
+            state_digest_before_hex: "11".repeat(32),
+            state_digest_after_hex: "22".repeat(32),
+        };
+        let wal = CertificateWal {
+            sequence: 9,
+            entry_hash: "33".repeat(32),
+        };
+        let certificate = issue_certificate(
+            &policy,
+            request,
+            &decision,
+            CertificateAnchors {
+                state: Some(state.clone()),
+                wal: Some(wal.clone()),
+                signature: None,
+            },
+        )
+        .unwrap();
+
+        verify_certificate_scoped(
+            &certificate,
+            &policy,
+            request,
+            &decision,
+            Some(&state),
+            Some(&wal),
+        )
+        .unwrap();
+
+        let mut wrong_state = state.clone();
+        wrong_state.step += 1;
+        assert_eq!(
+            verify_certificate_scoped(
+                &certificate,
+                &policy,
+                request,
+                &decision,
+                Some(&wrong_state),
+                Some(&wal),
+            ),
+            Err(CertificateScopedError::StateAnchorMismatch)
+        );
+
+        let mut wrong_wal = wal;
+        wrong_wal.sequence += 1;
+        assert_eq!(
+            verify_certificate_scoped(
+                &certificate,
+                &policy,
+                request,
+                &decision,
+                Some(&state),
+                Some(&wrong_wal),
+            ),
+            Err(CertificateScopedError::WalAnchorMismatch)
         );
     }
 

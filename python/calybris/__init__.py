@@ -43,8 +43,11 @@ from calybris.audit import (
     replay_verify_audited_wal,
     verify_audited_wal,
     verify_complete_state_trajectory,
+    verify_complete_state_trajectory_linkage,
     verify_state_trajectory,
     verify_state_trajectory_fragment,
+    verify_state_trajectory_fragment_linkage,
+    verify_state_trajectory_linkage,
 )
 from calybris.builder import EngineConfig, InputBuilder, PolicyBuilder
 from calybris.engine import CalybrisEngine
@@ -131,8 +134,11 @@ __all__ = [
     "replay_verify_audited_wal",
     "plan_recovery",
     "verify_state_trajectory",
+    "verify_state_trajectory_linkage",
     "verify_complete_state_trajectory",
+    "verify_complete_state_trajectory_linkage",
     "verify_state_trajectory_fragment",
+    "verify_state_trajectory_fragment_linkage",
     # Typed models
     "ModelSpec",
     "Decision",
