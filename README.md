@@ -105,8 +105,9 @@ calybris-verify audit rotated.wal.jsonl --policy policy-v1.json --policy policy-
   state anchor, and WAL anchor as one fail-closed operation.
 - Trusted policy construction canonicalizes catalog order, reserves model ID 0,
   and rejects catalogs that cannot fit public decision counters.
-- Ledger digests bind WAL watermarks; coordinated checkpoints commit immutable
-  snapshot/anchor generations behind one atomic manifest.
+- Ledger digests bind WAL watermarks and reservation allocator state;
+  coordinated checkpoints commit immutable snapshot/anchor generations behind
+  one atomic manifest, with an additive loader that verifies the actual WAL.
 - Library and CLI WAL replay resolve the exact policy per record across policy
   rotations; CLI `--json` verdicts use standards-compliant JSON escaping.
 - `WalAnchor` detects clean suffix truncation when the trusted head is stored
@@ -119,12 +120,13 @@ calybris-verify audit rotated.wal.jsonl --policy policy-v1.json --policy policy-
 
 0.5.0 adds:
 
-- `state` — record `state_digest_before/after` per decision; `verify_trajectory`
-  rejects dropped, reordered, or forged transitions in a sequence.
+- `state` — record `state_digest_before/after` per decision;
+  `verify_complete_trajectory` binds genesis and the expected terminal step,
+  while `verify_trajectory` remains an unanchored compatibility-fragment check.
 - `provenance` (feature) — bind a policy digest to an Ed25519 signer and
   timestamp, non-transferable across policies.
-- `certificate` — bind the audit bundle, state trajectory, WAL position, and
-  signer into one fail-closed envelope.
+- `certificate` — CALY-PROOF v1 compatibility envelope; its optional signature
+  attests policy provenance only. Use signed receipts to bind full evidence.
 - Golden and conformance vectors pin the byte-exact contract, so an independent
   reimplementation can prove itself against a fixed reference.
 
@@ -143,14 +145,14 @@ proves trail *integrity*, not confidentiality, policy quality, or input truth.
 | `verify` | Full replay verification and audit bundles; fail-closed `verified_audit_bundle` |
 | `certificate` | Compatibility envelope for 0.5.0 certificate artifacts |
 | `receipt` | Canonical claims digest + `verify_receipt_full` binding replay, signature, state, and WAL evidence *(0.5.7)* |
-| `state` | Domain-state digest trajectories; `verify_trajectory` rejects dropped/reordered/forged steps *(0.5.0)* |
+| `state` | Domain-state trajectories; complete genesis/final-step verification plus anchored fragment verification |
 | `provenance` | Ed25519-signed policies, domain-separated *(0.5.0, feature)* |
 | `wal` | Hash-chained WAL; keyed HMAC, trusted head anchors, and single-writer enforcement |
 | `budget` | CAS reserve/commit/release; `remaining + reserved + committed == initial` (Loom + Miri) |
 | `finance` | Ledger digests, conservation proofs and certificates |
 | `proof` | Compatibility packaging for CALY-PROOF v1 attachments; new production integrations should use `receipt` |
 | `builder` / `config` | Hard-to-misuse constructors with validation |
-| `persistence` | fsync-backed snapshots plus generation-manifest coordinated WAL checkpoints |
+| `persistence` | Atomic snapshots, bounded artifact reads, and WAL-verified generation checkpoints; directory-fsync guarantee is platform-specific |
 | `async_wal` / `instrument` | Tokio WAL *(feature `async`)*, tracing spans *(feature `observability`)* |
 
 Ships a `calybris-verify` auditor CLI (`chain` / `audit` / `policy`, `--json`) so a

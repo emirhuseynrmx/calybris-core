@@ -285,7 +285,7 @@ impl PolicyBuilder {
     /// Build and validate the snapshot.
     ///
     /// Validates config, enforces `max_catalog_size`, then delegates to
-    /// [`PolicySnapshot::try_new`] for policy-level validation.
+    /// [`PolicySnapshot::try_new_trusted`] for canonical trust-boundary validation.
     pub fn build(self) -> Result<PolicySnapshot, BuildError> {
         self.config.validate()?;
         if self.models.len() > self.config.max_catalog_size {
@@ -294,7 +294,7 @@ impl PolicyBuilder {
                 max: self.config.max_catalog_size,
             });
         }
-        Ok(PolicySnapshot::try_new(
+        match PolicySnapshot::try_new_trusted(
             self.policy_epoch,
             self.catalog_epoch,
             self.config.hard_risk_limit_bps,
@@ -302,7 +302,23 @@ impl PolicyBuilder {
             self.config.risk_penalty_multiplier_bps,
             self.config.latency_penalty_microunits_per_ms,
             self.models,
-        )?)
+        ) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(crate::kernel::TrustPolicyError::Policy(error)) => Err(BuildError::Policy(error)),
+            Err(crate::kernel::TrustPolicyError::CatalogTooLarge { len, max }) => {
+                Err(BuildError::CatalogTooLarge { len, max })
+            }
+            Err(crate::kernel::TrustPolicyError::ReservedModelId) => Err(BuildError::Policy(
+                crate::kernel::PolicyError::DuplicateModelId { model_id: 0 },
+            )),
+            Err(crate::kernel::TrustPolicyError::InvalidEnabledFlag { value, .. }) => Err(
+                BuildError::Policy(crate::kernel::PolicyError::OutOfRangeBps {
+                    field: "model.enabled",
+                    value: u16::from(value),
+                    max: 1,
+                }),
+            ),
+        }
     }
 }
 
@@ -346,6 +362,38 @@ mod tests {
             .unwrap();
         assert_eq!(snap.policy_epoch, 7);
         assert_eq!(snap.models().len(), 2);
+    }
+
+    #[test]
+    fn policy_builder_rejects_reserved_model_id() {
+        let result = PolicyBuilder::new(crate::config::EngineConfig::new())
+            .model(ModelBuilder::new(0, 0).build())
+            .build();
+        assert!(matches!(
+            result,
+            Err(BuildError::Policy(
+                crate::kernel::PolicyError::DuplicateModelId { model_id: 0 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn policy_builder_rejects_noncanonical_enabled_flag() {
+        let mut model = ModelBuilder::new(1, 0).build();
+        model.enabled = 2;
+        let result = PolicyBuilder::new(crate::config::EngineConfig::new())
+            .model(model)
+            .build();
+        assert!(matches!(
+            result,
+            Err(BuildError::Policy(
+                crate::kernel::PolicyError::OutOfRangeBps {
+                    field: "model.enabled",
+                    value: 2,
+                    max: 1
+                }
+            ))
+        ));
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //! The digest layout is specified in `docs/CALY_PROOF.md` §6.
 //!
 //! ```
-//! use calybris_core::state::{StateChain, verify_trajectory};
+//! use calybris_core::state::{StateChain, verify_complete_trajectory};
 //! # use calybris_core::kernel::*;
 //! # use calybris_core::state::stateful_audit_bundle;
 //! # let policy = PolicySnapshot::try_new(1, 1, 9_600, 5_500, 3_500, 2, vec![KernelModel {
@@ -33,7 +33,11 @@
 //! let transition = chain.advance(&999_000_u64.to_le_bytes());
 //! let proof = stateful_audit_bundle(&policy, input, &decision, &transition).unwrap();
 //!
-//! verify_trajectory(std::slice::from_ref(&proof)).unwrap();
+//! verify_complete_trajectory(
+//!     &1_000_000_u64.to_le_bytes(),
+//!     1,
+//!     std::slice::from_ref(&proof),
+//! ).unwrap();
 //! ```
 
 use sha2::{Digest, Sha256};
@@ -171,13 +175,14 @@ pub enum TrajectoryError {
     ReplayInvalid { step: u64 },
 }
 
-/// Verify the linkage of a sequence of stateful proofs: steps increase by
+/// Verify the **unanchored fragment linkage** of stateful proofs: steps increase by
 /// one, every `before` digest equals the previous `after` digest, and no
 /// bundle carries a failed replay flag.
 ///
-/// This checks trajectory *linkage*. Recomputing the underlying decision and
-/// state digests additionally requires the policy artifact and the state
-/// byte encodings, exactly as in stateless verification.
+/// This compatibility API intentionally accepts an empty slice and does not
+/// prove that the fragment starts at genesis or reaches an expected final
+/// step. New trust-boundary integrations should use
+/// [`verify_complete_trajectory`] or [`verify_trajectory_fragment`].
 pub fn verify_trajectory(bundles: &[StatefulAuditBundle]) -> Result<(), TrajectoryError> {
     let mut previous: Option<&StatefulAuditBundle> = None;
     for bundle in bundles {
@@ -202,6 +207,65 @@ pub fn verify_trajectory(bundles: &[StatefulAuditBundle]) -> Result<(), Trajecto
             }
         }
         previous = Some(bundle);
+    }
+    Ok(())
+}
+
+/// Verify a non-empty trajectory fragment against a trusted step/digest anchor.
+///
+/// `anchor_step` is the state step immediately before the first bundle and
+/// `anchor_digest_hex` is that state's canonical digest.
+pub fn verify_trajectory_fragment(
+    anchor_step: u64,
+    anchor_digest_hex: &str,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
+    let first = bundles.first().ok_or(TrajectoryError::NonMonotonicStep {
+        expected: anchor_step.saturating_add(1),
+        found: anchor_step,
+    })?;
+    let expected_first = anchor_step
+        .checked_add(1)
+        .ok_or(TrajectoryError::NonMonotonicStep {
+            expected: u64::MAX,
+            found: first.step,
+        })?;
+    if first.step != expected_first {
+        return Err(TrajectoryError::NonMonotonicStep {
+            expected: expected_first,
+            found: first.step,
+        });
+    }
+    if first.state_digest_before_hex != anchor_digest_hex {
+        return Err(TrajectoryError::BrokenChain { step: first.step });
+    }
+    verify_trajectory(bundles)
+}
+
+/// Verify a complete trajectory from trusted genesis through an expected final step.
+///
+/// This rejects empty, prefix-truncated, and suffix-truncated evidence. The
+/// caller supplies the canonical genesis state bytes and the expected terminal
+/// step from an independent trusted source.
+pub fn verify_complete_trajectory(
+    initial_state_bytes: &[u8],
+    expected_final_step: u64,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
+    let genesis_digest = digest_to_hex(&state_digest(0, initial_state_bytes));
+    verify_trajectory_fragment(0, &genesis_digest, bundles)?;
+    let final_step = bundles
+        .last()
+        .ok_or(TrajectoryError::NonMonotonicStep {
+            expected: 1,
+            found: 0,
+        })?
+        .step;
+    if final_step != expected_final_step {
+        return Err(TrajectoryError::NonMonotonicStep {
+            expected: expected_final_step,
+            found: final_step,
+        });
     }
     Ok(())
 }
@@ -273,6 +337,33 @@ mod tests {
         let bundles = trajectory(&[1_000_000, 999_000, 998_000, 990_000]);
         assert_eq!(bundles.len(), 3);
         verify_trajectory(&bundles).unwrap();
+        verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 3, &bundles).unwrap();
+    }
+
+    #[test]
+    fn complete_trajectory_rejects_empty_or_truncated_evidence() {
+        assert_eq!(
+            verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 1, &[]),
+            Err(TrajectoryError::NonMonotonicStep {
+                expected: 1,
+                found: 0
+            })
+        );
+        let bundles = trajectory(&[1_000_000, 999_000, 998_000, 990_000]);
+        assert_eq!(
+            verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 3, &bundles[..2]),
+            Err(TrajectoryError::NonMonotonicStep {
+                expected: 3,
+                found: 2
+            })
+        );
+        assert_eq!(
+            verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 3, &bundles[1..]),
+            Err(TrajectoryError::NonMonotonicStep {
+                expected: 1,
+                found: 2
+            })
+        );
     }
 
     #[test]

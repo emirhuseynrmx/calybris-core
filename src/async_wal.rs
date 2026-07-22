@@ -65,6 +65,7 @@ fn validate_hmac_key(key: &[u8]) -> Result<(), AsyncWalError> {
 
 /// A single entry in the async hash-chained WAL.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalEntry<T> {
     pub sequence: u64,
     pub previous_hash: String,
@@ -74,6 +75,7 @@ pub struct WalEntry<T> {
 
 /// Full audit record for async WAL.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditedRecord<M> {
     pub audit: crate::verify::AuditBundle,
     pub input: KernelInput,
@@ -496,6 +498,18 @@ mod tests {
     use super::*;
 
     const TEST_HMAC_KEY: &[u8; 32] = b"calybris-test-hmac-key-000000001";
+
+    #[test]
+    fn async_wal_artifacts_reject_unknown_fields() {
+        let entry_error =
+            serde_json::from_str::<WalEntry<serde_json::Value>>(r#"{"unknown":true}"#).unwrap_err();
+        assert!(entry_error.to_string().contains("unknown field"));
+
+        let record_error =
+            serde_json::from_str::<AuditedRecord<serde_json::Value>>(r#"{"unknown":true}"#)
+                .unwrap_err();
+        assert!(record_error.to_string().contains("unknown field"));
+    }
 
     fn assert_io_error<T>(
         result: Result<T, AsyncWalError>,

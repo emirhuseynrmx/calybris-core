@@ -230,11 +230,14 @@ fn cmd_audit(
         entries += 1;
         let record = &entry.data;
         let mut problems = Vec::new();
+        if let Err(error) = record.audit.validate_canonical() {
+            problems.push(format!("non-canonical audit bundle: {error}"));
+        }
         if digest_to_hex(&input_digest(&record.input)) != record.audit.input_digest_hex {
-            problems.push("input digest mismatch");
+            problems.push("input digest mismatch".to_string());
         }
         if digest_to_hex(&decision_digest(&record.decision)) != record.audit.decision_digest_hex {
-            problems.push("decision digest mismatch");
+            problems.push("decision digest mismatch".to_string());
         }
         let resolved_policy = policies
             .iter()
@@ -244,12 +247,12 @@ fn cmd_audit(
                     && digest == &record.audit.policy_digest_hex
             });
         if has_policies && resolved_policy.is_none() {
-            problems.push("policy not resolved");
+            problems.push("policy not resolved".to_string());
         }
         if let Some((_, _, _, policy)) = resolved_policy {
             use calybris_core::verify::{verify_decision, VerifyResult};
             if verify_decision(policy, record.input, &record.decision) != VerifyResult::Valid {
-                problems.push("kernel replay mismatch");
+                problems.push("kernel replay mismatch".to_string());
             }
         }
         if !problems.is_empty() {

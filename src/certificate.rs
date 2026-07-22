@@ -3,10 +3,12 @@
 //! 0.5.0 introduced three proof surfaces separately: the audit bundle
 //! (policy/input/decision digests + replay), the state trajectory
 //! (`state`), and signed policy provenance (`provenance`). A decision
-//! certificate binds them into a **single canonically-serializable object**
-//! that an auditor verifies in one call and that a system stores per
-//! decision — the notarized receipt for "this decision, under this policy,
-//! from this state, signed by this officer."
+//! certificate groups them into a **single canonically-serializable object**
+//! that an auditor can store per decision. The optional legacy signature
+//! proves policy provenance only; it does not sign the certificate's input,
+//! decision, state, or WAL fields. Use [`crate::receipt::DecisionReceipt`] and
+//! [`crate::receipt::verify_receipt_full`] when one signature must bind the
+//! complete decision evidence.
 //!
 //! Certificates are fail-closed: [`crate::certificate::issue_certificate`] returns one only when
 //! the decision replays exactly. Verification recomputes every digest from
@@ -55,8 +57,10 @@ pub struct CertificateSignature {
     pub signature_hex: String,
 }
 
-/// A single decision bound to its policy, input, state, log position, and
-/// (optionally) an accountable signer.
+/// CALY-PROOF v1 compatibility envelope for a decision and optional anchors.
+///
+/// The optional signer authenticates the policy digest, signer identity, and
+/// signing timestamp only. It is not a signature over the full certificate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
@@ -160,9 +164,10 @@ pub fn verify_certificate(
     Ok(())
 }
 
-/// Verify the accountable-signer signature on a certificate (feature
-/// `provenance`). Reconstructs the [`crate::provenance::SignedPolicy`] from
-/// the certificate's flattened fields and checks it against the disclosed
+/// Verify the legacy **policy-provenance** signature carried by a certificate
+/// (feature `provenance`). This does not authenticate the certificate's input,
+/// decision, state, or WAL fields. Reconstructs the
+/// [`crate::provenance::SignedPolicy`] and checks it against the disclosed
 /// policy; `trusted_key`, when supplied, pins the signer to a trust anchor.
 #[cfg(feature = "provenance")]
 pub fn verify_certificate_signature(

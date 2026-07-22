@@ -14,8 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signature verification, state anchoring, and WAL anchoring in one fail-closed call.
 - Recovery-aware ledger digests bind the exact WAL high watermark while preserving
   legacy digest identity for snapshots that carry no WAL claim.
+- Recovery-aware snapshot versions encode the next reservation allocator
+  position; restore rejects untagged legacy snapshots, preventing
+  delayed-settlement ABA without changing the public 0.5.x snapshot shape.
 - Linearizable budget snapshots during concurrent reserve, commit, release, top-up,
   and tenant mutations.
+- Complete and anchored-fragment trajectory verifiers distinguish whole histories
+  from valid but truncated fragments.
 - Generation-based coordinated checkpoints: WAL fsync, immutable snapshot and anchor
   files, then an atomically committed manifest verified on recovery.
 - Atomic JSON persistence uses collision-resistant, exclusively created temporary
@@ -33,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async WAL writers reject oversized payloads before hashing or allocating the
   encoded entry, matching the synchronous writer's resource-exhaustion guard.
 - Checked state-chain advancement that rejects step-counter exhaustion.
+- Bounded JSON persistence reads and an additive coordinated-checkpoint loader
+  that verifies the actual WAL against the committed anchor.
+- Canonical audit-bundle validation for schema, algorithm, proof version,
+  producer, replay claim, and lowercase digest encoding before WAL replay.
 - Strict Python schemas: unknown-field rejection, strict types, bounded Rust-width
   integers, literal schema versions, and lowercase SHA-256 digest validation.
 
@@ -40,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Financial certificates recompute conservation from the frozen snapshot and no
   longer trust a caller-provided boolean claim.
 - Python policy creation now uses the canonical trusted constructor.
+- Rust `PolicyBuilder` now uses the same trusted constructor and rejects
+  non-canonical enabled flags.
 - Commerce percentage-to-basis-point conversion uses decimal rounding instead of
   binary-float truncation.
 - Added adversarial tests for catalog permutations, reserved sentinels, counter
@@ -47,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concurrent snapshot isolation, policy rotation, and state-step overflow.
 - Sync and async WAL diagnostics describe both duplicate and skipped record IDs as
   sequence continuity violations while retaining the v1 error variant for compatibility.
+- Release tags are signed and version-matched before publish; security, SemVer,
+  SBOM, checksum, provenance, and attestation gates run on the exact tag commit.
 
 ### Compatibility
 - Existing CALY-PROOF v1 constructors and artifact surfaces remain available for
@@ -138,8 +151,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejection.
 - **Stateful decision proofs** (`state` module): `StateChain` tracks a domain-state
   digest trajectory; `stateful_audit_bundle` (fail-closed) records
-  `state_digest_before/after` per decision; `verify_trajectory` rejects dropped,
-  reordered, or forged transitions. New `calystt1\0` digest tag.
+  `state_digest_before/after` per decision; `verify_trajectory` checks adjacency
+  inside an unanchored fragment. Complete genesis/final-step verification was
+  added in 0.5.7. New `calystt1\0` digest tag.
 - **Signed policy provenance** (`provenance` feature, Ed25519): `sign_policy` /
   `verify_signed_policy` / `verify_signed_policy_with_key` bind a policy digest to an
   accountable signer and timestamp with domain separation (`calysig1\0`); signatures are
@@ -155,9 +169,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned byte-exactly and asserted by both the Rust (`tests/conformance_caly_proof.rs`) and Python
   (`python/tests/test_conformance_caly_proof.py`) suites — the contract a third-party
   reimplementation (Go, TypeScript, browser) proves itself against.
-- **Decision certificates** (`certificate` module): bind an audit bundle + optional state
-  trajectory + WAL position + Ed25519 signer into one canonically-serializable, fail-closed
-  envelope — the notarized receipt for a single decision. `issue_certificate` /
+- **Decision certificates** (`certificate` module): group an audit bundle + optional state
+  trajectory + WAL position + policy-provenance signer into one canonically-serializable,
+  fail-closed compatibility envelope. The signature covers policy provenance, not the
+  full certificate. `issue_certificate` /
   `verify_certificate` (digests + replay, always available, incl. wasm) and
   `verify_certificate_signature` (feature `provenance`).
 - **`calybris-verify --json`**: one-line machine-readable verdict on every verb for CI/compliance

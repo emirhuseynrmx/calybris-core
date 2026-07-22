@@ -127,6 +127,40 @@ mod loom_tests {
     }
 
     #[test]
+    fn exposure_cap_update_is_a_reservation_barrier_loom() {
+        loom::model(|| {
+            let engine = Arc::new(BudgetEngine::new());
+            engine.ensure_tenant("t1", 500_000);
+            engine.set_max_reserved_microcents("t1", 100_000);
+
+            let reserve_engine = Arc::clone(&engine);
+            let update_engine = Arc::clone(&engine);
+            let reserve = thread::spawn(move || {
+                let (_, id) = reserve_engine.try_reserve("t1", 80_000);
+                if let Some(id) = id {
+                    let _ = reserve_engine.release(id);
+                }
+            });
+            let update = thread::spawn(move || {
+                update_engine.set_max_reserved_microcents("t1", 10_000);
+            });
+            reserve.join().unwrap();
+            update.join().unwrap();
+
+            let (result, id) = engine.try_reserve("t1", 20_000);
+            assert!(matches!(
+                result,
+                BudgetReservation::ExposureLimitExceeded {
+                    max_reserved_microcents: 10_000,
+                    ..
+                }
+            ));
+            assert!(id.is_none());
+            assert_eq!(engine.verify_conservation(), ConservationStatus::Balanced);
+        });
+    }
+
+    #[test]
     fn concurrent_two_topups_preserve_conservation_loom() {
         loom::model(|| {
             let engine = Arc::new(BudgetEngine::new());

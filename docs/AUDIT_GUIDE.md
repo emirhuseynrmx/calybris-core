@@ -60,7 +60,7 @@ See [MIRI.md](MIRI.md) for CI-equivalent `--skip` filters and **why** those test
 | WAL tamper / chain | `src/wal.rs` | 14+ unit, 2 proptests |
 | Receipt claim/signature binding | `src/receipt.rs`, `tests/receipt_pipeline.rs` | 4+ tests |
 | Budget concurrency + proptest | `src/budget.rs` | 20+ unit, 2 proptests |
-| Budget Loom model tests | `tests/budget_loom.rs` | 7 Loom tests (`CALYBRIS_LOOM=1`, `loom-model`) |
+| Budget Loom model tests | `tests/budget_loom.rs` | 8 Loom tests (`CALYBRIS_LOOM=1`, `loom-model`) |
 | Verify / decode hex | `src/verify.rs` | 10+ unit, 1 proptest |
 | Digest sensitivity | `src/digest.rs` | 3+ unit, 1 proptest |
 | Finance conservation | `src/finance.rs` | 5 unit |
@@ -98,7 +98,9 @@ Keyed WAL deployments must supply at least 32 bytes of HMAC key material.
 For WAL completeness, persist `WalWriter::anchor()` outside the WAL and audit
 with `verify_wal_against_anchor` / `verify_wal_keyed_against_anchor` or
 `calybris-verify chain <wal> --anchor <anchor.json>`.
-Use `save_wal_anchor` for fsync-backed atomic anchor replacement.
+Use `save_wal_anchor` for file-fsynced atomic anchor replacement. Parent
+directory fsync failures are propagated on Unix; portable Rust does not expose
+the same directory-fsync guarantee on Windows.
 Crash recovery should use `recovery_plan_against_anchor` or
 `recovery_plan_keyed_against_anchor` when log completeness matters.
 For large logs, use `visit_verified_wal` / `visit_verified_wal_keyed` to

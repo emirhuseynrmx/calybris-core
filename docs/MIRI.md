@@ -21,7 +21,7 @@ Miri CI deliberately runs a **subset** of the test suite. Skips are intentional 
 |--------------------|--------|-------------------|
 | `wal::` unit tests | Real file I/O (`CreateFileW` / temp files) — Miri support is limited on some platforms | `audit_pipeline` integration test (E2E WAL under Miri on Linux CI) |
 | Proptests (`aggressive_mixed_ops_maintain_conservation`, `random_ops_maintain_conservation`, `builder_prescribe_never_panics`, `arbitrary_valid_configs_always_validate`, `config_roundtrips_through_builder`, `digests_stable_under_repeat`, `optimized_*`, `arbitrary_inputs_never_bypass_provider_fence`, `decode_hex32_rejects_non_hex_strings`) | Slow under MIR interpretation; property coverage is not Miri’s strength | `PROPTEST_CASES=10000` job in `security.yml` |
-| Concurrent budget tests | Miri is not designed for exhaustive thread interleaving | Loom (`budget_loom`, 7 scenarios) + `cargo test` stress tests |
+| Concurrent budget tests | Miri is not designed for exhaustive thread interleaving | Loom (`budget_loom`, 8 scenarios) + `cargo test` stress tests |
 | `prescriptive_kernel_latency_guard` | Release-only timing benchmark, not a correctness property | Ignored in normal `cargo test` too |
 
 WAL **hash-chain logic** that does not touch the filesystem still runs indirectly via `audit_pipeline`. Expanding Miri to every `wal::` unit test would duplicate that path with little extra assurance.

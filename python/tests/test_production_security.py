@@ -37,6 +37,22 @@ TRUSTED_PUBLIC_KEY = public_key_from_signing_key(SIGNING_KEY)
 WAL_KEY = b"python-production-wal-key-000001"
 
 
+def test_audited_wal_cleanup_does_not_mask_primary_exception() -> None:
+    class FailingInner:
+        def close(self, *, sync: bool) -> None:
+            assert sync
+            raise OSError("sync failed")
+
+    wal = object.__new__(AuditedWal)
+    wal._inner = FailingInner()  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="primary failure") as raised:
+        with wal:
+            raise ValueError("primary failure")
+
+    assert any("cleanup also failed" in note for note in raised.value.__notes__)
+
+
 def _policy():
     return (
         PolicyBuilder(EngineConfig(), policy_epoch=7, catalog_epoch=3)

@@ -458,6 +458,16 @@ def replay_verify_audited_wal(
 ) -> list[dict[str, Any]]: ...
 
 def verify_state_trajectory(bundles: list[StatefulAuditBundle]) -> None: ...
+def verify_complete_state_trajectory(
+    initial_state_bytes: bytes,
+    expected_final_step: int,
+    bundles: list[StatefulAuditBundle],
+) -> None: ...
+def verify_state_trajectory_fragment(
+    anchor_step: int,
+    anchor_digest_hex: str,
+    bundles: list[StatefulAuditBundle],
+) -> None: ...
 
 def plan_recovery(
     snapshot_path: str | PathLike[str],

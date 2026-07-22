@@ -116,7 +116,10 @@ fn build_state_trajectory(
 #[test]
 #[ignore = "release-only production torture benchmark"]
 fn production_torture_benchmark() {
-    println!("\nCalybris 0.5.5 production torture benchmark");
+    println!(
+        "\nCalybris {} production torture benchmark",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("==============================================================");
 
     let snapshot = policy(64);

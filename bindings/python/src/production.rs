@@ -12,7 +12,8 @@ use calybris_core_rs::receipt::{
     ReceiptWal,
 };
 use calybris_core_rs::state::{
-    stateful_audit_bundle, verify_trajectory, StateChain, StateTransition, StatefulAuditBundle,
+    stateful_audit_bundle, verify_complete_trajectory, verify_trajectory,
+    verify_trajectory_fragment, StateChain, StateTransition, StatefulAuditBundle,
 };
 use calybris_core_rs::wal::{
     replay_audited_wal_keyed, verify_wal, verify_wal_against_anchor, verify_wal_keyed,
@@ -932,6 +933,33 @@ fn verify_state_trajectory(bundles: Vec<PyStatefulAuditBundle>) -> PyResult<()> 
 }
 
 #[pyfunction]
+fn verify_complete_state_trajectory(
+    initial_state_bytes: &[u8],
+    expected_final_step: u64,
+    bundles: Vec<PyStatefulAuditBundle>,
+) -> PyResult<()> {
+    let bundles = bundles
+        .into_iter()
+        .map(|bundle| bundle.inner)
+        .collect::<Vec<_>>();
+    verify_complete_trajectory(initial_state_bytes, expected_final_step, &bundles)
+        .map_err(trajectory_error)
+}
+
+#[pyfunction]
+fn verify_state_trajectory_fragment(
+    anchor_step: u64,
+    anchor_digest_hex: &str,
+    bundles: Vec<PyStatefulAuditBundle>,
+) -> PyResult<()> {
+    let bundles = bundles
+        .into_iter()
+        .map(|bundle| bundle.inner)
+        .collect::<Vec<_>>();
+    verify_trajectory_fragment(anchor_step, anchor_digest_hex, &bundles).map_err(trajectory_error)
+}
+
+#[pyfunction]
 #[pyo3(signature = (snapshot_path, wal_path, *, hmac_key=None, anchor=None))]
 fn plan_recovery<'py>(
     py: Python<'py>,
@@ -1085,6 +1113,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_audited_wal, m)?)?;
     m.add_function(wrap_pyfunction!(replay_verify_audited_wal, m)?)?;
     m.add_function(wrap_pyfunction!(verify_state_trajectory, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_complete_state_trajectory, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_state_trajectory_fragment, m)?)?;
     m.add_function(wrap_pyfunction!(plan_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(public_key_from_signing_key, m)?)?;
     Ok(())

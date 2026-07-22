@@ -25,7 +25,6 @@ pub fn ledger_digest(snapshot: &BudgetSnapshot) -> [u8; 32] {
     hasher.update(snapshot.version.to_le_bytes());
     hasher.update((snapshot.tenants.len() as u64).to_le_bytes());
     hasher.update((snapshot.active_reservations as u64).to_le_bytes());
-
     let mut tenants: Vec<&TenantLedger> = snapshot.tenants.iter().collect();
     tenants.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
     for ledger in tenants {
@@ -71,6 +70,7 @@ fn snapshot_totals(snapshot: &BudgetSnapshot) -> Result<(i64, i64), Conservation
 /// Conservation proof binding a frozen ledger snapshot to its digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ConservationProof {
     pub ledger_digest_hex: String,
     pub snapshot_version: u64,
@@ -85,6 +85,7 @@ pub struct ConservationProof {
 /// Financial proof certificate binding a frozen snapshot to a ledger digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct FinancialCertificate {
     /// Snapshot epoch embedded in the frozen [`BudgetSnapshot`].
     pub snapshot_version: u64,
@@ -282,6 +283,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
+    fn financial_artifacts_reject_unknown_fields() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let proof = prove_conservation(&engine).unwrap();
+        let mut proof_json = serde_json::to_value(proof).unwrap();
+        proof_json["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<ConservationProof>(proof_json).is_err());
+
+        let certificate = certify_ledger(&engine);
+        let mut certificate_json = serde_json::to_value(certificate).unwrap();
+        certificate_json["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<FinancialCertificate>(certificate_json).is_err());
+    }
+
+    #[test]
     fn certify_snapshot_is_immutable_binding() {
         let engine = BudgetEngine::new();
         engine.ensure_tenant("desk", 1_000_000);
@@ -301,6 +318,15 @@ mod tests {
         first.wal_high_watermark = Some(41);
         let mut second = first.clone();
         second.wal_high_watermark = Some(42);
+        assert_ne!(ledger_digest(&first), ledger_digest(&second));
+    }
+
+    #[test]
+    fn ledger_digest_binds_reservation_allocator_state() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let first = engine.snapshot();
+        let second = engine.snapshot();
         assert_ne!(ledger_digest(&first), ledger_digest(&second));
     }
 

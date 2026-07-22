@@ -34,6 +34,7 @@ pub const MAX_CATALOG_MODELS: usize = u16::MAX as usize;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct KernelModel {
     /// Unique identifier for this model.
     pub model_id: u32,
@@ -374,6 +375,8 @@ pub enum TrustPolicyError {
     CatalogTooLarge { len: usize, max: usize },
     #[error("model_id 0 is reserved for decisions with no selected model")]
     ReservedModelId,
+    #[error("model_id {model_id} has non-canonical enabled flag {value}; expected 0 or 1")]
+    InvalidEnabledFlag { model_id: u32, value: u8 },
 }
 
 type RejectionCounts = RejectionHistogram;
@@ -572,6 +575,12 @@ impl PolicySnapshot {
         }
         if models.iter().any(|model| model.model_id == 0) {
             return Err(TrustPolicyError::ReservedModelId);
+        }
+        if let Some(model) = models.iter().find(|model| model.enabled > 1) {
+            return Err(TrustPolicyError::InvalidEnabledFlag {
+                model_id: model.model_id,
+                value: model.enabled,
+            });
         }
         models.sort_by_key(|model| model.model_id);
         let snapshot = Self::new_unchecked(

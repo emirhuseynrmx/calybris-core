@@ -97,7 +97,20 @@ class AuditedWal:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close(sync=True)
+        if exc is None:
+            self.close(sync=True)
+            return
+        try:
+            self.close(sync=True)
+        except BaseException as close_error:
+            note = f"AuditedWal cleanup also failed: {close_error!r}"
+            add_note = getattr(exc, "add_note", None)
+            if callable(add_note):
+                add_note(note)
+            else:  # Python 3.10 compatibility for the package's declared floor.
+                notes = list(getattr(exc, "__notes__", ()))
+                notes.append(note)
+                setattr(exc, "__notes__", notes)
 
 
 def verify_audited_wal(
@@ -139,5 +152,31 @@ def plan_recovery(
 
 
 def verify_state_trajectory(bundles: list[_core.StatefulAuditBundle]) -> None:
-    """Reject dropped, reordered, or disconnected state transitions."""
+    """Verify adjacency inside an unanchored compatibility fragment.
+
+    This does not prove genesis or an expected terminal step. New trust
+    boundaries should call :func:`verify_complete_state_trajectory`.
+    """
     _core.verify_state_trajectory(bundles)
+
+
+def verify_complete_state_trajectory(
+    initial_state_bytes: bytes,
+    expected_final_step: int,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify a non-empty trajectory from trusted genesis to a trusted final step."""
+    _core.verify_complete_state_trajectory(
+        initial_state_bytes,
+        expected_final_step,
+        bundles,
+    )
+
+
+def verify_state_trajectory_fragment(
+    anchor_step: int,
+    anchor_digest_hex: str,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify a non-empty trajectory fragment against a trusted anchor."""
+    _core.verify_state_trajectory_fragment(anchor_step, anchor_digest_hex, bundles)

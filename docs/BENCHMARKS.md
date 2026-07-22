@@ -56,7 +56,7 @@ cargo test --release --test production_torture --features full -- \
   --ignored --nocapture --test-threads=1
 ```
 
-## Production torture gate (0.5.5)
+## Production torture gate (0.5.7)
 
 The release gate is intentionally broader and more hostile than the README
 hot-path figure. It combines:

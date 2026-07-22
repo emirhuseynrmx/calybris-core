@@ -13,9 +13,13 @@ would break stored proofs and downstream Rust APIs.
 - Use decision receipts and `verify_receipt_full` at trust boundaries. This one
   call requires exact replay, canonical claims, a trusted signing key, and the
   expected state and WAL anchors.
-- Use `checkpoint_coordinated` and recover with
-  `load_coordinated_checkpoint`. The WAL is fsynced first, immutable snapshot and
-  anchor generation files are written next, and the manifest is committed last.
+- Use `checkpoint_coordinated`; inspect a committed generation with
+  `load_coordinated_checkpoint`, and recover across a trust boundary with
+  `load_and_verify_coordinated_checkpoint`. The latter additionally reads the
+  actual WAL and pins its exact head to the committed anchor.
+- Verify whole state histories with `verify_complete_trajectory`, supplying
+  trusted genesis bytes and the independently expected terminal step. The
+  original `verify_trajectory` proves adjacency inside an unanchored fragment.
 - Use `replay_audited_wal_with_resolver` when a WAL spans more than one policy or
   catalog epoch. The verifier CLI accepts one `--policy` argument per historical
   policy and resolves the exact epoch, catalog epoch, and digest per record.
@@ -36,14 +40,16 @@ and WAL anchoring.
 
 ## Digest compatibility
 
-Ledger snapshots carrying `wal_high_watermark=Some(...)` now bind that exact
-watermark into their digest. Snapshots with no WAL claim preserve the legacy v1
-digest bytes. This fixes recovery-claim ambiguity without silently changing all
-existing non-WAL artifacts.
+New recovery-aware snapshot versions encode and bind reservation allocator state;
+ledger digests additionally bind the exact WAL high watermark when present.
+Recovery rejects untagged legacy snapshots, preventing reservation-ID ABA after
+restart without changing the public 0.5.x `BudgetSnapshot` field set.
 
 ## Release evidence
 
 The release gate includes formatting, Clippy with warnings denied, the complete
 Rust feature test suite, patch-semver comparison against 0.5.5, installed-wheel
 Python tests, RustSec and dependency-policy checks, source SAST, package dry-runs,
-and artifact checksum/provenance verification.
+signed-tag and exact version parity checks, CycloneDX SBOMs, SHA-256 checksums,
+build metadata, and GitHub artifact attestations. These gates run on the exact
+tag commit before either publish job can start.

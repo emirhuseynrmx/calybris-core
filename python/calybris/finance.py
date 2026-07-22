@@ -194,7 +194,10 @@ class BudgetGuard:
         *,
         wal_sequence: int | None = None,
     ) -> BudgetSnapshot:
-        """Persist an fsync-backed snapshot, optionally bound to a WAL position."""
+        """Persist an atomically replaced, file-fsynced snapshot.
+
+        Parent-directory power-loss durability is platform-specific.
+        """
         if wal_sequence is None:
             raw = self._engine.checkpoint(path)
         else:

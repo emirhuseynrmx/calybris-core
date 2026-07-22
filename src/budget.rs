@@ -172,7 +172,7 @@ pub struct BudgetEngine {
     tenant_reserved_totals: Mutex<HashMap<Arc<str>, Arc<AtomicI64>>>,
     // u64::MAX is ~18 quintillion reservations — practically unreachable.
     next_id: AtomicU64,
-    /// Monotonic epoch incremented on each [`snapshot`](BudgetEngine::snapshot) call.
+    /// Last recovery-aware snapshot version emitted by [`snapshot`](BudgetEngine::snapshot).
     snapshot_version: AtomicU64,
     /// Cumulative committed total at last [`crate::finance::certify_ledger`] call.
     last_certified_committed_total: Mutex<i64>,
@@ -196,7 +196,11 @@ pub struct TenantLedger {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct BudgetSnapshot {
-    /// Monotonic epoch assigned when this snapshot was captured.
+    /// Monotonic recovery epoch assigned when this snapshot was captured.
+    ///
+    /// Recovery-aware snapshots encode the next reservation allocator position
+    /// in this field. This preserves the public 0.5.x snapshot shape while
+    /// preventing a restored engine from reusing a pre-checkpoint reservation ID.
     pub version: u64,
     pub tenants: Vec<TenantLedger>,
     pub active_reservations: usize,
@@ -295,7 +299,23 @@ pub enum RestoreError {
     DuplicateTenant { tenant_id: String },
 }
 
+const RECOVERY_SNAPSHOT_TAG: u64 = 1 << 63;
+const RECOVERY_ALLOCATOR_MASK: u64 = RECOVERY_SNAPSHOT_TAG - 1;
+
+fn allocator_from_snapshot_version(version: u64) -> Result<u64, RestoreError> {
+    let next_id = version & RECOVERY_ALLOCATOR_MASK;
+    if version & RECOVERY_SNAPSHOT_TAG == 0 || next_id == 0 {
+        return Err(RestoreError::NegativeLedgerField {
+            tenant_id: "<snapshot-metadata>".to_owned(),
+            field: "recovery-aware version tag",
+            value: i64::try_from(version).unwrap_or(i64::MAX),
+        });
+    }
+    Ok(next_id)
+}
+
 fn validate_snapshot_for_restore(snap: &BudgetSnapshot) -> Result<(), RestoreError> {
+    allocator_from_snapshot_version(snap.version)?;
     if snap.active_reservations > 0 {
         return Err(RestoreError::ActiveReservations {
             count: snap.active_reservations,
@@ -358,11 +378,15 @@ impl BudgetEngine {
         }
     }
 
-    /// Set a per-tenant exposure cap on open reservation holds (`0` removes the cap).
+    /// Set a per-tenant exposure cap on future reservation holds (`0` removes the cap).
+    ///
+    /// Updates are serialized against reservation admission. Lowering a cap is
+    /// prospective: existing holds are not revoked, while every admission that
+    /// linearizes after this method returns observes the new cap.
     pub fn set_max_reserved_microcents(&self, tenant_id: &str, max_microcents: i64) {
         let _mutation = self
             .checkpoint_gate
-            .read()
+            .write()
             .unwrap_or_else(|e| e.into_inner());
         let key: Arc<str> = Arc::from(tenant_id);
         let mut limits = self
@@ -435,6 +459,14 @@ impl BudgetEngine {
     /// operations may hold cloned state across a clear/replace and corrupt restored ledgers.
     pub fn restore_from_snapshot(&self, snap: BudgetSnapshot) -> Result<(), RestoreError> {
         validate_snapshot_for_restore(&snap)?;
+        let next_reservation_id = allocator_from_snapshot_version(snap.version)?;
+        let restored_committed_total = snap
+            .tenants
+            .iter()
+            .try_fold(0_i64, |total, tenant| {
+                total.checked_add(tenant.committed_microcents)
+            })
+            .unwrap_or(i64::MAX);
         let _checkpoint = self
             .checkpoint_gate
             .write()
@@ -459,10 +491,15 @@ impl BudgetEngine {
             .tenant_reserved_totals
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut exposure_limits = self
+            .max_reserved_microcents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         budgets.clear();
         initials.clear();
         committed.clear();
         reserved_totals.clear();
+        exposure_limits.clear();
         for ledger in snap.tenants {
             let key: Arc<str> = Arc::from(ledger.tenant_id.as_str());
             budgets.insert(
@@ -473,7 +510,12 @@ impl BudgetEngine {
             committed.insert(Arc::clone(&key), ledger.committed_microcents);
             reserved_totals.insert(key, Arc::new(AtomicI64::new(ledger.reserved_microcents)));
         }
+        self.next_id.store(next_reservation_id, Ordering::Release);
         self.snapshot_version.store(snap.version, Ordering::Release);
+        *self
+            .last_certified_committed_total
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = restored_committed_total;
         Ok(())
     }
 
@@ -652,7 +694,17 @@ impl BudgetEngine {
             });
         }
         tenants.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
-        let version = self.snapshot_version.fetch_add(1, Ordering::AcqRel) + 1;
+        // Reserve one allocator position for the snapshot itself. Encoding the
+        // resulting next ID in `version` gives recovery an exact, monotonic
+        // allocator fence without changing the public 0.5.x struct layout.
+        let next_reservation_id = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < RECOVERY_ALLOCATOR_MASK).then_some(current + 1)
+            })
+            .map_or(RECOVERY_ALLOCATOR_MASK, |previous| previous + 1);
+        let version = RECOVERY_SNAPSHOT_TAG | next_reservation_id;
+        self.snapshot_version.store(version, Ordering::Release);
         BudgetSnapshot {
             version,
             tenants,
@@ -748,6 +800,26 @@ impl BudgetEngine {
             }
         }
 
+        // Allocate before debiting so allocator exhaustion cannot require a
+        // racy balance refund. Gaps after an insufficient debit are harmless;
+        // reservation identifiers are monotonic capabilities, not counters.
+        let id = match self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < RECOVERY_ALLOCATOR_MASK).then_some(current + 1)
+            }) {
+            Ok(id) => id,
+            Err(_) => {
+                reserved_total.fetch_sub(cost_microcents, Ordering::AcqRel);
+                return (
+                    BudgetReservation::Overflow {
+                        current_reserved_microcents: reserved_total.load(Ordering::Acquire),
+                    },
+                    None,
+                );
+            }
+        };
+
         match debit_if_available(&budget, cost_microcents) {
             Err(current) => {
                 reserved_total.fetch_sub(cost_microcents, Ordering::AcqRel);
@@ -760,7 +832,6 @@ impl BudgetEngine {
                 )
             }
             Ok(remaining) => {
-                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                 let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
                 reservations.insert(
                     id,
@@ -1238,6 +1309,51 @@ mod tests {
         assert_eq!(fresh.remaining_microcents("desk"), Some(910_000));
         assert_eq!(fresh.committed_microcents("desk"), Some(90_000));
         assert_eq!(fresh.verify_conservation(), ConservationStatus::Balanced);
+    }
+
+    #[test]
+    fn restore_preserves_reservation_id_monotonicity() {
+        let source = BudgetEngine::new();
+        source.ensure_tenant("desk", 1_000_000);
+        let (_, stale_id) = source.try_reserve("desk", 100_000);
+        let stale_id = stale_id.expect("source reservation");
+        assert!(matches!(
+            source.release(stale_id),
+            BudgetSettlement::Released { .. }
+        ));
+
+        let snapshot = source.snapshot();
+        let recovered = BudgetEngine::new();
+        recovered.restore_from_snapshot(snapshot).unwrap();
+        let (_, recovered_id) = recovered.try_reserve("desk", 100_000);
+        let recovered_id = recovered_id.expect("recovered reservation");
+
+        assert!(recovered_id > stale_id);
+        assert_eq!(
+            recovered.release(stale_id),
+            BudgetSettlement::MissingReservation
+        );
+        assert_eq!(recovered.reserved_microcents("desk"), 100_000);
+    }
+
+    #[test]
+    fn restore_replaces_all_recovery_sensitive_runtime_state() {
+        let source = BudgetEngine::new();
+        source.ensure_tenant("desk", 1_000_000);
+        let (_, id) = source.try_reserve("desk", 100_000);
+        source.commit(id.unwrap(), 80_000);
+        let snapshot = source.snapshot();
+
+        let recovered = BudgetEngine::new();
+        recovered.ensure_tenant("old", 1_000_000);
+        recovered.set_max_reserved_microcents("desk", 1);
+        assert_eq!(recovered.rotate_certificate_baseline(10), 10);
+        recovered.restore_from_snapshot(snapshot).unwrap();
+
+        assert_eq!(recovered.committed_since_last_certificate(), 0);
+        let (reservation, id) = recovered.try_reserve("desk", 100_000);
+        assert!(matches!(reservation, BudgetReservation::Reserved { .. }));
+        recovered.release(id.unwrap());
     }
 
     #[test]

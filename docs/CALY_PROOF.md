@@ -186,9 +186,11 @@ state_digest = SHA256("calystt1\0" || LE(step: u64) || state_bytes)
 
 where `state_bytes` is the caller-defined canonical encoding of the domain
 state (same integer-only guidance as §5.1). A stateful proof records
-`state_digest_before` and `state_digest_after`; a sequence of proofs is valid
-iff each entry's `before` equals the previous entry's `after` (with step 0 /
-`genesis` rules identical to §5) and each decision replays.
+`state_digest_before` and `state_digest_after`. Fragment linkage requires
+adjacent steps and matching before/after digests. A **complete** trajectory also
+requires a trusted genesis digest, first step `1`, and an independently trusted
+expected terminal step; otherwise a valid prefix or suffix fragment cannot be
+distinguished from the complete history.
 
 ## 7. Signed policy provenance (feature `provenance`)
 
@@ -210,7 +212,7 @@ policies, signers, and timestamps.
 
 ## 8. Decision receipt
 
-The 0.5.5 decision receipt binds the decision digests to optional state and WAL
+The 0.5.x decision receipt binds the decision digests to optional state and WAL
 evidence:
 
 ```text

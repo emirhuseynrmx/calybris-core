@@ -1,20 +1,14 @@
 # Build, verify, attest, and publish the Calybris Python distributions.
 #
 # The abi3-py310 build emits one wheel per platform for CPython 3.10+.
-# Tag pushes publish automatically. workflow_dispatch only publishes when the
-# operator explicitly sets publish=true.
+# Signed, version-matched tag pushes publish automatically. workflow_dispatch
+# builds and verifies a release candidate but never publishes it.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Publish artifacts to PyPI from the selected ref
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -39,6 +33,17 @@ jobs:
           toolchain: 1.85.0
           components: rustfmt, clippy
 
+      - name: Validate tag and manifest version contract
+        run: python scripts/release_contract.py
+
+      - name: Verify annotated tag signature
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag_object=$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{tag}")
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" --jq '.verification.verified')" = "true"
+
       - name: Install Python release test dependencies
         run: >
           python -m pip install
@@ -47,6 +52,29 @@ jobs:
           hypothesis==6.156.6
           pydantic==2.13.4
           typing-extensions==4.16.0
+          semgrep==1.170.0
+          bandit==1.9.4
+          pip-audit==2.10.1
+
+      - name: Test release contract
+        run: python -m pytest scripts/tests -q
+
+      - uses: taiki-e/install-action@39a94a55762594a042dd4e34891f325e509fe332 # cargo-audit
+
+      - uses: taiki-e/install-action@afc483d62172accfff644fa56e82b4dab50727fc # cargo-deny
+
+      - uses: taiki-e/install-action@39a94a55762594a042dd4e34891f325e509fe332
+        with:
+          tool: cargo-semver-checks@0.49.0
+
+      - name: Security and patch-SemVer gates on release commit
+        run: |
+          cargo audit
+          cargo deny check
+          cargo semver-checks check-release --baseline-version 0.5.5
+          semgrep scan --config p/rust --config p/python --config p/secrets --config p/security-audit --metrics off --error --exclude target .
+          bandit -r python/calybris python/calybris_commerce -q
+          pip-audit . --strict --progress-spinner off
 
       - name: Rust release gates
         run: |
@@ -59,7 +87,7 @@ jobs:
 
       - name: Build and test installed release wheel
         run: |
-          python -m maturin build --release --out dist
+          python -m maturin build --release --locked --out dist
           python -m pip install dist/calybris-*.whl --force-reinstall
           python -m pytest python/tests -q
 
@@ -106,7 +134,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist
+          args: --release --locked --out dist
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -122,6 +150,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
@@ -132,16 +162,33 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Validate distributions and generate checksums
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+
+      - uses: taiki-e/install-action@39a94a55762594a042dd4e34891f325e509fe332
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      - name: Validate distributions and generate provenance
         run: |
           python -m pip install twine==6.2.0
           python -m twine check dist/*
-          sha256sum dist/* | sort -k2 > SHA256SUMS
+          python scripts/release_contract.py --dist dist --provenance release-metadata/PROVENANCE.json
+          cargo cyclonedx -f json --all-features
+          mv calybris-core.cdx.json release-metadata/calybris-core.cdx.json
+          mv bindings/python/calybris-core-python.cdx.json release-metadata/calybris-python.cdx.json
+          sha256sum dist/* release-metadata/* | sort -k2 > release-metadata/SHA256SUMS
 
       - name: Attest release packages
         uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
         with:
           subject-path: "dist/*"
+
+      - name: Attest release metadata
+        uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
+        with:
+          subject-path: "release-metadata/*"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -150,14 +197,14 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-checksums
-          path: SHA256SUMS
+          name: release-metadata
+          path: release-metadata
 
   publish:
     name: Publish to PyPI
     needs: verify
     runs-on: ubuntu-latest
-    if: github.repository == 'emirhuseynrmx/calybris-core' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish))
+    if: github.repository == 'emirhuseynrmx/calybris-core' && startsWith(github.ref, 'refs/tags/')
     environment: pypi
     permissions:
       id-token: write
@@ -189,7 +236,7 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-checksums
+          name: release-metadata
           path: release-metadata
 
       - name: Create release record
@@ -198,6 +245,6 @@ jobs:
         run: >
           gh release create "${GITHUB_REF_NAME}"
           dist/*
-          release-metadata/SHA256SUMS
+          release-metadata/*
           --verify-tag
           --generate-notes

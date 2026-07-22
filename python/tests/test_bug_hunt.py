@@ -109,7 +109,7 @@ def test_property_kernel_input_bps_uses_decimal_half_up_rounding(
     )
     order = _standard_order(seq=7, return_risk_pct=return_risk, confidence_pct=confidence)
     ki = engine.kernel_input(order)
-    from decimal import Decimal, ROUND_HALF_UP
+    from decimal import ROUND_HALF_UP, Decimal
 
     def to_bps(value: float) -> int:
         return int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
