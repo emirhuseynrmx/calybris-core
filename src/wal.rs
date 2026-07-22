@@ -86,18 +86,12 @@ fn wal_io_error(kind: std::io::ErrorKind, message: impl Into<String>) -> WalErro
 }
 
 impl WalAnchor {
-    /// Verify an already chain-validated WAL head against this anchor.
-    pub fn verify_head(
-        &self,
-        found_sequence: u64,
-        found_hash: String,
-        keyed: bool,
-    ) -> Result<(u64, String), WalError> {
+    fn validate_metadata(&self, keyed: bool) -> Result<(), WalError> {
         if self.schema_version != WAL_ANCHOR_SCHEMA {
-            return Err(WalError::Io(std::io::Error::new(
+            return Err(wal_io_error(
                 std::io::ErrorKind::InvalidData,
                 format!("unknown WAL anchor schema: {}", self.schema_version),
-            )));
+            ));
         }
         if self.keyed != keyed {
             return Err(wal_io_error(
@@ -105,6 +99,17 @@ impl WalAnchor {
                 "WAL anchor keyed mode does not match verifier mode",
             ));
         }
+        Ok(())
+    }
+
+    /// Verify an already chain-validated WAL head against this anchor.
+    pub fn verify_head(
+        &self,
+        found_sequence: u64,
+        found_hash: String,
+        keyed: bool,
+    ) -> Result<(u64, String), WalError> {
+        self.validate_metadata(keyed)?;
         if found_sequence != self.sequence || found_hash != self.last_hash {
             return Err(wal_io_error(
                 std::io::ErrorKind::InvalidData,
@@ -787,6 +792,63 @@ pub fn verify_wal_keyed_against_anchor(
 ) -> Result<(u64, String), WalError> {
     let (sequence, hash) = verify_wal_keyed(path, key)?;
     verify_anchor(sequence, hash, anchor, true)
+}
+
+fn verify_wal_contains_anchor_inner(
+    path: &Path,
+    key: Option<&[u8]>,
+    anchor: &WalAnchor,
+) -> Result<(u64, String), WalError> {
+    anchor.validate_metadata(key.is_some())?;
+    let mut prefix_hash = (anchor.sequence == 0).then(|| "genesis".to_string());
+    let head =
+        visit_verified_wal_inner::<Box<serde_json::value::RawValue>, _>(path, key, |entry| {
+            if entry.sequence == anchor.sequence {
+                prefix_hash = Some(entry.entry_hash);
+            }
+        })?;
+    let found_hash = prefix_hash.ok_or_else(|| {
+        wal_io_error(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "WAL is shorter than trusted prefix anchor: expected sequence {}, found head {}",
+                anchor.sequence, head.0
+            ),
+        )
+    })?;
+    if found_hash != anchor.last_hash {
+        return Err(wal_io_error(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "WAL prefix anchor mismatch at sequence {}: expected hash {}, found hash {}",
+                anchor.sequence, anchor.last_hash, found_hash
+            ),
+        ));
+    }
+    Ok(head)
+}
+
+/// Chain-verify an unkeyed WAL and require it to contain a trusted prefix anchor.
+///
+/// Unlike [`verify_wal_against_anchor`], this accepts valid entries after the
+/// anchor and returns the verified current WAL head.
+pub fn verify_wal_contains_anchor(
+    path: &Path,
+    anchor: &WalAnchor,
+) -> Result<(u64, String), WalError> {
+    verify_wal_contains_anchor_inner(path, None, anchor)
+}
+
+/// Chain-verify a keyed WAL and require it to contain a trusted prefix anchor.
+///
+/// Unlike [`verify_wal_keyed_against_anchor`], this accepts valid entries after
+/// the anchor and returns the verified current WAL head.
+pub fn verify_wal_keyed_contains_anchor(
+    path: &Path,
+    key: &[u8],
+    anchor: &WalAnchor,
+) -> Result<(u64, String), WalError> {
+    verify_wal_contains_anchor_inner(path, Some(key), anchor)
 }
 
 /// Read a WAL file AND verify its chain integrity (unkeyed).

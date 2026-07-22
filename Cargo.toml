@@ -32,8 +32,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [features]
 default = ["wal"]
-serde = ["dep:serde", "dep:serde_json", "dep:tempfile", "dep:fs2"]
-wal = ["serde", "dep:file-id", "dep:hmac", "dep:subtle"]
+serde = ["dep:serde", "dep:serde_json", "dep:tempfile", "dep:fs2", "dep:file-id"]
+wal = ["serde", "dep:hmac", "dep:subtle"]
 async = ["wal", "dep:tokio"]
 observability = ["dep:tracing"]
 provenance = ["dep:ed25519-dalek"]

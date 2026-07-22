@@ -170,16 +170,50 @@ pub fn migrate_legacy_snapshot_file(
     destination: &Path,
     trusted_next_reservation_id: u64,
 ) -> Result<BudgetSnapshot, PersistenceError> {
-    if source == destination {
-        return Err(invalid_recovery_data(
-            "legacy snapshot migration requires a distinct destination path",
-        ));
-    }
+    ensure_distinct_migration_files(source, destination)?;
     let legacy = load_snapshot(source)?;
     let migrated = crate::budget::migrate_legacy_snapshot(legacy, trusted_next_reservation_id)
         .map_err(|error| invalid_recovery_data(error.to_string()))?;
     save_snapshot(&migrated, destination)?;
     Ok(migrated)
+}
+
+fn ensure_distinct_migration_files(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), PersistenceError> {
+    let canonical_source = std::fs::canonicalize(source)?;
+    let source_identity = file_id::get_file_id(&canonical_source)?;
+
+    match std::fs::metadata(destination) {
+        Ok(_) => {
+            let canonical_destination = std::fs::canonicalize(destination)?;
+            let destination_identity = file_id::get_file_id(&canonical_destination)?;
+            if canonical_source == canonical_destination || source_identity == destination_identity
+            {
+                return Err(invalid_recovery_data(
+                    "legacy snapshot migration requires a distinct destination file",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = destination
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let filename = destination.file_name().ok_or_else(|| {
+                invalid_recovery_data("legacy snapshot destination must name a file")
+            })?;
+            let normalized_destination = std::fs::canonicalize(parent)?.join(filename);
+            if canonical_source == normalized_destination {
+                return Err(invalid_recovery_data(
+                    "legacy snapshot migration requires a distinct destination file",
+                ));
+            }
+        }
+        Err(error) => return Err(PersistenceError::Io(error)),
+    }
+    Ok(())
 }
 
 /// Checkpoint engine state without WAL binding.
@@ -314,9 +348,9 @@ pub fn load_and_verify_coordinated_checkpoint(
     let checkpoint = load_coordinated_checkpoint(directory)?;
     match (checkpoint.anchor.keyed, hmac_key) {
         (true, Some(key)) => {
-            crate::wal::verify_wal_keyed_against_anchor(wal_path, key, &checkpoint.anchor)
+            crate::wal::verify_wal_keyed_contains_anchor(wal_path, key, &checkpoint.anchor)
         }
-        (false, None) => crate::wal::verify_wal_against_anchor(wal_path, &checkpoint.anchor),
+        (false, None) => crate::wal::verify_wal_contains_anchor(wal_path, &checkpoint.anchor),
         (true, None) => {
             return Err(invalid_recovery_data(
                 "checkpoint WAL is keyed but no HMAC key was supplied",
@@ -545,6 +579,101 @@ mod tests {
     }
 
     #[test]
+    fn legacy_snapshot_file_migration_rejects_normalized_source_alias() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_path = dir.path().join("legacy.json");
+        let alias_path = dir.path().join(".").join("legacy.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &source_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &alias_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_hard_link_source_alias() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_path = dir.path().join("legacy.json");
+        let alias_path = dir.path().join("legacy-hard-link.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &source_path).unwrap();
+        std::fs::hard_link(&source_path, &alias_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &alias_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_symlink_source_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let destination_path = dir.path().join("legacy.json");
+        let source_path = dir.path().join("legacy-link.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &destination_path).unwrap();
+        symlink(&destination_path, &source_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &destination_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_symlink_source_alias() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let destination_path = dir.path().join("legacy.json");
+        let source_path = dir.path().join("legacy-link.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &destination_path).unwrap();
+        if let Err(error) = symlink_file(&destination_path, &source_path) {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("could not create migration alias symlink: {error}");
+        }
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &destination_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_case_alias() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_path = dir.path().join("Legacy.JSON");
+        let alias_path = dir.path().join("legacy.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &source_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &alias_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
     #[cfg_attr(
         all(miri, windows),
         ignore = "miri/windows: tempfile directory creation is unsupported"
@@ -625,6 +754,106 @@ mod tests {
         assert_eq!(recovered.snapshot, committed.snapshot);
         assert_eq!(recovered.snapshot.wal_high_watermark, Some(1));
         assert_eq!(recovered.anchor.sequence, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_accepts_a_valid_wal_suffix_for_replay() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        wal.append(serde_json::json!({"event": 2})).unwrap();
+        wal.flush_and_sync().unwrap();
+
+        let verified = load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).unwrap();
+        let plan = recovery_plan(
+            &dir.path().join(&committed.manifest.snapshot_file),
+            &wal_path,
+        )
+        .unwrap();
+
+        assert_eq!(verified.manifest, committed.manifest);
+        assert_eq!(plan.entries_to_replay, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn keyed_coordinated_checkpoint_accepts_a_valid_wal_suffix_for_replay() {
+        const KEY: &[u8; 32] = b"calybris-test-hmac-key-000000001";
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal =
+            crate::wal::WalWriter::<serde_json::Value>::open_keyed(&wal_path, KEY).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        wal.append(serde_json::json!({"event": 2})).unwrap();
+        wal.flush_and_sync().unwrap();
+
+        let verified =
+            load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, Some(KEY)).unwrap();
+        let plan = recovery_plan_keyed(
+            &dir.path().join(&committed.manifest.snapshot_file),
+            &wal_path,
+            KEY,
+        )
+        .unwrap();
+
+        assert_eq!(verified.manifest, committed.manifest);
+        assert_eq!(plan.entries_to_replay, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_rejects_a_valid_chain_with_a_different_prefix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        drop(wal);
+
+        std::fs::remove_file(&wal_path).unwrap();
+        let mut replacement = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        replacement
+            .append(serde_json::json!({"event": "different-prefix"}))
+            .unwrap();
+        replacement
+            .append(serde_json::json!({"event": "valid-suffix"}))
+            .unwrap();
+        replacement.flush_and_sync().unwrap();
+
+        assert!(load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_rejects_a_tampered_wal_suffix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        wal.append(serde_json::json!({"event": 2})).unwrap();
+        wal.flush_and_sync().unwrap();
+        drop(wal);
+
+        let contents = std::fs::read_to_string(&wal_path).unwrap();
+        let tampered = contents.replacen("\"event\":2", "\"event\":9", 1);
+        assert_ne!(tampered, contents);
+        std::fs::write(&wal_path, tampered).unwrap();
+
+        assert!(load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).is_err());
     }
 
     #[test]

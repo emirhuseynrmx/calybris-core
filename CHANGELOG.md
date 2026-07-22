@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position; restore rejects untagged legacy snapshots, preventing
   delayed-settlement ABA without changing the public 0.5.x snapshot shape.
 - Explicit Rust and Python legacy-snapshot migration writes only to a distinct
-  atomic output file and requires a caller-supplied durable allocator fence.
+  atomic output file, rejects normalized, case, symlink, and hard-link aliases
+  of the source, and requires a caller-supplied durable allocator fence.
 - Recovery-aware restore diagnostics distinguish legacy-format migration from
   ledger-value failures while preserving the original compatibility API.
 - Linearizable budget snapshots during concurrent reserve, commit, release, top-up,
@@ -47,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoded entry, matching the synchronous writer's resource-exhaustion guard.
 - Checked state-chain advancement that rejects step-counter exhaustion.
 - Bounded JSON persistence reads and an additive coordinated-checkpoint loader
-  that verifies the actual WAL against the committed anchor.
+  that verifies the complete actual WAL against the committed checkpoint prefix
+  while allowing valid later entries to proceed to deterministic replay.
 - Canonical audit-bundle validation for schema, algorithm, proof version,
   producer, replay claim, and lowercase digest encoding before WAL replay.
 - Strict Python schemas: unknown-field rejection, strict types, bounded Rust-width

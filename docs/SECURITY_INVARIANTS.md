@@ -86,8 +86,8 @@ Snapshots take the checkpoint gate exclusively and are linearizable against rese
 
 ## I11 — Complete trajectory and coordinated recovery anchoring
 
-**Invariant:** A complete state trajectory is accepted only when it starts from a caller-trusted genesis digest and reaches an independently expected final step. A coordinated checkpoint is recovery-ready only after the actual WAL chain verifies against its committed anchor.
+**Invariant:** A complete state trajectory is accepted only when it starts from a caller-trusted genesis digest and reaches an independently expected final step. A coordinated checkpoint is recovery-ready only after the complete actual WAL chain verifies and contains the checkpoint's committed prefix anchor; valid later entries remain available for deterministic replay.
 
 **Code:** `src/state.rs` — `verify_complete_trajectory`, `verify_trajectory_fragment`; `src/persistence.rs` — `load_and_verify_coordinated_checkpoint`.
 
-**Tests:** `complete_trajectory_rejects_empty_or_truncated_evidence`, `coordinated_checkpoint_full_verification_rejects_a_truncated_wal`.
+**Tests:** `complete_trajectory_rejects_empty_or_truncated_evidence`, `coordinated_checkpoint_full_verification_rejects_a_truncated_wal`, `coordinated_checkpoint_accepts_a_valid_wal_suffix_for_replay`, and prefix/suffix tamper coverage.

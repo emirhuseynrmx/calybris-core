@@ -45,7 +45,8 @@ migrated = BudgetGuard.migrate_legacy_snapshot_file(
 
 The migration rejects active/ghost reservations, duplicate tenants, negative
 ledger values, conservation failures, an absent/invalid fence, an already-tagged
-snapshot, and in-place output.
+snapshot, and any destination that resolves to the source through path
+normalization, case folding, a symbolic link, or a hard link.
 
 ## JavaScript boundary
 

@@ -16,7 +16,9 @@ would break stored proofs and downstream Rust APIs.
 - Use `checkpoint_coordinated`; inspect a committed generation with
   `load_coordinated_checkpoint`, and recover across a trust boundary with
   `load_and_verify_coordinated_checkpoint`. The latter additionally reads the
-  actual WAL and pins its exact head to the committed anchor.
+  actual WAL, verifies the checkpoint's committed prefix anchor, and permits a
+  valid post-checkpoint suffix for deterministic replay. External latest-head
+  anchors continue to require exact head equality.
 - Verify whole state linkage with `verify_complete_trajectory_linkage`, supplying
   trusted genesis bytes and the independently expected terminal step. Linkage
   APIs detect missing/reordered state transitions but do not replay or
