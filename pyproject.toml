@@ -51,7 +51,7 @@ dev = [
   "hypothesis[cli]>=6.100",
   "ruff>=0.6",
   "mypy>=1.10",
-  "bandit>=1.9",
+  "bandit>=1.9.4",
   "pip-audit>=2.10",
 ]
 
