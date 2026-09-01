@@ -75,7 +75,7 @@ def test_provenance_rejects_untracked_files(
 ) -> None:
     commands: list[tuple[str, ...]] = []
 
-    def fake_command(root: Path, *command: str) -> str:
+    def fake_command(_root: Path, *command: str) -> str:
         commands.append(command)
         if command[:2] == ("git", "status"):
             return "?? generated.bin"

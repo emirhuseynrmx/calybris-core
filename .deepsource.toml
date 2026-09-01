@@ -9,9 +9,8 @@ exclude_patterns = [
 ]
 
 test_patterns = [
+  "**/tests/**",
   "tests/**",
-  "python/tests/**",
-  "scripts/tests/**",
   "fuzz/**",
 ]
 
