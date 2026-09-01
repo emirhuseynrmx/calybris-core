@@ -1,0 +1,27 @@
+version = 1
+
+# Examples, benchmarks and vector generators are illustrative, not shipped
+# library surface; style and complexity gates there report noise, not risk.
+# `scripts/tests` is excluded rather than listed under `test_patterns`, which
+# does not reach it: its pytest `assert` calls otherwise report as BAN-B101.
+exclude_patterns = [
+  "examples/**",
+  "benches/**",
+  "bindings/python/examples/**",
+  "scripts/tests/**",
+]
+
+test_patterns = [
+  "**/tests/**",
+  "tests/**",
+  "fuzz/**",
+]
+
+[[analyzers]]
+name = "rust"
+
+[[analyzers]]
+name = "python"
+
+[[analyzers]]
+name = "secrets"
