@@ -15,6 +15,12 @@ from typing import Any, Literal
 ALL_PROVIDERS: int
 ALL_REGIONS: int
 MICROCENTS_PER_CENT: int
+BUILD_COMMIT_SHA: str
+BUILD_TREE_SHA: str
+BUILD_SOURCE_DIGEST: str
+BUILD_CARGO_LOCK_SHA256: str
+BUILD_DIRTY: bool
+BUILD_IDENTITY_VERIFIED: bool
 
 ACTION_EXECUTE_REQUESTED: int
 ACTION_SUBSTITUTE: int
@@ -232,6 +238,12 @@ class BudgetEngine:
     """CAS reserve/commit/release ledger with conservation proofs."""
 
     def __init__(self) -> None: ...
+    @staticmethod
+    def migrate_legacy_snapshot_file(
+        source: str | PathLike[str],
+        destination: str | PathLike[str],
+        trusted_next_reservation_id: int,
+    ) -> dict[str, Any]: ...
     def ensure_tenant(self, tenant_id: str, budget_microcents: int) -> None: ...
     def set_max_reserved_microcents(
         self, tenant_id: str, max_microcents: int
@@ -372,6 +384,15 @@ class DecisionReceipt:
         decision: KernelDecision,
     ) -> None: ...
     def verify_signature(self, trusted_public_key: bytes) -> None: ...
+    def verify_full(
+        self,
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        trusted_public_key: bytes,
+        expected_state: ReceiptState,
+        expected_wal: ReceiptWal,
+    ) -> None: ...
     def verify_wal(self, sequence: int, entry_hash: str) -> None: ...
     def verify_state(
         self,
@@ -446,9 +467,21 @@ def replay_verify_audited_wal(
     snapshot: PolicySnapshot,
     *,
     hmac_key: bytes | None = None,
+    max_entries: int = 100_000,
+    max_total_bytes: int = 268_435_456,
 ) -> list[dict[str, Any]]: ...
 
 def verify_state_trajectory(bundles: list[StatefulAuditBundle]) -> None: ...
+def verify_complete_state_trajectory(
+    initial_state_bytes: bytes,
+    expected_final_step: int,
+    bundles: list[StatefulAuditBundle],
+) -> None: ...
+def verify_state_trajectory_fragment(
+    anchor_step: int,
+    anchor_digest_hex: str,
+    bundles: list[StatefulAuditBundle],
+) -> None: ...
 
 def plan_recovery(
     snapshot_path: str | PathLike[str],

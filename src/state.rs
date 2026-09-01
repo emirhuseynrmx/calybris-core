@@ -3,17 +3,18 @@
 //! [`crate::kernel::PolicySnapshot::prescribe`] is memoryless — each decision
 //! is independently replayable. Real deployments carry state between
 //! decisions: accumulated exposure, budget, open positions. This module makes
-//! the *trajectory* provable: every decision records a digest of the domain
-//! state before and after it, chained so that a verifier can confirm not just
-//! each decision but the whole sequence — no state transition can be
-//! inserted, dropped, or reordered without breaking the chain.
+//! the state *linkage* provable: every decision records a digest of the domain
+//! state before and after it, chained so a verifier can detect inserted,
+//! dropped, or reordered transitions. Linkage verification does not replay or
+//! authenticate the embedded [`crate::verify::AuditBundle`]; callers must
+//! verify each bundle from its disclosed policy, input, and decision evidence.
 //!
 //! The caller supplies the canonical byte encoding of its state (integer
 //! fields in a fixed order; see the float rule in `docs/CALY_PROOF.md` §5.1).
 //! The digest layout is specified in `docs/CALY_PROOF.md` §6.
 //!
 //! ```
-//! use calybris_core::state::{StateChain, verify_trajectory};
+//! use calybris_core::state::{StateChain, verify_complete_trajectory_linkage};
 //! # use calybris_core::kernel::*;
 //! # use calybris_core::state::stateful_audit_bundle;
 //! # let policy = PolicySnapshot::try_new(1, 1, 9_600, 5_500, 3_500, 2, vec![KernelModel {
@@ -33,7 +34,11 @@
 //! let transition = chain.advance(&999_000_u64.to_le_bytes());
 //! let proof = stateful_audit_bundle(&policy, input, &decision, &transition).unwrap();
 //!
-//! verify_trajectory(std::slice::from_ref(&proof)).unwrap();
+//! verify_complete_trajectory_linkage(
+//!     &1_000_000_u64.to_le_bytes(),
+//!     1,
+//!     std::slice::from_ref(&proof),
+//! ).unwrap();
 //! ```
 
 use sha2::{Digest, Sha256};
@@ -74,6 +79,13 @@ pub struct StateChain {
     last_digest: [u8; 32],
 }
 
+/// State-chain mutation errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum StateAdvanceError {
+    #[error("state trajectory step counter exhausted")]
+    StepOverflow,
+}
+
 impl StateChain {
     /// Anchor the chain at step 0 with the initial state.
     pub fn genesis(initial_state_bytes: &[u8]) -> Self {
@@ -86,16 +98,28 @@ impl StateChain {
     /// Record a transition to the next state. Returns the proof material to
     /// embed in the decision's audit bundle.
     pub fn advance(&mut self, next_state_bytes: &[u8]) -> StateTransition {
-        let step = self.step.saturating_add(1);
+        self.try_advance(next_state_bytes)
+            .expect("state trajectory step counter exhausted")
+    }
+
+    /// Record a transition, failing closed instead of repeating `u64::MAX`.
+    pub fn try_advance(
+        &mut self,
+        next_state_bytes: &[u8],
+    ) -> Result<StateTransition, StateAdvanceError> {
+        let step = self
+            .step
+            .checked_add(1)
+            .ok_or(StateAdvanceError::StepOverflow)?;
         let digest_before = self.last_digest;
         let digest_after = state_digest(step, next_state_bytes);
         self.step = step;
         self.last_digest = digest_after;
-        StateTransition {
+        Ok(StateTransition {
             step,
             digest_before,
             digest_after,
-        }
+        })
     }
 
     pub fn step(&self) -> u64 {
@@ -152,21 +176,36 @@ pub enum TrajectoryError {
     ReplayInvalid { step: u64 },
 }
 
-/// Verify the linkage of a sequence of stateful proofs: steps increase by
+/// Verify the **unanchored fragment linkage** of stateful proofs: steps increase by
 /// one, every `before` digest equals the previous `after` digest, and no
 /// bundle carries a failed replay flag.
 ///
-/// This checks trajectory *linkage*. Recomputing the underlying decision and
-/// state digests additionally requires the policy artifact and the state
-/// byte encodings, exactly as in stateless verification.
+/// This compatibility API intentionally accepts an empty slice and does not
+/// prove that the fragment starts at genesis or reaches an expected final
+/// step. New trust-boundary integrations should use
+/// [`verify_complete_trajectory`] or [`verify_trajectory_fragment`].
 pub fn verify_trajectory(bundles: &[StatefulAuditBundle]) -> Result<(), TrajectoryError> {
+    verify_trajectory_linkage(bundles)
+}
+
+/// Verify structural trajectory linkage only.
+///
+/// This checks step continuity, state-digest linkage, and the stored replay
+/// flag. It does **not** recompute the embedded audit digests or replay each
+/// decision because [`StatefulAuditBundle`] does not disclose those inputs.
+pub fn verify_trajectory_linkage(bundles: &[StatefulAuditBundle]) -> Result<(), TrajectoryError> {
     let mut previous: Option<&StatefulAuditBundle> = None;
     for bundle in bundles {
         if !bundle.audit.replay_valid {
             return Err(TrajectoryError::ReplayInvalid { step: bundle.step });
         }
         if let Some(previous) = previous {
-            let expected = previous.step.saturating_add(1);
+            let Some(expected) = previous.step.checked_add(1) else {
+                return Err(TrajectoryError::NonMonotonicStep {
+                    expected: u64::MAX,
+                    found: bundle.step,
+                });
+            };
             if bundle.step != expected {
                 return Err(TrajectoryError::NonMonotonicStep {
                     expected,
@@ -178,6 +217,85 @@ pub fn verify_trajectory(bundles: &[StatefulAuditBundle]) -> Result<(), Trajecto
             }
         }
         previous = Some(bundle);
+    }
+    Ok(())
+}
+
+/// Verify a non-empty trajectory fragment against a trusted step/digest anchor.
+///
+/// `anchor_step` is the state step immediately before the first bundle and
+/// `anchor_digest_hex` is that state's canonical digest.
+pub fn verify_trajectory_fragment(
+    anchor_step: u64,
+    anchor_digest_hex: &str,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
+    verify_trajectory_fragment_linkage(anchor_step, anchor_digest_hex, bundles)
+}
+
+/// Verify structural linkage for a non-empty fragment against a trusted anchor.
+pub fn verify_trajectory_fragment_linkage(
+    anchor_step: u64,
+    anchor_digest_hex: &str,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
+    let first = bundles.first().ok_or(TrajectoryError::NonMonotonicStep {
+        expected: anchor_step.saturating_add(1),
+        found: anchor_step,
+    })?;
+    let expected_first = anchor_step
+        .checked_add(1)
+        .ok_or(TrajectoryError::NonMonotonicStep {
+            expected: u64::MAX,
+            found: first.step,
+        })?;
+    if first.step != expected_first {
+        return Err(TrajectoryError::NonMonotonicStep {
+            expected: expected_first,
+            found: first.step,
+        });
+    }
+    if first.state_digest_before_hex != anchor_digest_hex {
+        return Err(TrajectoryError::BrokenChain { step: first.step });
+    }
+    verify_trajectory_linkage(bundles)
+}
+
+/// Verify a complete trajectory from trusted genesis through an expected final step.
+///
+/// This rejects empty, prefix-truncated, and suffix-truncated evidence. The
+/// caller supplies the canonical genesis state bytes and the expected terminal
+/// step from an independent trusted source.
+pub fn verify_complete_trajectory(
+    initial_state_bytes: &[u8],
+    expected_final_step: u64,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
+    verify_complete_trajectory_linkage(initial_state_bytes, expected_final_step, bundles)
+}
+
+/// Verify structural linkage from trusted genesis through a trusted final step.
+///
+/// This is a linkage proof, not a per-bundle replay or signature verifier.
+pub fn verify_complete_trajectory_linkage(
+    initial_state_bytes: &[u8],
+    expected_final_step: u64,
+    bundles: &[StatefulAuditBundle],
+) -> Result<(), TrajectoryError> {
+    let genesis_digest = digest_to_hex(&state_digest(0, initial_state_bytes));
+    verify_trajectory_fragment_linkage(0, &genesis_digest, bundles)?;
+    let final_step = bundles
+        .last()
+        .ok_or(TrajectoryError::NonMonotonicStep {
+            expected: 1,
+            found: 0,
+        })?
+        .step;
+    if final_step != expected_final_step {
+        return Err(TrajectoryError::NonMonotonicStep {
+            expected: expected_final_step,
+            found: final_step,
+        });
     }
     Ok(())
 }
@@ -249,6 +367,49 @@ mod tests {
         let bundles = trajectory(&[1_000_000, 999_000, 998_000, 990_000]);
         assert_eq!(bundles.len(), 3);
         verify_trajectory(&bundles).unwrap();
+        verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 3, &bundles).unwrap();
+        verify_trajectory_linkage(&bundles).unwrap();
+        verify_complete_trajectory_linkage(&1_000_000_u64.to_le_bytes(), 3, &bundles).unwrap();
+    }
+
+    #[test]
+    fn complete_trajectory_rejects_empty_or_truncated_evidence() {
+        assert_eq!(
+            verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 1, &[]),
+            Err(TrajectoryError::NonMonotonicStep {
+                expected: 1,
+                found: 0
+            })
+        );
+        let bundles = trajectory(&[1_000_000, 999_000, 998_000, 990_000]);
+        assert_eq!(
+            verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 3, &bundles[..2]),
+            Err(TrajectoryError::NonMonotonicStep {
+                expected: 3,
+                found: 2
+            })
+        );
+        assert_eq!(
+            verify_complete_trajectory(&1_000_000_u64.to_le_bytes(), 3, &bundles[1..]),
+            Err(TrajectoryError::NonMonotonicStep {
+                expected: 1,
+                found: 2
+            })
+        );
+    }
+
+    #[test]
+    fn state_chain_fails_closed_at_step_overflow() {
+        let mut chain = StateChain {
+            step: u64::MAX,
+            last_digest: [7; 32],
+        };
+        assert_eq!(
+            chain.try_advance(b"next"),
+            Err(StateAdvanceError::StepOverflow)
+        );
+        assert_eq!(chain.step(), u64::MAX);
+        assert_eq!(chain.last_digest(), [7; 32]);
     }
 
     #[test]

@@ -43,6 +43,42 @@ pre-trade admission are **reference mappings** onto one API, not three products.
 | You need hard gates (budget, risk, latency, region, capability) in your control plane | A hosted routing API or managed decision service |
 | Post-mortems and compliance need proof bundles, not log grep | Live market data, order matching, exchange connectivity |
 
+## Use cases
+
+Four reference mappings onto one kernel. Each is a runnable example in this
+repository, not a pitch.
+
+**Model and provider routing.** A gateway picks among premium, fast, and budget
+providers under quality, latency, risk, provider, and budget ceilings. Every
+decision is verified before it enters the audited WAL, so "why did this request
+get the premium model" is answered from the proof rather than from log
+archaeology.
+→ `cargo run --example llm_routing`
+
+**Pre-trade admission.** A desk runs a VWAP algo at the cash open. Each child
+order clears a policy gate (an eligible venue under risk, latency, quality, and
+fee caps) and an exposure gate (notional reserved against the desk budget,
+routing fees committed on admit). The ledger carries the conservation proof
+`remaining + reserved + committed == initial`, in checked integers. Calybris owns
+the two gates and the proof — not the OMS, the market-data feed, or the matching
+engine.
+→ `cargo run --example pretrade_guard`
+
+**Fulfillment and supplier routing.** 10,000 orders across 8 courier networks
+with distinct SLAs, regional coverage, and risk tolerances. Substitutions are
+recorded as decisions, so "why this courier, for this order" stays answerable
+months later.
+→ `python bindings/python/examples/orion_market.py`
+
+**Defending a policy change with numbers.** The same catalog evaluated under
+strict, medium, and relaxed profiles, reporting fulfillment and substitution
+rates, cost percentiles, batch and single-decision throughput, resident memory,
+and the audit success and tamper-detection counts for the resulting trail. Copy
+this one when a policy change needs evidence instead of intuition.
+→ `python bindings/python/examples/novamart_benchmark.py`
+
+The domain objects differ. The kernel, the digests, and the replay contract do not.
+
 ## Stability model
 
 | Layer | Status | Notes |
@@ -53,9 +89,11 @@ pre-trade admission are **reference mappings** onto one API, not three products.
 
 Rust still owns correctness and replay semantics; Python calls those exact Rust
 implementations rather than reimplementing security-sensitive logic. Starting
-with 0.5.5, the core Python package exposes the production trust boundary and is
+with 0.5.7, the core Python package exposes the production trust boundary and is
 tested as an installed abi3 wheel. The Python API remains pre-1.0, so pin minor
 versions even though its runtime integrity guarantees match the Rust core.
+See the [0.5.7 trust-release migration](docs/TRUST_RELEASE_0.5.7.md) for the
+canonical production path and CALY-PROOF v1 compatibility boundary.
 
 ## Quickstart (~5 minutes)
 
@@ -94,12 +132,20 @@ cargo install calybris-core   # ships the calybris-verify binary
 calybris-verify chain decisions.wal.jsonl
 calybris-verify chain decisions.wal.jsonl --anchor trusted-head.json
 calybris-verify audit decisions.wal.jsonl --policy policy.json
+calybris-verify audit rotated.wal.jsonl --policy policy-v1.json --policy policy-v2.json --json
 ```
 
-0.5.5 hardens the production trust boundary:
+0.5.7 hardens the production trust boundary:
 
-- `receipt` binds the decision, state evidence, WAL position, and optional
-  Ed25519 receipt signer into one canonical claims digest.
+- `receipt::verify_receipt_full` verifies replay, claims, trusted signature,
+  state anchor, and WAL anchor as one fail-closed operation.
+- Trusted policy construction canonicalizes catalog order, reserves model ID 0,
+  and rejects catalogs that cannot fit public decision counters.
+- Ledger digests bind WAL watermarks and reservation allocator state;
+  coordinated checkpoints commit immutable snapshot/anchor generations behind
+  one atomic manifest, with an additive loader that verifies the actual WAL.
+- Library and CLI WAL replay resolve the exact policy per record across policy
+  rotations; CLI `--json` verdicts use standards-compliant JSON escaping.
 - `WalAnchor` detects clean suffix truncation when the trusted head is stored
   outside the WAL file.
 - Sync and async WAL writers enforce one active writer per file.
@@ -110,12 +156,13 @@ calybris-verify audit decisions.wal.jsonl --policy policy.json
 
 0.5.0 adds:
 
-- `state` — record `state_digest_before/after` per decision; `verify_trajectory`
-  rejects dropped, reordered, or forged transitions in a sequence.
+- `state` — record `state_digest_before/after` per decision;
+  `verify_complete_trajectory` binds genesis and the expected terminal step,
+  while `verify_trajectory` remains an unanchored compatibility-fragment check.
 - `provenance` (feature) — bind a policy digest to an Ed25519 signer and
   timestamp, non-transferable across policies.
-- `certificate` — bind the audit bundle, state trajectory, WAL position, and
-  signer into one fail-closed envelope.
+- `certificate` — CALY-PROOF v1 compatibility envelope; its optional signature
+  attests policy provenance only. Use signed receipts to bind full evidence.
 - Golden and conformance vectors pin the byte-exact contract, so an independent
   reimplementation can prove itself against a fixed reference.
 
@@ -133,15 +180,15 @@ proves trail *integrity*, not confidentiality, policy quality, or input truth.
 | `digest` | Canonical tagged byte digests — policy / input / decision / ledger / state |
 | `verify` | Full replay verification and audit bundles; fail-closed `verified_audit_bundle` |
 | `certificate` | Compatibility envelope for 0.5.0 certificate artifacts |
-| `receipt` | Canonical claims digest + optional signature binding decision, state, and WAL evidence *(0.5.5)* |
-| `state` | Domain-state digest trajectories; `verify_trajectory` rejects dropped/reordered/forged steps *(0.5.0)* |
+| `receipt` | Canonical claims digest + `verify_receipt_full` binding replay, signature, state, and WAL evidence *(0.5.7)* |
+| `state` | Domain-state trajectories; complete genesis/final-step verification plus anchored fragment verification |
 | `provenance` | Ed25519-signed policies, domain-separated *(0.5.0, feature)* |
 | `wal` | Hash-chained WAL; keyed HMAC, trusted head anchors, and single-writer enforcement |
 | `budget` | CAS reserve/commit/release; `remaining + reserved + committed == initial` (Loom + Miri) |
 | `finance` | Ledger digests, conservation proofs and certificates |
-| `proof` | `ProofEnvelope`: policy + input + decision digests + WAL position + budget proof |
+| `proof` | Compatibility packaging for CALY-PROOF v1 attachments; new production integrations should use `receipt` |
 | `builder` / `config` | Hard-to-misuse constructors with validation |
-| `persistence` | fsync-backed snapshot save/load, crash `recovery_plan` |
+| `persistence` | Atomic snapshots, bounded artifact reads, and WAL-verified generation checkpoints; directory-fsync guarantee is platform-specific |
 | `async_wal` / `instrument` | Tokio WAL *(feature `async`)*, tracing spans *(feature `observability`)* |
 
 Ships a `calybris-verify` auditor CLI (`chain` / `audit` / `policy`, `--json`) so a
@@ -178,7 +225,7 @@ CodSpeed CI (Linux x86_64, release): ~**8.6M** `prescribe`/sec, ~115 ns/decision
 reproduction recipe are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); run
 `cargo bench --bench kernel_bench` on your own hardware.
 
-0.5.5 also carries a release-blocking production torture suite covering a
+0.5.7 carries a release-blocking production torture suite covering a
 64-model checked kernel, state trajectories, signed receipts, keyed audited WAL,
 suffix-truncation detection, contended budgets, and a 25,000-tenant ledger.
 
@@ -221,6 +268,7 @@ inventory/capacity freshness, and an external audit.
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, trust boundaries, attackers |
 | [docs/KEY_MANAGEMENT.md](docs/KEY_MANAGEMENT.md) | HMAC / Ed25519 key custody and rotation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Throughput provenance and reproduction |
+| [docs/MIGRATING_0.5.5_TO_0.5.7.md](docs/MIGRATING_0.5.5_TO_0.5.7.md) | Fail-closed persisted-ledger migration and rollback |
 | [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) | Invariants I1-I10 and test mapping |
 | [docs/MIRI.md](docs/MIRI.md) | UB detection scope in CI |
 | [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |

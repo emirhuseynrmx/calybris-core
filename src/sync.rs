@@ -7,11 +7,11 @@
 #[cfg(loom)]
 pub use loom::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 #[cfg(loom)]
-pub use loom::sync::Mutex;
+pub use loom::sync::{Mutex, RwLock};
 
 #[cfg(not(loom))]
 pub use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 #[cfg(not(loom))]
-pub use std::sync::Mutex;
+pub use std::sync::{Mutex, RwLock};
 
 pub use std::sync::Arc;

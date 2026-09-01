@@ -88,7 +88,9 @@ def test_property_batch_matches_sequential_under_bitmasks(req_caps: int, req_reg
     confidence=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
 )
 @settings(max_examples=300)
-def test_property_kernel_input_bps_matches_int_truncation(return_risk: float, confidence: float):
+def test_property_kernel_input_bps_uses_decimal_half_up_rounding(
+    return_risk: float, confidence: float
+):
     """OrderInput float→bps mapping must match what the kernel receives."""
     engine = EcomEngine(
         _policy_builder()
@@ -107,8 +109,13 @@ def test_property_kernel_input_bps_matches_int_truncation(return_risk: float, co
     )
     order = _standard_order(seq=7, return_risk_pct=return_risk, confidence_pct=confidence)
     ki = engine.kernel_input(order)
-    assert ki.risk_bps == int(return_risk * 100)
-    assert ki.confidence_bps == int(confidence * 100)
+    from decimal import ROUND_HALF_UP, Decimal
+
+    def to_bps(value: float) -> int:
+        return int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    assert ki.risk_bps == to_bps(return_risk)
+    assert ki.confidence_bps == to_bps(confidence)
 
 
 def test_route_batch_large_10k_matches_sequential():

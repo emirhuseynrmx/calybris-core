@@ -226,6 +226,21 @@ pub enum BuildError {
     CatalogTooLarge { len: usize, max: usize },
 }
 
+/// Precise trust-boundary errors from [`PolicyBuilder::build_trusted`].
+///
+/// [`BuildError`] is retained as the compatibility surface. This type avoids
+/// translating reserved identifiers or noncanonical flags into unrelated
+/// legacy policy errors.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TrustedBuildError {
+    #[error("config error: {0}")]
+    Config(#[from] crate::config::ConfigError),
+    #[error("catalog too large: {len} models exceeds max_catalog_size {max}")]
+    CatalogTooLarge { len: usize, max: usize },
+    #[error("trusted policy error: {0}")]
+    Trust(#[from] crate::kernel::TrustPolicyError),
+}
+
 /// Build a [`PolicySnapshot`] from config + models with validation.
 ///
 /// ```
@@ -285,16 +300,46 @@ impl PolicyBuilder {
     /// Build and validate the snapshot.
     ///
     /// Validates config, enforces `max_catalog_size`, then delegates to
-    /// [`PolicySnapshot::try_new`] for policy-level validation.
+    /// [`PolicySnapshot::try_new_trusted`] for canonical trust-boundary validation.
     pub fn build(self) -> Result<PolicySnapshot, BuildError> {
+        match self.build_trusted() {
+            Ok(snapshot) => Ok(snapshot),
+            Err(TrustedBuildError::Config(error)) => Err(BuildError::Config(error)),
+            Err(TrustedBuildError::CatalogTooLarge { len, max }) => {
+                Err(BuildError::CatalogTooLarge { len, max })
+            }
+            Err(TrustedBuildError::Trust(crate::kernel::TrustPolicyError::Policy(error))) => {
+                Err(BuildError::Policy(error))
+            }
+            Err(TrustedBuildError::Trust(crate::kernel::TrustPolicyError::CatalogTooLarge {
+                len,
+                max,
+            })) => Err(BuildError::CatalogTooLarge { len, max }),
+            Err(TrustedBuildError::Trust(crate::kernel::TrustPolicyError::ReservedModelId)) => Err(
+                BuildError::Policy(crate::kernel::PolicyError::DuplicateModelId { model_id: 0 }),
+            ),
+            Err(TrustedBuildError::Trust(
+                crate::kernel::TrustPolicyError::InvalidEnabledFlag { value, .. },
+            )) => Err(BuildError::Policy(
+                crate::kernel::PolicyError::OutOfRangeBps {
+                    field: "model.enabled",
+                    value: u16::from(value),
+                    max: 1,
+                },
+            )),
+        }
+    }
+
+    /// Build with precise trust-boundary error reporting.
+    pub fn build_trusted(self) -> Result<PolicySnapshot, TrustedBuildError> {
         self.config.validate()?;
         if self.models.len() > self.config.max_catalog_size {
-            return Err(BuildError::CatalogTooLarge {
+            return Err(TrustedBuildError::CatalogTooLarge {
                 len: self.models.len(),
                 max: self.config.max_catalog_size,
             });
         }
-        Ok(PolicySnapshot::try_new(
+        Ok(PolicySnapshot::try_new_trusted(
             self.policy_epoch,
             self.catalog_epoch,
             self.config.hard_risk_limit_bps,
@@ -346,6 +391,66 @@ mod tests {
             .unwrap();
         assert_eq!(snap.policy_epoch, 7);
         assert_eq!(snap.models().len(), 2);
+    }
+
+    #[test]
+    fn policy_builder_rejects_reserved_model_id() {
+        let result = PolicyBuilder::new(crate::config::EngineConfig::new())
+            .model(ModelBuilder::new(0, 0).build())
+            .build();
+        assert!(matches!(
+            result,
+            Err(BuildError::Policy(
+                crate::kernel::PolicyError::DuplicateModelId { model_id: 0 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn trusted_policy_builder_preserves_precise_trust_boundary_errors() {
+        let reserved = PolicyBuilder::new(crate::config::EngineConfig::new())
+            .model(ModelBuilder::new(0, 0).build())
+            .build_trusted();
+        assert!(matches!(
+            reserved,
+            Err(TrustedBuildError::Trust(
+                crate::kernel::TrustPolicyError::ReservedModelId
+            ))
+        ));
+
+        let mut model = ModelBuilder::new(1, 0).build();
+        model.enabled = 2;
+        let invalid_enabled = PolicyBuilder::new(crate::config::EngineConfig::new())
+            .model(model)
+            .build_trusted();
+        assert!(matches!(
+            invalid_enabled,
+            Err(TrustedBuildError::Trust(
+                crate::kernel::TrustPolicyError::InvalidEnabledFlag {
+                    model_id: 1,
+                    value: 2
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn policy_builder_rejects_noncanonical_enabled_flag() {
+        let mut model = ModelBuilder::new(1, 0).build();
+        model.enabled = 2;
+        let result = PolicyBuilder::new(crate::config::EngineConfig::new())
+            .model(model)
+            .build();
+        assert!(matches!(
+            result,
+            Err(BuildError::Policy(
+                crate::kernel::PolicyError::OutOfRangeBps {
+                    field: "model.enabled",
+                    value: 2,
+                    max: 1
+                }
+            ))
+        ));
     }
 
     #[test]

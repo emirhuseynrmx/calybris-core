@@ -58,6 +58,30 @@ jobs:
       - name: Integration audit pipeline
         run: cargo test --locked --test audit_pipeline
 
+  core-windows:
+    name: Core tests (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.85.0
+
+      - name: Cache cargo
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-1.85.0-cargo-${{ hashFiles('Cargo.lock') }}
+
+      # Path locking, file identity and symlink privileges differ on Windows, so
+      # the core suite runs here too instead of only on Linux.
+      - name: Test (workspace, all targets)
+        run: cargo test --locked --workspace --all-targets --all-features --exclude calybris-core-python
+
   stable:
     name: Stable
     runs-on: ubuntu-latest

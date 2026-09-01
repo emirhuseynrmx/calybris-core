@@ -35,6 +35,23 @@ def _policy_builder() -> SupplierPolicy:
     return SupplierPolicy(policy_epoch=1, catalog_epoch=1)
 
 
+def test_percentage_mapping_rounds_decimal_bps_instead_of_truncating():
+    policy = _policy_builder().add_supplier(
+        SupplierSpec(
+            supplier_id=1,
+            name="Precise",
+            reliability_pct=99.999,
+            risk_tolerance_pct=50.005,
+            sla_hours=24,
+            shipping_cost_microunits=1,
+            region_mask=REGION_TR_IST,
+        )
+    )
+    model = policy.models()[0]
+    assert model.quality_bps == 10_000
+    assert model.risk_ceiling_bps == 5_001
+
+
 def _standard_policy(**overrides) -> PolicySnapshot:
     base = dict(
         return_risk_limit_max_pct=40.0,
@@ -1006,7 +1023,7 @@ def test_property_tamper_detected_for_different_order(seq: int, other_seq: int):
     """verified_audit_bundle_for_order raises when the order doesn't match the decision."""
     engine = EcomEngine(_standard_policy())
     decision = engine.prescribe_raw(_standard_order(seq=seq))
-    with pytest.raises((VerificationError, Exception)):
+    with pytest.raises(VerificationError):
         engine.verified_audit_bundle_for_order(_standard_order(seq=other_seq), decision)
 
 

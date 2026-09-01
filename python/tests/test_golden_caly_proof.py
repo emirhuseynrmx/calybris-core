@@ -37,7 +37,7 @@ FIXTURE_PATH = (
 @pytest.fixture(scope="module")
 def golden() -> dict:
     if not FIXTURE_PATH.exists():
-        pytest.skip(f"golden fixture not found at {FIXTURE_PATH}")
+        raise AssertionError(f"golden fixture not found at {FIXTURE_PATH}")
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 

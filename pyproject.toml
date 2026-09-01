@@ -11,10 +11,10 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [
-  { name = "Emir Huseyn", email = "emirhuseynrmx@gmail.com" },
+  { name = "Emir Hüseyin İnci", email = "emirhuseyininci@gmail.com" },
 ]
 maintainers = [
-  { name = "Emir Huseyn", email = "emirhuseynrmx@gmail.com" },
+  { name = "Emir Hüseyin İnci", email = "emirhuseyininci@gmail.com" },
 ]
 keywords = ["commerce", "routing", "deterministic", "audit", "llm", "finance", "policy"]
 classifiers = [

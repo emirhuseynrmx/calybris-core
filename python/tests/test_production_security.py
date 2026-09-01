@@ -11,7 +11,10 @@ from calybris import (
     ArtifactValidationError,
     AuditedWal,
     BudgetGuard,
+    BudgetReservationResult,
+    BudgetSnapshot,
     CalybrisEngine,
+    ConservationProof,
     EngineConfig,
     InputBuilder,
     PersistenceError,
@@ -19,6 +22,7 @@ from calybris import (
     ProvenanceError,
     ReceiptError,
     ReceiptState,
+    ReceiptWal,
     StateChain,
     StateTrajectoryError,
     WalAnchor,
@@ -28,12 +32,30 @@ from calybris import (
     replay_verify_audited_wal,
     verify_audited_wal,
     verify_state_trajectory,
+    verify_state_trajectory_linkage,
 )
 from calybris.types import ModelSpec
+from pydantic import ValidationError
 
 SIGNING_KEY = bytes(range(32))
 TRUSTED_PUBLIC_KEY = public_key_from_signing_key(SIGNING_KEY)
 WAL_KEY = b"python-production-wal-key-000001"
+
+
+def test_audited_wal_cleanup_does_not_mask_primary_exception() -> None:
+    class FailingInner:
+        def close(self, *, sync: bool) -> None:
+            assert sync
+            raise OSError("sync failed")
+
+    wal = object.__new__(AuditedWal)
+    wal._inner = FailingInner()  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="primary failure") as raised:
+        with wal:
+            raise ValueError("primary failure")
+
+    assert any("cleanup also failed" in note for note in raised.value.__notes__)
 
 
 def _policy():
@@ -108,6 +130,37 @@ def test_receipt_tampering_is_detected() -> None:
         tampered.verify_signature(TRUSTED_PUBLIC_KEY)
 
 
+def test_receipt_full_verification_requires_all_trust_anchors() -> None:
+    engine = CalybrisEngine(_policy())
+    request = _request()
+    decision = engine.prescribe(request)
+    state = ReceiptState(1, "11" * 32, "22" * 32)
+    wal = ReceiptWal(9, "33" * 32)
+    receipt = engine.issue_receipt(request, decision, state=state, wal=wal)
+    receipt.sign(SIGNING_KEY, "decision-service:test", 1_700_000_000_001)
+
+    receipt.verify_full(
+        engine.policy,
+        request,
+        decision,
+        TRUSTED_PUBLIC_KEY,
+        state,
+        wal,
+    )
+
+    incomplete = engine.issue_receipt(request, decision, state=state)
+    incomplete.sign(SIGNING_KEY, "decision-service:test", 1_700_000_000_001)
+    with pytest.raises(ReceiptError, match="WAL anchor mismatch"):
+        incomplete.verify_full(
+            engine.policy,
+            request,
+            decision,
+            TRUSTED_PUBLIC_KEY,
+            state,
+            wal,
+        )
+
+
 def test_security_artifact_json_is_strict_and_repr_is_panic_free(tmp_path: Path) -> None:
     engine = CalybrisEngine(_policy())
     request = _request()
@@ -166,6 +219,50 @@ def test_security_artifact_json_is_strict_and_repr_is_panic_free(tmp_path: Path)
         WalAnchor.load(anchor_path)
 
 
+def test_native_receipt_anchors_reject_uppercase_noncanonical_digests() -> None:
+    with pytest.raises(ArtifactValidationError, match="lowercase"):
+        ReceiptState(1, "AB" * 32, "22" * 32)
+    with pytest.raises(ArtifactValidationError, match="lowercase"):
+        ReceiptWal(1, "CD" * 32)
+
+
+def test_finance_models_reject_noncanonical_and_rust_width_values() -> None:
+    with pytest.raises(ValidationError):
+        BudgetReservationResult.model_validate({"status": "invented"})
+    with pytest.raises(ValidationError):
+        BudgetSnapshot.model_validate(
+            {"version": 2**64, "active_reservations": 0, "tenants": []}
+        )
+    with pytest.raises(ValidationError):
+        ConservationProof.model_validate(
+            {
+                "ledger_digest_hex": "AB" * 32,
+                "snapshot_version": 1,
+                "tenant_count": 0,
+                "active_reservations": 0,
+                "total_initial_microcents": 0,
+                "total_committed_microcents": 0,
+                "aggregate_totals_representable": True,
+            }
+        )
+
+
+def test_legacy_snapshot_migration_requires_distinct_destination(tmp_path: Path) -> None:
+    guard = BudgetGuard()
+    guard.ensure_tenant("desk", 1_000_000)
+    source = tmp_path / "legacy.json"
+    migrated = tmp_path / "migrated.json"
+    payload = guard.checkpoint(source).model_dump()
+    payload["version"] = 7
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = BudgetGuard.migrate_legacy_snapshot_file(source, migrated, 100)
+    assert result.version > 2**63
+    assert json.loads(source.read_text(encoding="utf-8"))["version"] == 7
+    with pytest.raises(PersistenceError):
+        BudgetGuard.migrate_legacy_snapshot_file(source, source, 100)
+
+
 def test_state_chain_is_bound_into_receipt() -> None:
     engine = CalybrisEngine(_policy())
     request = _request()
@@ -184,6 +281,7 @@ def test_state_chain_is_bound_into_receipt() -> None:
         next_transition,
     )
     verify_state_trajectory([bundle, next_bundle])
+    verify_state_trajectory_linkage([bundle, next_bundle])
     with pytest.raises(StateTrajectoryError, match="does not continue"):
         verify_state_trajectory([next_bundle, bundle])
     receipt = engine.issue_receipt(request, decision, state=state)
@@ -204,7 +302,7 @@ def test_keyed_wal_anchor_replay_and_receipt_roundtrip(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     engine = CalybrisEngine(_policy())
     request = _request()
     decision = engine.prescribe(request)
@@ -257,7 +355,7 @@ def test_wal_rejects_short_key_and_second_writer(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     wal_path = tmp_path / "decisions.wal"
     with pytest.raises(ArtifactValidationError, match="at least 32 bytes"):
         AuditedWal(wal_path, hmac_key=b"too-short")
@@ -274,7 +372,7 @@ def test_metadata_nan_is_rejected_without_advancing_wal(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     engine = CalybrisEngine(_policy())
     request = _request()
     decision = engine.prescribe(request)
@@ -290,11 +388,21 @@ def test_metadata_nan_is_rejected_without_advancing_wal(
         assert wal.sequence == 0
 
 
+def test_metadata_is_bounded_before_crossing_native_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from calybris import audit
+
+    monkeypatch.setattr(audit, "MAX_WAL_METADATA_BYTES", 128)
+    with pytest.raises(ArtifactValidationError, match="exceeds 128 bytes"):
+        audit._canonical_metadata({"oversized": "x" * 1_000})
+
+
 def test_anchor_detects_clean_suffix_truncation(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     engine = CalybrisEngine(_policy())
     wal_path = tmp_path / "decisions.wal"
 

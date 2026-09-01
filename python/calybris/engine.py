@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from calybris import _core
 from calybris.errors import InputValidationError, VerificationError
 from calybris.types import AuditBundle, Decision, DecisionTrace, ProofEnvelope, VerifyResult
-
-if TYPE_CHECKING:
-    pass
 
 
 class CalybrisEngine:
@@ -117,7 +114,7 @@ class CalybrisEngine:
 
     def prescribe_as_model(self, request: _core.KernelInput) -> Decision:
         """Convenience: prescribe and return a typed :class:`Decision` in one call."""
-        return self.decision_model(self._policy.prescribe(request))
+        return self.decision_model(self.prescribe(request))
 
     def verify(
         self,

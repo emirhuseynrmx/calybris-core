@@ -25,11 +25,16 @@ pub fn ledger_digest(snapshot: &BudgetSnapshot) -> [u8; 32] {
     hasher.update(snapshot.version.to_le_bytes());
     hasher.update((snapshot.tenants.len() as u64).to_le_bytes());
     hasher.update((snapshot.active_reservations as u64).to_le_bytes());
-
     let mut tenants: Vec<&TenantLedger> = snapshot.tenants.iter().collect();
     tenants.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
     for ledger in tenants {
         update_ledger(&mut hasher, ledger);
+    }
+    // Preserve legacy digests for snapshots without WAL evidence while binding
+    // every recovery-aware snapshot to its exact durable replay boundary.
+    if let Some(watermark) = snapshot.wal_high_watermark {
+        hasher.update(b"calybris.ledger.wal-watermark.v1\0");
+        hasher.update(watermark.to_le_bytes());
     }
     hasher.finalize().into()
 }
@@ -65,6 +70,7 @@ fn snapshot_totals(snapshot: &BudgetSnapshot) -> Result<(i64, i64), Conservation
 /// Conservation proof binding a frozen ledger snapshot to its digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ConservationProof {
     pub ledger_digest_hex: String,
     pub snapshot_version: u64,
@@ -79,6 +85,7 @@ pub struct ConservationProof {
 /// Financial proof certificate binding a frozen snapshot to a ledger digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct FinancialCertificate {
     /// Snapshot epoch embedded in the frozen [`BudgetSnapshot`].
     pub snapshot_version: u64,
@@ -98,10 +105,12 @@ pub struct FinancialCertificate {
 #[must_use]
 pub fn certify_snapshot(
     snapshot: &BudgetSnapshot,
-    conservation_balanced: bool,
+    _conservation_balanced: bool,
     committed_since_last_certificate: i64,
 ) -> FinancialCertificate {
     let digest = ledger_digest(snapshot);
+    let conservation_balanced =
+        conservation_status_for_snapshot(snapshot) == ConservationStatus::Balanced;
     let totals = snapshot_totals(snapshot);
     let (total_initial, total_committed, totals_representable) = match totals {
         Ok((initial, committed)) => (initial, committed, true),
@@ -131,7 +140,7 @@ pub fn certify_ledger(engine: &BudgetEngine) -> FinancialCertificate {
     let per_tenant_balanced =
         conservation_status_for_snapshot(&snapshot) == ConservationStatus::Balanced;
     let totals = snapshot_totals(&snapshot);
-    let total_committed = totals.as_ref().map(|(_, c)| *c).unwrap_or(0);
+    let total_committed = totals.as_ref().map_or(0, |(_, c)| *c);
     let committed_since = if totals.is_ok() {
         engine.rotate_certificate_baseline(total_committed)
     } else {
@@ -274,6 +283,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
+    fn financial_artifacts_reject_unknown_fields() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let proof = prove_conservation(&engine).unwrap();
+        let mut proof_json = serde_json::to_value(proof).unwrap();
+        proof_json["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<ConservationProof>(proof_json).is_err());
+
+        let certificate = certify_ledger(&engine);
+        let mut certificate_json = serde_json::to_value(certificate).unwrap();
+        certificate_json["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<FinancialCertificate>(certificate_json).is_err());
+    }
+
+    #[test]
     fn certify_snapshot_is_immutable_binding() {
         let engine = BudgetEngine::new();
         engine.ensure_tenant("desk", 1_000_000);
@@ -283,6 +308,45 @@ mod tests {
         assert_ne!(ledger_digest(&engine.snapshot()), ledger_digest(&snap));
         assert_eq!(cert.ledger_digest_hex, digest_to_hex(&ledger_digest(&snap)));
         assert_eq!(cert.snapshot_version, snap.version);
+    }
+
+    #[test]
+    fn ledger_digest_binds_wal_high_watermark() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut first = engine.snapshot();
+        first.wal_high_watermark = Some(41);
+        let mut second = first.clone();
+        second.wal_high_watermark = Some(42);
+        assert_ne!(ledger_digest(&first), ledger_digest(&second));
+    }
+
+    #[test]
+    fn ledger_digest_binds_reservation_allocator_state() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let first = engine.snapshot();
+        let second = engine.snapshot();
+        assert_ne!(ledger_digest(&first), ledger_digest(&second));
+    }
+
+    #[test]
+    fn certify_snapshot_does_not_trust_caller_conservation_claim() {
+        let snapshot = BudgetSnapshot {
+            version: 7,
+            tenants: vec![TenantLedger {
+                tenant_id: "desk".into(),
+                initial_microcents: 1_000,
+                remaining_microcents: 900,
+                reserved_microcents: 0,
+                committed_microcents: 50,
+            }],
+            active_reservations: 0,
+            wal_high_watermark: None,
+        };
+
+        let certificate = certify_snapshot(&snapshot, true, 0);
+        assert!(!certificate.conservation_balanced);
     }
 
     #[test]

@@ -3,11 +3,50 @@
 //! Save [`crate::budget::BudgetSnapshot`] to disk, load it back, and restore engine state.
 //! Combined with WAL replay, this gives crash recovery and backup/restore.
 //!
-//! Snapshot writes use temp-file + fsync + rename for crash durability.
+//! Snapshot writes fsync file contents before atomic replacement. On Unix the
+//! parent-directory fsync is also required and errors are propagated. Rust's
+//! standard library does not expose portable Windows directory fsync, so the
+//! directory-entry durability guarantee is platform dependent there.
 
-use crate::budget::{BudgetEngine, BudgetSnapshot, RestoreError};
-use std::io::Write;
-use std::path::Path;
+use crate::bounded_io::LimitedWriter;
+use crate::budget::{validate_snapshot_for_restore, BudgetEngine, BudgetSnapshot, RestoreError};
+use fs2::FileExt;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+
+/// Maximum accepted size for one JSON persistence artifact.
+pub const MAX_PERSISTENCE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Schema for the atomically committed snapshot/WAL generation manifest.
+#[cfg(feature = "wal")]
+pub const CHECKPOINT_MANIFEST_SCHEMA: &str = "calybris.checkpoint-manifest.v1";
+
+/// The final commit record for one durable checkpoint generation.
+#[cfg(feature = "wal")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointManifest {
+    pub schema_version: String,
+    pub snapshot_file: String,
+    pub wal_anchor_file: String,
+    pub snapshot_version: u64,
+    pub ledger_digest_hex: String,
+    pub wal_sequence: u64,
+    pub wal_hash: String,
+    pub wal_keyed: bool,
+}
+
+/// A manifest-consistent snapshot/WAL-anchor generation.
+///
+/// Use [`load_and_verify_coordinated_checkpoint`] to additionally verify the
+/// actual WAL bytes against the committed anchor.
+#[cfg(feature = "wal")]
+#[derive(Debug, Clone)]
+pub struct CoordinatedCheckpoint {
+    pub manifest: CheckpointManifest,
+    pub snapshot: BudgetSnapshot,
+    pub anchor: crate::wal::WalAnchor,
+}
 
 /// Persistence error types.
 #[derive(Debug, thiserror::Error)]
@@ -20,36 +59,97 @@ pub enum PersistenceError {
     Restore(#[from] RestoreError),
 }
 
-/// Save a budget snapshot to a JSON file with fsync-backed durability.
+/// Save a budget snapshot with file-data fsync and atomic replacement.
 ///
-/// Writes to a `.tmp` file, fsyncs data, renames to target, then fsyncs the
-/// parent directory. This prevents partial writes and ensures the rename is
-/// durable even on power loss.
+/// On Unix, parent-directory fsync is mandatory and failures are returned. On
+/// Windows, the standard library does not provide portable directory fsync;
+/// callers requiring a power-loss guarantee for the directory entry must add
+/// a platform-specific storage layer.
 pub fn save_snapshot(snapshot: &BudgetSnapshot, path: &Path) -> Result<(), PersistenceError> {
     save_json_atomic(snapshot, path)
 }
 
 fn save_json_atomic<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), PersistenceError> {
-    let json = serde_json::to_string_pretty(value)?;
-    let tmp = path.with_extension("tmp");
-
-    let mut file = std::fs::OpenOptions::new()
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot");
+    // Windows does not guarantee that concurrent replace-existing operations
+    // against the same destination all succeed. A durable sibling lock file
+    // serializes writers across both threads and processes while preserving
+    // atomic visibility of the final rename/persist operation. The lock is held
+    // for the rest of this function and released when the handle drops, so error
+    // paths release it too.
+    let lock_path: PathBuf = parent.join(format!(".{filename}.calybris.lock"));
+    let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
+        .read(true)
         .write(true)
-        .truncate(true)
-        .open(&tmp)?;
-    file.write_all(json.as_bytes())?;
-    file.sync_data()?;
-    drop(file);
-
-    std::fs::rename(&tmp, path)?;
-
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_data();
+        .open(lock_path)?;
+    lock_file.lock_exclusive()?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(&format!(".{filename}.tmp."))
+        .tempfile_in(parent)?;
+    {
+        let mut writer = LimitedWriter::new(&mut temporary, MAX_PERSISTENCE_ARTIFACT_BYTES);
+        if let Err(error) = serde_json::to_writer_pretty(&mut writer, value) {
+            if writer.limit_exceeded() {
+                return Err(PersistenceError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("persistence artifact exceeds {MAX_PERSISTENCE_ARTIFACT_BYTES} bytes"),
+                )));
+            }
+            return Err(PersistenceError::Json(error));
         }
     }
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| PersistenceError::Io(error.error))?;
+
+    sync_parent_directory(path)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<(), PersistenceError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = std::fs::File::open(parent)?;
+    directory.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<(), PersistenceError> {
+    Ok(())
+}
+
+fn load_json_bounded<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, PersistenceError> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_PERSISTENCE_ARTIFACT_BYTES as u64 {
+        return Err(PersistenceError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("persistence artifact exceeds {MAX_PERSISTENCE_ARTIFACT_BYTES} bytes"),
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_PERSISTENCE_ARTIFACT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PERSISTENCE_ARTIFACT_BYTES {
+        return Err(PersistenceError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("persistence artifact exceeds {MAX_PERSISTENCE_ARTIFACT_BYTES} bytes"),
+        )));
+    }
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 /// Save a trusted WAL head anchor with fsync-backed atomic replacement.
@@ -64,15 +164,68 @@ pub fn save_wal_anchor(
 /// Load a trusted WAL head anchor.
 #[cfg(feature = "wal")]
 pub fn load_wal_anchor(path: &Path) -> Result<crate::wal::WalAnchor, PersistenceError> {
-    let data = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&data)?)
+    load_json_bounded(path)
 }
 
 /// Load a budget snapshot from a JSON file.
 pub fn load_snapshot(path: &Path) -> Result<BudgetSnapshot, PersistenceError> {
-    let data = std::fs::read_to_string(path)?;
-    let snapshot: BudgetSnapshot = serde_json::from_str(&data)?;
-    Ok(snapshot)
+    load_json_bounded(path)
+}
+
+/// Migrate an untagged 0.5.x snapshot into a distinct recovery-aware file.
+///
+/// The caller supplies a trusted reservation allocator fence that is greater
+/// than every ID issued before the legacy snapshot. The source file is never
+/// modified; the migrated snapshot is written atomically to `destination`.
+pub fn migrate_legacy_snapshot_file(
+    source: &Path,
+    destination: &Path,
+    trusted_next_reservation_id: u64,
+) -> Result<BudgetSnapshot, PersistenceError> {
+    ensure_distinct_migration_files(source, destination)?;
+    let legacy = load_snapshot(source)?;
+    let migrated = crate::budget::migrate_legacy_snapshot(legacy, trusted_next_reservation_id)
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    save_snapshot(&migrated, destination)?;
+    Ok(migrated)
+}
+
+fn ensure_distinct_migration_files(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), PersistenceError> {
+    let canonical_source = std::fs::canonicalize(source)?;
+    let source_identity = file_id::get_file_id(&canonical_source)?;
+
+    match std::fs::metadata(destination) {
+        Ok(_) => {
+            let canonical_destination = std::fs::canonicalize(destination)?;
+            let destination_identity = file_id::get_file_id(&canonical_destination)?;
+            if canonical_source == canonical_destination || source_identity == destination_identity
+            {
+                return Err(invalid_recovery_data(
+                    "legacy snapshot migration requires a distinct destination file",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = destination
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let filename = destination.file_name().ok_or_else(|| {
+                invalid_recovery_data("legacy snapshot destination must name a file")
+            })?;
+            let normalized_destination = std::fs::canonicalize(parent)?.join(filename);
+            if canonical_source == normalized_destination {
+                return Err(invalid_recovery_data(
+                    "legacy snapshot migration requires a distinct destination file",
+                ));
+            }
+        }
+        Err(error) => return Err(PersistenceError::Io(error)),
+    }
+    Ok(())
 }
 
 /// Checkpoint engine state without WAL binding.
@@ -80,7 +233,10 @@ pub fn load_snapshot(path: &Path) -> Result<BudgetSnapshot, PersistenceError> {
 /// Use [`checkpoint_with_wal`] when you have a WAL writer — it records the
 /// WAL sequence so recovery knows where to start replaying.
 pub fn checkpoint(engine: &BudgetEngine, path: &Path) -> Result<BudgetSnapshot, PersistenceError> {
-    let snapshot = engine.snapshot();
+    let snapshot = engine
+        .try_snapshot()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    validate_snapshot_for_restore(&snapshot)?;
     save_snapshot(&snapshot, path)?;
     Ok(snapshot)
 }
@@ -95,10 +251,155 @@ pub fn checkpoint_with_wal(
     path: &Path,
     wal_sequence: u64,
 ) -> Result<BudgetSnapshot, PersistenceError> {
-    let mut snapshot = engine.snapshot();
+    let mut snapshot = engine
+        .try_snapshot()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
     snapshot.wal_high_watermark = Some(wal_sequence);
+    validate_snapshot_for_restore(&snapshot)?;
     save_snapshot(&snapshot, path)?;
     Ok(snapshot)
+}
+
+/// Commit a generation in WAL -> snapshot -> manifest order.
+///
+/// The WAL is flushed and synced first. Snapshot and anchor files are immutable,
+/// generation-specific files; the manifest is atomically replaced last and is
+/// therefore the only recovery commit point. Parent-directory power-loss
+/// durability follows the platform contract documented by [`save_snapshot`].
+/// Callers must route each logical
+/// ledger mutation and its WAL append through the same application-level
+/// admission boundary used for this checkpoint.
+#[cfg(feature = "wal")]
+pub fn checkpoint_coordinated<T: serde::Serialize>(
+    engine: &BudgetEngine,
+    wal: &mut crate::wal::WalWriter<T>,
+    directory: &Path,
+) -> Result<CoordinatedCheckpoint, PersistenceError> {
+    std::fs::create_dir_all(directory)?;
+    wal.flush_and_sync()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    let anchor = wal.anchor();
+    let mut snapshot = engine
+        .try_snapshot()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    snapshot.wal_high_watermark = Some(anchor.sequence);
+    validate_snapshot_for_restore(&snapshot)?;
+
+    let snapshot_file = format!(
+        "snapshot-v{}-wal-{}.json",
+        snapshot.version, anchor.sequence
+    );
+    let wal_anchor_file = format!(
+        "wal-anchor-v{}-wal-{}.json",
+        snapshot.version, anchor.sequence
+    );
+    save_snapshot(&snapshot, &directory.join(&snapshot_file))?;
+    save_wal_anchor(&anchor, &directory.join(&wal_anchor_file))?;
+
+    let manifest = CheckpointManifest {
+        schema_version: CHECKPOINT_MANIFEST_SCHEMA.to_string(),
+        snapshot_file,
+        wal_anchor_file,
+        snapshot_version: snapshot.version,
+        ledger_digest_hex: crate::digest::digest_to_hex(&crate::finance::ledger_digest(&snapshot)),
+        wal_sequence: anchor.sequence,
+        wal_hash: anchor.last_hash.clone(),
+        wal_keyed: anchor.keyed,
+    };
+    save_json_atomic(&manifest, &directory.join("checkpoint-manifest.json"))?;
+    Ok(CoordinatedCheckpoint {
+        manifest,
+        snapshot,
+        anchor,
+    })
+}
+
+/// Load the last committed generation and fail closed on any cross-file mismatch.
+#[cfg(feature = "wal")]
+pub fn load_coordinated_checkpoint(
+    directory: &Path,
+) -> Result<CoordinatedCheckpoint, PersistenceError> {
+    let manifest: CheckpointManifest =
+        load_json_bounded(&directory.join("checkpoint-manifest.json"))?;
+    if manifest.schema_version != CHECKPOINT_MANIFEST_SCHEMA {
+        return Err(invalid_recovery_data(format!(
+            "unknown checkpoint manifest schema: {}",
+            manifest.schema_version
+        )));
+    }
+    validate_generation_filename(&manifest.snapshot_file)?;
+    validate_generation_filename(&manifest.wal_anchor_file)?;
+
+    let snapshot = load_snapshot(&directory.join(&manifest.snapshot_file))?;
+    let anchor = load_wal_anchor(&directory.join(&manifest.wal_anchor_file))?;
+    let digest = crate::digest::digest_to_hex(&crate::finance::ledger_digest(&snapshot));
+    if snapshot.version != manifest.snapshot_version
+        || snapshot.wal_high_watermark != Some(manifest.wal_sequence)
+        || digest != manifest.ledger_digest_hex
+    {
+        return Err(invalid_recovery_data(
+            "checkpoint snapshot does not match committed manifest",
+        ));
+    }
+    validate_snapshot_for_restore(&snapshot)?;
+    anchor
+        .verify_head(
+            manifest.wal_sequence,
+            manifest.wal_hash.clone(),
+            manifest.wal_keyed,
+        )
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    Ok(CoordinatedCheckpoint {
+        manifest,
+        snapshot,
+        anchor,
+    })
+}
+
+/// Load a manifest-consistent checkpoint and verify the actual WAL against its anchor.
+#[cfg(feature = "wal")]
+pub fn load_and_verify_coordinated_checkpoint(
+    directory: &Path,
+    wal_path: &Path,
+    hmac_key: Option<&[u8]>,
+) -> Result<CoordinatedCheckpoint, PersistenceError> {
+    let checkpoint = load_coordinated_checkpoint(directory)?;
+    match (checkpoint.anchor.keyed, hmac_key) {
+        (true, Some(key)) => {
+            crate::wal::verify_wal_keyed_contains_anchor(wal_path, key, &checkpoint.anchor)
+        }
+        (false, None) => crate::wal::verify_wal_contains_anchor(wal_path, &checkpoint.anchor),
+        (true, None) => {
+            return Err(invalid_recovery_data(
+                "checkpoint WAL is keyed but no HMAC key was supplied",
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(invalid_recovery_data(
+                "checkpoint WAL is unkeyed but an HMAC key was supplied",
+            ));
+        }
+    }
+    .map_err(|error| invalid_recovery_data(error.to_string()))?;
+    Ok(checkpoint)
+}
+
+#[cfg(feature = "wal")]
+fn validate_generation_filename(filename: &str) -> Result<(), PersistenceError> {
+    let mut components = Path::new(filename).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(invalid_recovery_data(
+            "checkpoint manifest contains an unsafe generation filename",
+        )),
+    }
+}
+
+fn invalid_recovery_data(message: impl Into<String>) -> PersistenceError {
+    PersistenceError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
 }
 
 /// Restore engine state from a snapshot file.
@@ -125,6 +426,7 @@ fn recovery_plan_inner(
     anchor: Option<&crate::wal::WalAnchor>,
 ) -> Result<RecoveryPlan, PersistenceError> {
     let snapshot = load_snapshot(snapshot_path)?;
+    validate_snapshot_for_restore(&snapshot)?;
     let high = snapshot.wal_high_watermark.unwrap_or(0);
     let mut total_wal_entries = 0_usize;
     let mut entries_to_replay = 0_usize;
@@ -145,6 +447,13 @@ fn recovery_plan_inner(
         })
     }
     .map_err(|e| PersistenceError::Io(std::io::Error::other(e.to_string())))?;
+
+    if high > head.0 {
+        return Err(invalid_recovery_data(format!(
+            "snapshot WAL watermark {high} is ahead of verified WAL head {}",
+            head.0
+        )));
+    }
 
     if let Some(anchor) = anchor {
         anchor
@@ -223,6 +532,46 @@ mod tests {
     use crate::budget::BudgetEngine;
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: 16 MiB artifact is impractical to interpret")]
+    fn atomic_writer_and_loader_share_the_same_size_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("limit.json");
+        let value = "x".repeat(MAX_PERSISTENCE_ARTIFACT_BYTES - 2);
+        save_json_atomic(&value, &path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_PERSISTENCE_ARTIFACT_BYTES as u64
+        );
+        assert_eq!(load_json_bounded::<String>(&path).unwrap(), value);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri: 16 MiB artifact is impractical to interpret")]
+    fn oversized_atomic_save_preserves_previous_checkpoint() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("preserve.json");
+        save_json_atomic(&"previous", &path).unwrap();
+        let previous = std::fs::read(&path).unwrap();
+        let oversized = "x".repeat(MAX_PERSISTENCE_ARTIFACT_BYTES);
+        assert!(save_json_atomic(&oversized, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert_eq!(load_json_bounded::<String>(&path).unwrap(), "previous");
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    #[cfg_attr(miri, ignore = "miri: 16 MiB artifact is impractical to interpret")]
+    fn oversized_coordinated_snapshot_does_not_commit_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant(&"x".repeat(MAX_PERSISTENCE_ARTIFACT_BYTES), 1);
+        assert!(checkpoint_coordinated(&engine, &mut wal, dir.path()).is_err());
+        assert!(!dir.path().join("checkpoint-manifest.json").exists());
+    }
+
+    #[test]
     #[cfg_attr(
         all(miri, windows),
         ignore = "miri/windows: tempfile directory creation is unsupported"
@@ -270,6 +619,125 @@ mod tests {
     }
 
     #[test]
+    fn legacy_snapshot_file_migration_is_atomic_and_never_in_place() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_path = dir.path().join("legacy.json");
+        let migrated_path = dir.path().join("migrated.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &source_path, 100).is_err());
+        let migrated = migrate_legacy_snapshot_file(&source_path, &migrated_path, 100).unwrap();
+        assert_eq!(load_snapshot(&source_path).unwrap().version, 7);
+        assert_eq!(load_snapshot(&migrated_path).unwrap(), migrated);
+        BudgetEngine::new().restore_from_snapshot(migrated).unwrap();
+    }
+
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_normalized_source_alias() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_path = dir.path().join("legacy.json");
+        let alias_path = dir.path().join(".").join("legacy.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &source_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &alias_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_hard_link_source_alias() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_path = dir.path().join("legacy.json");
+        let alias_path = dir.path().join("legacy-hard-link.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &source_path).unwrap();
+        std::fs::hard_link(&source_path, &alias_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &alias_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_symlink_source_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let destination_path = dir.path().join("legacy.json");
+        let source_path = dir.path().join("legacy-link.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &destination_path).unwrap();
+        symlink(&destination_path, &source_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &destination_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_symlink_source_alias() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let destination_path = dir.path().join("legacy.json");
+        let source_path = dir.path().join("legacy-link.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &destination_path).unwrap();
+        // Without Developer Mode or elevation Windows reports
+        // ERROR_PRIVILEGE_NOT_HELD, which std does not map to `PermissionDenied`,
+        // so the raw code is matched too and the alias check is skipped.
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+        if let Err(error) = symlink_file(&destination_path, &source_path) {
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+            {
+                return;
+            }
+            panic!("could not create migration alias symlink: {error}");
+        }
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &destination_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_snapshot_file_migration_rejects_case_alias() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_path = dir.path().join("Legacy.JSON");
+        let alias_path = dir.path().join("legacy.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let mut legacy = engine.snapshot();
+        legacy.version = 7;
+        save_snapshot(&legacy, &source_path).unwrap();
+        let source_bytes = std::fs::read(&source_path).unwrap();
+
+        assert!(migrate_legacy_snapshot_file(&source_path, &alias_path, 100).is_err());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
     #[cfg_attr(
         all(miri, windows),
         ignore = "miri/windows: tempfile directory creation is unsupported"
@@ -302,6 +770,248 @@ mod tests {
 
         let loaded = load_snapshot(&path).unwrap();
         assert_eq!(loaded.wal_high_watermark, Some(42));
+    }
+
+    #[test]
+    fn checkpoint_rejects_active_reservations_without_writing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("unrecoverable.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, reservation_id) = engine.try_reserve("desk", 100_000);
+        assert!(reservation_id.is_some());
+
+        assert!(checkpoint(&engine, &path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn checkpoint_with_wal_rejects_active_reservations_without_writing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("unrecoverable-wal.json");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, reservation_id) = engine.try_reserve("desk", 100_000);
+        assert!(reservation_id.is_some());
+
+        assert!(checkpoint_with_wal(&engine, &path, 7).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_commits_a_verified_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": "reserve"})).unwrap();
+
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        let recovered = load_coordinated_checkpoint(dir.path()).unwrap();
+        let fully_verified =
+            load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).unwrap();
+
+        assert_eq!(recovered.manifest, committed.manifest);
+        assert_eq!(fully_verified.manifest, committed.manifest);
+        assert_eq!(recovered.snapshot, committed.snapshot);
+        assert_eq!(recovered.snapshot.wal_high_watermark, Some(1));
+        assert_eq!(recovered.anchor.sequence, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_accepts_a_valid_wal_suffix_for_replay() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        wal.append(serde_json::json!({"event": 2})).unwrap();
+        wal.flush_and_sync().unwrap();
+
+        let verified = load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).unwrap();
+        let plan = recovery_plan(
+            &dir.path().join(&committed.manifest.snapshot_file),
+            &wal_path,
+        )
+        .unwrap();
+
+        assert_eq!(verified.manifest, committed.manifest);
+        assert_eq!(plan.entries_to_replay, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn keyed_coordinated_checkpoint_accepts_a_valid_wal_suffix_for_replay() {
+        const KEY: &[u8; 32] = b"calybris-test-hmac-key-000000001";
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal =
+            crate::wal::WalWriter::<serde_json::Value>::open_keyed(&wal_path, KEY).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        wal.append(serde_json::json!({"event": 2})).unwrap();
+        wal.flush_and_sync().unwrap();
+
+        let verified =
+            load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, Some(KEY)).unwrap();
+        let plan = recovery_plan_keyed(
+            &dir.path().join(&committed.manifest.snapshot_file),
+            &wal_path,
+            KEY,
+        )
+        .unwrap();
+
+        assert_eq!(verified.manifest, committed.manifest);
+        assert_eq!(plan.entries_to_replay, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_rejects_a_valid_chain_with_a_different_prefix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        drop(wal);
+
+        std::fs::remove_file(&wal_path).unwrap();
+        let mut replacement = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        replacement
+            .append(serde_json::json!({"event": "different-prefix"}))
+            .unwrap();
+        replacement
+            .append(serde_json::json!({"event": "valid-suffix"}))
+            .unwrap();
+        replacement.flush_and_sync().unwrap();
+
+        assert!(load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_rejects_a_tampered_wal_suffix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        wal.append(serde_json::json!({"event": 2})).unwrap();
+        wal.flush_and_sync().unwrap();
+        drop(wal);
+
+        let contents = std::fs::read_to_string(&wal_path).unwrap();
+        let tampered = contents.replacen("\"event\":2", "\"event\":9", 1);
+        assert_ne!(tampered, contents);
+        std::fs::write(&wal_path, tampered).unwrap();
+
+        assert!(load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_never_commits_unrestorable_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let (_, reservation_id) = engine.try_reserve("desk", 100_000);
+        assert!(reservation_id.is_some());
+
+        assert!(checkpoint_coordinated(&engine, &mut wal, dir.path()).is_err());
+        assert!(!dir.path().join("checkpoint-manifest.json").exists());
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_full_verification_rejects_a_truncated_wal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        wal.append(serde_json::json!({"event": 2})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+        drop(wal);
+
+        let contents = std::fs::read_to_string(&wal_path).unwrap();
+        let prefix = contents.lines().take(1).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&wal_path, prefix).unwrap();
+
+        assert!(load_coordinated_checkpoint(dir.path()).is_ok());
+        assert!(load_and_verify_coordinated_checkpoint(dir.path(), &wal_path, None).is_err());
+    }
+
+    #[test]
+    fn oversized_persistence_artifact_is_rejected_before_json_parsing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("oversized.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len((MAX_PERSISTENCE_ARTIFACT_BYTES + 1) as u64)
+            .unwrap();
+        let error = load_snapshot(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            PersistenceError::Io(ref io) if io.kind() == std::io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_rejects_a_torn_committed_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": "reserve"})).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+
+        std::fs::write(
+            dir.path().join(&committed.manifest.snapshot_file),
+            b"{\"torn\":",
+        )
+        .unwrap();
+        assert!(load_coordinated_checkpoint(dir.path()).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn coordinated_checkpoint_load_rejects_unrestorable_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        let committed = checkpoint_coordinated(&engine, &mut wal, dir.path()).unwrap();
+
+        let mut snapshot = committed.snapshot;
+        snapshot.active_reservations = 1;
+        save_snapshot(
+            &snapshot,
+            &dir.path().join(&committed.manifest.snapshot_file),
+        )
+        .unwrap();
+        let mut manifest = committed.manifest;
+        manifest.ledger_digest_hex =
+            crate::digest::digest_to_hex(&crate::finance::ledger_digest(&snapshot));
+        save_json_atomic(&manifest, &dir.path().join("checkpoint-manifest.json")).unwrap();
+
+        assert!(load_coordinated_checkpoint(dir.path()).is_err());
     }
 
     #[test]
@@ -349,6 +1059,22 @@ mod tests {
         assert_eq!(plan.total_wal_entries, 3);
         assert_eq!(plan.wal_high_watermark, 2);
         assert_eq!(plan.entries_to_replay, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn recovery_plan_rejects_watermark_beyond_verified_head() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let snap_path = dir.path().join("snap.json");
+        let wal_path = dir.path().join("wal.jsonl");
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        checkpoint_with_wal(&engine, &snap_path, 2).unwrap();
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        wal.append(serde_json::json!({"event": 1})).unwrap();
+        drop(wal);
+
+        assert!(recovery_plan(&snap_path, &wal_path).is_err());
     }
 
     #[test]
@@ -448,5 +1174,31 @@ mod tests {
 
         assert_eq!(loaded.version, replaced.version);
         assert_eq!(loaded.tenants[0].initial_microcents, 1_500_000);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri: contended flock blocks, which miri cannot run")]
+    fn concurrent_atomic_saves_do_not_share_a_temp_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("snapshot.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let engine = BudgetEngine::new();
+                    engine.ensure_tenant(&format!("desk-{index}"), 1_000_000);
+                    let snapshot = engine.snapshot();
+                    barrier.wait();
+                    save_snapshot(&snapshot, &path)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert_eq!(load_snapshot(&path).unwrap().tenants.len(), 1);
     }
 }

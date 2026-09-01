@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.5.5"
+version = "0.5.7"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -13,7 +13,14 @@ keywords = ["decision-engine", "proof-carrying", "write-ahead-log", "budget-engi
 categories = ["algorithms", "finance"]
 # Published crate is kernel-only: the Python wrapper source and its build
 # config live in the repo but do not belong in the crates.io artifact.
-exclude = ["assets/", ".github/", "python/", "pyproject.toml"]
+exclude = [
+  "assets/",
+  ".github/",
+  "python/",
+  "pyproject.toml",
+  "scripts/",
+  "docs/ENTERPRISE_GAUNTLET.md",
+]
 
 [workspace]
 members = [".", "bindings/python"]
@@ -25,8 +32,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [features]
 default = ["wal"]
-serde = ["dep:serde", "dep:serde_json"]
-wal = ["serde", "dep:file-id", "dep:fs2", "dep:hmac", "dep:subtle"]
+serde = ["dep:serde", "dep:serde_json", "dep:tempfile", "dep:fs2", "dep:file-id"]
+wal = ["serde", "dep:hmac", "dep:subtle"]
 async = ["wal", "dep:tokio"]
 observability = ["dep:tracing"]
 provenance = ["dep:ed25519-dalek"]
@@ -43,7 +50,8 @@ ed25519-dalek = { version = "2", optional = true }
 file-id = { version = "0.2.3", optional = true }
 fs2 = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"], optional = true }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "raw_value"], optional = true }
+tempfile = { version = "3", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "sync"], optional = true }
 tracing = { version = "0.1", optional = true }
@@ -52,7 +60,6 @@ loom = { version = "0.7", features = ["checkpoint"], optional = true }
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "5.0.1", package = "codspeed-criterion-compat", features = ["html_reports"] }
-tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "fs", "io-util", "sync"] }
 
 [[bin]]

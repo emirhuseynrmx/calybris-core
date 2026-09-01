@@ -3,7 +3,7 @@ use calybris_core::kernel::*;
 fn main() {
     let models = vec![
         KernelModel {
-            model_id: 0,
+            model_id: 3,
             provider_id: 0,
             quality_bps: 3500,
             risk_ceiling_bps: 9500,

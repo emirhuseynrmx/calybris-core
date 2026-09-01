@@ -4,5 +4,15 @@ example_wal.jsonl
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-*/
 .mypy_cache/
 .ruff_cache/
+*.pdb
+
+# Internal working notes and unpublished validation artifacts. Calyra results
+# are published only once a run passes its own clean-tree release gate.
+docs/audits/
+docs/superpowers/
+docs/ENTERPRISE_GAUNTLET.md
+docs/CALYRA_AUDIT_REPORT_*.pdf
+docs/calyra-audit-report-*.typ

@@ -95,6 +95,23 @@ pub const AUDIT_PROOF_VERSION: u16 = 1;
 /// Producer label for externally stored audit artifacts.
 pub const AUDIT_CREATED_BY: &str = "calybris";
 
+/// Canonical metadata or digest-shape violation in a persisted audit artifact.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuditBundleValidationError {
+    #[error("unsupported audit schema_version: {0}")]
+    SchemaVersion(String),
+    #[error("unsupported audit digest_algorithm: {0}")]
+    DigestAlgorithm(String),
+    #[error("unsupported audit proof_version: {0}")]
+    ProofVersion(u16),
+    #[error("unsupported audit created_by value: {0}")]
+    CreatedBy(String),
+    #[error("persisted audit bundle carries replay_valid=false")]
+    ReplayInvalid,
+    #[error("{field} must be exactly 64 lowercase hexadecimal characters")]
+    NonCanonicalDigest { field: &'static str },
+}
+
 /// Binds a decision to its policy and input via canonical SHA-256 digests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -136,6 +153,45 @@ impl AuditBundle {
     /// Raw 32-byte decision digest.
     pub fn decision_digest(&self) -> Result<[u8; 32], DigestDecodeError> {
         decode_hex32(&self.decision_digest_hex)
+    }
+
+    /// Validate canonical metadata and digest encoding before trusting a persisted bundle.
+    pub fn validate_canonical(&self) -> Result<(), AuditBundleValidationError> {
+        if self.schema_version != AUDIT_SCHEMA_VERSION {
+            return Err(AuditBundleValidationError::SchemaVersion(
+                self.schema_version.clone(),
+            ));
+        }
+        if self.digest_algorithm != AUDIT_DIGEST_ALGORITHM {
+            return Err(AuditBundleValidationError::DigestAlgorithm(
+                self.digest_algorithm.clone(),
+            ));
+        }
+        if self.proof_version != AUDIT_PROOF_VERSION {
+            return Err(AuditBundleValidationError::ProofVersion(self.proof_version));
+        }
+        if self.created_by != AUDIT_CREATED_BY {
+            return Err(AuditBundleValidationError::CreatedBy(
+                self.created_by.clone(),
+            ));
+        }
+        if !self.replay_valid {
+            return Err(AuditBundleValidationError::ReplayInvalid);
+        }
+        for (field, digest) in [
+            ("policy_digest_hex", self.policy_digest_hex.as_str()),
+            ("input_digest_hex", self.input_digest_hex.as_str()),
+            ("decision_digest_hex", self.decision_digest_hex.as_str()),
+        ] {
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(AuditBundleValidationError::NonCanonicalDigest { field });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -207,6 +263,23 @@ pub fn verify_decision(
     VerifyResult::Valid
 }
 
+/// Verify an externally stored canonical decision digest.
+///
+/// This is a digest-integrity check only; use [`verify_decision`] for kernel
+/// replay. It gives the compatibility [`VerifyResult::DigestMismatch`] variant
+/// a concrete trust-boundary use without weakening structural replay checks.
+pub fn verify_decision_digest(decision: &KernelDecision, claimed_digest_hex: &str) -> VerifyResult {
+    let expected_hex = digest_to_hex(&decision_digest(decision));
+    if claimed_digest_hex == expected_hex {
+        VerifyResult::Valid
+    } else {
+        VerifyResult::DigestMismatch {
+            expected_hex,
+            actual_hex: claimed_digest_hex.to_string(),
+        }
+    }
+}
+
 /// Compute a fingerprint of a policy snapshot for audit binding.
 ///
 /// Returns the hex-encoded canonical policy digest (models sorted by `model_id`).
@@ -217,6 +290,7 @@ pub fn snapshot_fingerprint(snapshot: &PolicySnapshot) -> String {
 /// A correctness certificate binding a decision to its policy and input.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct CorrectnessCertificate {
     /// Hex-encoded canonical policy digest.
     pub policy_fingerprint: String,
@@ -295,7 +369,6 @@ fn from_hex_digit(byte: u8, index: usize) -> Result<u8, DigestDecodeError> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(DigestDecodeError::InvalidHexCharacter { digit: byte, index }),
     }
 }
@@ -453,6 +526,32 @@ mod tests {
         assert_eq!(cert.decision_fingerprint.len(), 64);
     }
 
+    #[test]
+    fn external_decision_digest_check_reaches_digest_mismatch() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        assert_eq!(
+            verify_decision_digest(&decision, &digest_to_hex(&decision_digest(&decision))),
+            VerifyResult::Valid
+        );
+        assert!(matches!(
+            verify_decision_digest(&decision, &"00".repeat(32)),
+            VerifyResult::DigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn correctness_certificate_rejects_unknown_fields() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        let mut value = serde_json::to_value(certify_decision(&snap, input, &decision)).unwrap();
+        value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<CorrectnessCertificate>(value).is_err());
+    }
+
     fn audit_bundle_stub(
         policy_digest_hex: String,
         input_digest_hex: String,
@@ -485,6 +584,38 @@ mod tests {
         assert_eq!(bundle.created_by, AUDIT_CREATED_BY);
         assert_eq!(bundle.policy_epoch, snap.policy_epoch);
         assert_eq!(bundle.catalog_epoch, snap.catalog_epoch);
+        bundle.validate_canonical().unwrap();
+    }
+
+    #[test]
+    fn canonical_validation_rejects_forged_metadata_and_digest_casing() {
+        let snap = test_snapshot();
+        let input = test_input();
+        let decision = snap.prescribe(input);
+        let valid = audit_bundle(&snap, input, &decision);
+
+        let mut forged = valid.clone();
+        forged.schema_version = "calybris.audit.v999".into();
+        assert!(matches!(
+            forged.validate_canonical(),
+            Err(AuditBundleValidationError::SchemaVersion(_))
+        ));
+
+        let mut forged = valid.clone();
+        forged.replay_valid = false;
+        assert_eq!(
+            forged.validate_canonical(),
+            Err(AuditBundleValidationError::ReplayInvalid)
+        );
+
+        let mut forged = valid;
+        forged.policy_digest_hex.make_ascii_uppercase();
+        assert_eq!(
+            forged.validate_canonical(),
+            Err(AuditBundleValidationError::NonCanonicalDigest {
+                field: "policy_digest_hex"
+            })
+        );
     }
 
     #[test]
@@ -505,6 +636,13 @@ mod tests {
             bundle.policy_digest(),
             Err(DigestDecodeError::InvalidHexCharacter { .. })
         ));
+    }
+
+    #[test]
+    fn raw_digest_decode_rejects_non_canonical_uppercase() {
+        let mut digest = "00".repeat(32);
+        digest.replace_range(0..1, "A");
+        assert!(decode_hex32(&digest).is_err());
     }
 
     #[test]
@@ -549,7 +687,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn decode_hex32_rejects_non_hex_strings(s in "[^0-9a-fA-F]{1,20}") {
+        fn decode_hex32_rejects_non_hex_strings(s in "[^0-9a-f]{1,20}") {
             let bundle = audit_bundle_stub(
                 s,
                 "00".repeat(32),

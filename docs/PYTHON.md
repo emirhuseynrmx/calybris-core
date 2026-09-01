@@ -12,7 +12,7 @@
 
 **Mental model:** Python is a first-class integration surface over the Rust
 trust boundary, not a second implementation. The wheel remains pre-1.0 for API
-evolution, so pin `calybris==0.5.5` in production.
+evolution, so pin `calybris==0.5.7` in production.
 
 Production exceptions share one stable base:
 

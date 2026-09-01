@@ -28,6 +28,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "serde")]
+mod bounded_io;
 mod sync;
 
 /// Async hash-chained WAL using Tokio.

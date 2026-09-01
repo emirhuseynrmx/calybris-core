@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-07-22
+
+### Added
+- Canonical trusted policy construction with stable catalog ordering, reserved
+  rejection sentinel `model_id=0`, and a hard limit matching public decision counters.
+- Full receipt verification that combines replay, claims integrity, trusted-key
+  signature verification, state anchoring, and WAL anchoring in one fail-closed call.
+- Recovery-aware ledger digests bind the exact WAL high watermark while preserving
+  legacy digest identity for snapshots that carry no WAL claim.
+- Recovery-aware snapshot versions encode the next reservation allocator
+  position; restore rejects untagged legacy snapshots, preventing
+  delayed-settlement ABA without changing the public 0.5.x snapshot shape.
+- Explicit Rust and Python legacy-snapshot migration writes only to a distinct
+  atomic output file, rejects normalized, case, symlink, and hard-link aliases
+  of the source, and requires a caller-supplied durable allocator fence.
+- Recovery-aware restore diagnostics distinguish legacy-format migration from
+  ledger-value failures while preserving the original compatibility API.
+- Linearizable budget snapshots during concurrent reserve, commit, release, top-up,
+  and tenant mutations.
+- Checkpoint commits reject active or otherwise unrestorable snapshots, and
+  recovery rejects a snapshot watermark beyond the verified WAL head.
+- Complete and anchored-fragment trajectory verifiers distinguish whole histories
+  from valid but truncated fragments.
+- Explicit `*_trajectory_linkage` APIs state that trajectory verification is
+  structural and that per-bundle replay/authentication remains a separate step.
+- Generation-based coordinated checkpoints: WAL fsync, immutable snapshot and anchor
+  files, then an atomically committed manifest verified on recovery.
+- Atomic JSON persistence uses collision-resistant, exclusively created temporary
+  files and cleans up abandoned files on every error path, including concurrent writers.
+- Policy-rotating audited WAL replay through a record-level `PolicyResolver`.
+- `calybris-verify audit` accepts repeated `--policy` artifacts and resolves the
+  exact policy epoch, catalog epoch, and digest for every WAL record.
+- CLI `--json` verdicts use the JSON serializer so paths and OS errors containing
+  control characters remain valid single-line JSON.
+- CLI policy and anchor preflight failures honor `--json`, including `chain` and
+  `audit` early-exit paths.
+- Sync and async WAL verification hashes the original JSON `data` lexeme rather
+  than a deserialized/re-serialized value, eliminating key-order, whitespace,
+  and numeric-lexeme ambiguity.
+- Async WAL writers reject oversized payloads before hashing or allocating the
+  encoded entry, matching the synchronous writer's resource-exhaustion guard.
+- Checked state-chain advancement that rejects step-counter exhaustion.
+- Checked snapshot capture (`try_snapshot`) that rejects reservation-allocator
+  exhaustion instead of re-emitting a saturated fence. `checkpoint`,
+  `checkpoint_with_wal`, `checkpoint_coordinated` and the Python `snapshot`
+  binding return that error; infallible `snapshot` panics as documented.
+- Bounded JSON persistence reads and an additive coordinated-checkpoint loader
+  that verifies the complete actual WAL against the committed checkpoint prefix
+  while allowing valid later entries to proceed to deterministic replay.
+- Canonical audit-bundle validation for schema, algorithm, proof version,
+  producer, replay claim, and lowercase digest encoding before WAL replay.
+- Strict Python schemas: unknown-field rejection, strict types, bounded Rust-width
+  integers, literal schema versions, and lowercase SHA-256 digest validation.
+- Scoped certificate verification binds trusted state/WAL anchors; compatibility
+  certificate verification now also binds policy and catalog epochs.
+- `PolicyBuilder::build_trusted` preserves precise trust-boundary errors without
+  changing the legacy `BuildError` compatibility surface.
+
+### Security
+- Financial certificates recompute conservation from the frozen snapshot and no
+  longer trust a caller-provided boolean claim.
+- Python policy creation now uses the canonical trusted constructor.
+- Rust `PolicyBuilder` now uses the same trusted constructor and rejects
+  non-canonical enabled flags.
+- Receipt, provenance, native Python anchor, and finance-model trust boundaries
+  consistently require canonical lowercase digest encodings and bounded values.
+- Commerce percentage-to-basis-point conversion uses decimal rounding instead of
+  binary-float truncation.
+- Added adversarial tests for catalog permutations, reserved sentinels, counter
+  limits, receipt mutation, WAL watermark binding, checkpoint generations,
+  concurrent snapshot isolation, policy rotation, and state-step overflow.
+- Sync and async WAL diagnostics describe both duplicate and skipped record IDs as
+  sequence continuity violations while retaining the v1 error variant for compatibility.
+- Release tags are signed and version-matched before publish; security, SemVer,
+  SBOM, checksum, provenance, and attestation gates run on the exact tag commit.
+
+### Compatibility
+- Existing CALY-PROOF v1 constructors and artifact surfaces remain available for
+  replay compatibility. New integrations should use trusted policy construction,
+  decision receipts, `verify_full`, and coordinated checkpoint APIs.
+- The release is patch-semver compatible with 0.5.5; no existing public Rust item
+  was removed or changed incompatibly.
+
 ## [0.5.5] - 2026-07-16
 
 ### Added
@@ -88,8 +171,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejection.
 - **Stateful decision proofs** (`state` module): `StateChain` tracks a domain-state
   digest trajectory; `stateful_audit_bundle` (fail-closed) records
-  `state_digest_before/after` per decision; `verify_trajectory` rejects dropped,
-  reordered, or forged transitions. New `calystt1\0` digest tag.
+  `state_digest_before/after` per decision; `verify_trajectory` checks adjacency
+  inside an unanchored fragment. Complete genesis/final-step verification was
+  added in 0.5.7. New `calystt1\0` digest tag.
 - **Signed policy provenance** (`provenance` feature, Ed25519): `sign_policy` /
   `verify_signed_policy` / `verify_signed_policy_with_key` bind a policy digest to an
   accountable signer and timestamp with domain separation (`calysig1\0`); signatures are
@@ -105,9 +189,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned byte-exactly and asserted by both the Rust (`tests/conformance_caly_proof.rs`) and Python
   (`python/tests/test_conformance_caly_proof.py`) suites — the contract a third-party
   reimplementation (Go, TypeScript, browser) proves itself against.
-- **Decision certificates** (`certificate` module): bind an audit bundle + optional state
-  trajectory + WAL position + Ed25519 signer into one canonically-serializable, fail-closed
-  envelope — the notarized receipt for a single decision. `issue_certificate` /
+- **Decision certificates** (`certificate` module): group an audit bundle + optional state
+  trajectory + WAL position + policy-provenance signer into one canonically-serializable,
+  fail-closed compatibility envelope. The signature covers policy provenance, not the
+  full certificate. `issue_certificate` /
   `verify_certificate` (digests + replay, always available, incl. wasm) and
   `verify_certificate_signature` (feature `provenance`).
 - **`calybris-verify --json`**: one-line machine-readable verdict on every verb for CI/compliance

@@ -116,7 +116,10 @@ fn build_state_trajectory(
 #[test]
 #[ignore = "release-only production torture benchmark"]
 fn production_torture_benchmark() {
-    println!("\nCalybris 0.5.5 production torture benchmark");
+    println!(
+        "\nCalybris {} production torture benchmark",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("==============================================================");
 
     let snapshot = policy(64);
@@ -238,6 +241,9 @@ fn production_torture_benchmark() {
     );
 
     let directory = tempfile::tempdir().expect("temporary WAL directory");
+    // skipcq: RS-W1015
+    // This binary holds one test, so the process environment is not mutated
+    // concurrently. Edition 2024 will require an `unsafe` block here.
     std::env::set_var("CALYBRIS_WAL_LOCK_DIR", directory.path().join("locks"));
     let wal_path = directory.path().join("torture.wal.jsonl");
     let wal_operations = 25_000_usize;

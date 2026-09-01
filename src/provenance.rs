@@ -78,7 +78,6 @@ fn parse_hex<const N: usize>(field: &'static str, hex: &str) -> Result<[u8; N], 
         let nibble = |byte: u8| match byte {
             b'0'..=b'9' => Some(byte - b'0'),
             b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
             _ => None,
         };
         let high = nibble(pair[0])
@@ -246,6 +245,21 @@ mod tests {
             verify_signed_policy(&snapshot, &signed),
             Err(ProvenanceError::Malformed {
                 field: "public_key_hex",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn signed_policy_rejects_uppercase_noncanonical_hex_encoding() {
+        let snapshot = policy(1);
+        let mut signed = sign_policy(&snapshot, &key(7), "risk-officer:ayse", 1);
+        signed.signature_hex = signed.signature_hex.to_ascii_uppercase();
+
+        assert!(matches!(
+            verify_signed_policy(&snapshot, &signed),
+            Err(ProvenanceError::Malformed {
+                field: "signature_hex",
                 ..
             })
         ));

@@ -2,19 +2,22 @@ use std::path::PathBuf;
 
 use calybris_core_rs::digest::bytes_to_hex;
 use calybris_core_rs::persistence::{
-    checkpoint, checkpoint_with_wal, load_wal_anchor, recovery_plan, recovery_plan_against_anchor,
-    recovery_plan_keyed, recovery_plan_keyed_against_anchor, restore, save_wal_anchor,
+    checkpoint, checkpoint_with_wal, load_wal_anchor, migrate_legacy_snapshot_file, recovery_plan,
+    recovery_plan_against_anchor, recovery_plan_keyed, recovery_plan_keyed_against_anchor, restore,
+    save_wal_anchor,
 };
 use calybris_core_rs::provenance::{sign_policy, verify_signed_policy_with_key, SignedPolicy};
 use calybris_core_rs::receipt::{
-    issue_receipt, sign_receipt, verify_receipt, verify_receipt_signature, verify_receipt_state,
-    verify_receipt_wal, DecisionReceipt, ReceiptAnchors, ReceiptState, ReceiptWal,
+    issue_receipt, sign_receipt, verify_receipt, verify_receipt_full, verify_receipt_signature,
+    verify_receipt_state, verify_receipt_wal, DecisionReceipt, ReceiptAnchors, ReceiptState,
+    ReceiptWal,
 };
 use calybris_core_rs::state::{
-    stateful_audit_bundle, verify_trajectory, StateChain, StateTransition, StatefulAuditBundle,
+    stateful_audit_bundle, verify_complete_trajectory, verify_trajectory,
+    verify_trajectory_fragment, StateChain, StateTransition, StatefulAuditBundle,
 };
 use calybris_core_rs::wal::{
-    replay_audited_wal_keyed, verify_wal, verify_wal_against_anchor, verify_wal_keyed,
+    replay_audited_wal_keyed_bounded, verify_wal, verify_wal_against_anchor, verify_wal_keyed,
     verify_wal_keyed_against_anchor, AuditedRecord, WalAnchor, WalWriter,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -116,9 +119,14 @@ fn exact_key<const N: usize>(field: &str, value: &[u8]) -> PyResult<[u8; N]> {
 }
 
 fn validate_hex32(field: &str, value: &str) -> PyResult<()> {
-    if value.len() != 64 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+    if value.len() != 64
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         return Err(ArtifactValidationError::new_err(format!(
-            "{field} must contain exactly 64 ASCII hex characters"
+            "{field} must contain exactly 64 lowercase ASCII hex characters"
         )));
     }
     Ok(())
@@ -604,6 +612,28 @@ impl PyDecisionReceipt {
         verify_receipt_signature(&self.inner, Some(&trusted)).map_err(receipt_error)
     }
 
+    fn verify_full(
+        &self,
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+        trusted_public_key: &[u8],
+        expected_state: &PyReceiptState,
+        expected_wal: &PyReceiptWal,
+    ) -> PyResult<()> {
+        let trusted = verifying_key(trusted_public_key)?;
+        verify_receipt_full(
+            &self.inner,
+            &snapshot.inner,
+            validate_input(input)?,
+            &decision.inner,
+            &trusted,
+            &expected_state.inner,
+            &expected_wal.inner,
+        )
+        .map_err(receipt_error)
+    }
+
     fn verify_wal(&self, sequence: u64, entry_hash: &str) -> PyResult<()> {
         verify_receipt_wal(&self.inner, sequence, entry_hash).map_err(receipt_error)
     }
@@ -874,18 +904,33 @@ fn verify_audited_wal(
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, snapshot, *, hmac_key=None))]
+#[pyo3(signature = (
+    path,
+    snapshot,
+    *,
+    hmac_key=None,
+    max_entries=100_000,
+    max_total_bytes=268_435_456
+))]
 fn replay_verify_audited_wal<'py>(
     py: Python<'py>,
     path: PathBuf,
     snapshot: &PyPolicySnapshot,
     hmac_key: Option<&[u8]>,
+    max_entries: usize,
+    max_total_bytes: u64,
 ) -> PyResult<Bound<'py, PyList>> {
     if let Some(key) = hmac_key {
         validate_hmac_key(key)?;
     }
-    let verdicts =
-        replay_audited_wal_keyed::<Value>(&path, &snapshot.inner, hmac_key).map_err(wal_error)?;
+    let verdicts = replay_audited_wal_keyed_bounded::<Value>(
+        &path,
+        &snapshot.inner,
+        hmac_key,
+        max_entries,
+        max_total_bytes,
+    )
+    .map_err(wal_error)?;
     let values = PyList::empty(py);
     for verdict in verdicts {
         let value = PyDict::new(py);
@@ -906,6 +951,33 @@ fn verify_state_trajectory(bundles: Vec<PyStatefulAuditBundle>) -> PyResult<()> 
         .map(|bundle| bundle.inner)
         .collect::<Vec<_>>();
     verify_trajectory(&bundles).map_err(trajectory_error)
+}
+
+#[pyfunction]
+fn verify_complete_state_trajectory(
+    initial_state_bytes: &[u8],
+    expected_final_step: u64,
+    bundles: Vec<PyStatefulAuditBundle>,
+) -> PyResult<()> {
+    let bundles = bundles
+        .into_iter()
+        .map(|bundle| bundle.inner)
+        .collect::<Vec<_>>();
+    verify_complete_trajectory(initial_state_bytes, expected_final_step, &bundles)
+        .map_err(trajectory_error)
+}
+
+#[pyfunction]
+fn verify_state_trajectory_fragment(
+    anchor_step: u64,
+    anchor_digest_hex: &str,
+    bundles: Vec<PyStatefulAuditBundle>,
+) -> PyResult<()> {
+    let bundles = bundles
+        .into_iter()
+        .map(|bundle| bundle.inner)
+        .collect::<Vec<_>>();
+    verify_trajectory_fragment(anchor_step, anchor_digest_hex, &bundles).map_err(trajectory_error)
 }
 
 #[pyfunction]
@@ -1008,6 +1080,19 @@ impl PyPolicySnapshot {
 
 #[pymethods]
 impl PyBudgetEngine {
+    #[staticmethod]
+    fn migrate_legacy_snapshot_file(
+        py: Python<'_>,
+        source: PathBuf,
+        destination: PathBuf,
+        trusted_next_reservation_id: u64,
+    ) -> PyResult<Bound<'_, PyDict>> {
+        let snapshot =
+            migrate_legacy_snapshot_file(&source, &destination, trusted_next_reservation_id)
+                .map_err(persistence_error)?;
+        json_value_to_dict(py, serde_json::to_value(snapshot).map_err(runtime_error)?)
+    }
+
     fn checkpoint<'py>(&self, py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
         let snapshot = checkpoint(&self.inner, &path).map_err(persistence_error)?;
         json_value_to_dict(py, serde_json::to_value(snapshot).map_err(runtime_error)?)
@@ -1030,6 +1115,8 @@ impl PyBudgetEngine {
     }
 }
 
+// skipcq: RS-R1000
+// Flat module registration: every branch is one `add`/`add_class` call.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("CalybrisError", py.get_type::<CalybrisError>())?;
@@ -1062,6 +1149,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_audited_wal, m)?)?;
     m.add_function(wrap_pyfunction!(replay_verify_audited_wal, m)?)?;
     m.add_function(wrap_pyfunction!(verify_state_trajectory, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_complete_state_trajectory, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_state_trajectory_fragment, m)?)?;
     m.add_function(wrap_pyfunction!(plan_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(public_key_from_signing_key, m)?)?;
     Ok(())

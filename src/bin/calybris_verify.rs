@@ -4,14 +4,14 @@
 //!
 //! ```text
 //! calybris-verify chain  decisions.wal.jsonl [--anchor anchor.json] [--hmac-key-hex HEX]
-//! calybris-verify audit  decisions.wal.jsonl [--policy policy.json] [--anchor anchor.json] [--hmac-key-hex HEX]
+//! calybris-verify audit  decisions.wal.jsonl [--policy policy.json ...] [--anchor anchor.json] [--hmac-key-hex HEX]
 //! calybris-verify policy policy.json
 //! ```
 //!
 //! - `chain`  — hash-chain integrity; with `--anchor`, clean suffix-truncation detection.
 //! - `audit`  — chain + per-entry digest checks on audited records; with
-//!   `--policy`, additionally recomputes the policy digest and replays every
-//!   decision through the kernel (full CALY-PROOF verification).
+//!   one or more `--policy` artifacts, additionally resolves each record's
+//!   exact policy and replays every decision through the kernel.
 //! - `policy` — print the canonical policy digest of a policy artifact.
 //!
 //! Exit code 0 = everything verified; 1 = verification failure; 2 = usage.
@@ -27,6 +27,7 @@
 //! }
 //! ```
 
+use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -38,6 +39,7 @@ use calybris_core::wal::{
 };
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PolicyArtifact {
     policy_epoch: u64,
     catalog_epoch: u64,
@@ -50,7 +52,7 @@ struct PolicyArtifact {
 
 impl PolicyArtifact {
     fn into_snapshot(self) -> Result<PolicySnapshot, String> {
-        PolicySnapshot::try_new(
+        PolicySnapshot::try_new_trusted(
             self.policy_epoch,
             self.catalog_epoch,
             self.hard_risk_limit_bps,
@@ -63,17 +65,38 @@ impl PolicyArtifact {
     }
 }
 
+const MAX_AUDITOR_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+
+fn read_artifact_bounded(path: &str, kind: &str) -> Result<String, String> {
+    let file =
+        std::fs::File::open(path).map_err(|error| format!("cannot read {kind} {path}: {error}"))?;
+    if file
+        .metadata()
+        .map_err(|error| format!("cannot read {kind} {path}: {error}"))?
+        .len()
+        > MAX_AUDITOR_ARTIFACT_BYTES as u64
+    {
+        return Err(format!("{kind} exceeds {MAX_AUDITOR_ARTIFACT_BYTES} bytes"));
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_AUDITOR_ARTIFACT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {kind} {path}: {error}"))?;
+    if bytes.len() > MAX_AUDITOR_ARTIFACT_BYTES {
+        return Err(format!("{kind} exceeds {MAX_AUDITOR_ARTIFACT_BYTES} bytes"));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("cannot read {kind} {path}: {error}"))
+}
+
 fn load_policy(path: &str) -> Result<PolicySnapshot, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read policy artifact {path}: {error}"))?;
+    let raw = read_artifact_bounded(path, "policy artifact")?;
     let artifact: PolicyArtifact = serde_json::from_str(&raw)
         .map_err(|error| format!("cannot parse policy artifact {path}: {error}"))?;
     artifact.into_snapshot()
 }
 
 fn load_anchor(path: &str) -> Result<WalAnchor, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read WAL anchor {path}: {error}"))?;
+    let raw = read_artifact_bounded(path, "WAL anchor")?;
     serde_json::from_str(&raw).map_err(|error| format!("cannot parse WAL anchor {path}: {error}"))
 }
 
@@ -107,15 +130,34 @@ fn parse_hex_key(hex_key: &str) -> Result<Vec<u8>, String> {
 struct Args {
     command: String,
     target: String,
-    policy: Option<String>,
+    policies: Vec<String>,
     anchor: Option<String>,
     hmac_key: Option<Vec<u8>>,
     json: bool,
 }
 
-fn parse_args() -> Result<Args, String> {
+/// A bare usage request is distinct from a real parse failure, so the two are
+/// not encoded as an empty message string.
+enum ArgsError {
+    Usage,
+    Message(String),
+}
+
+impl From<&str> for ArgsError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_string())
+    }
+}
+
+impl From<String> for ArgsError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+fn parse_args() -> Result<Args, ArgsError> {
     let mut positional = Vec::new();
-    let mut policy = None;
+    let mut policies = Vec::new();
     let mut anchor = None;
     let mut hmac_key = None;
     let mut json = false;
@@ -124,7 +166,7 @@ fn parse_args() -> Result<Args, String> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--policy" => {
-                policy = Some(iter.next().ok_or("--policy requires a path")?);
+                policies.push(iter.next().ok_or("--policy requires a path")?);
             }
             "--anchor" => {
                 anchor = Some(iter.next().ok_or("--anchor requires a path")?);
@@ -134,17 +176,17 @@ fn parse_args() -> Result<Args, String> {
                 hmac_key = Some(parse_hex_key(&raw)?);
             }
             "--json" => json = true,
-            "-h" | "--help" => return Err(String::new()),
+            "-h" | "--help" => return Err(ArgsError::Usage),
             other => positional.push(other.to_string()),
         }
     }
     if positional.len() != 2 {
-        return Err(String::new());
+        return Err(ArgsError::Usage);
     }
     Ok(Args {
         command: positional[0].clone(),
         target: positional[1].clone(),
-        policy,
+        policies,
         anchor,
         hmac_key,
         json,
@@ -153,8 +195,12 @@ fn parse_args() -> Result<Args, String> {
 
 /// Emit a one-line JSON verdict for CI/compliance pipelines.
 fn emit_json(command: &str, ok: bool, detail: &str) {
-    let escaped = detail.replace('\\', "\\\\").replace('"', "\\\"");
-    println!("{{\"command\":\"{command}\",\"ok\":{ok},\"detail\":\"{escaped}\"}}");
+    let payload = serde_json::json!({
+        "command": command,
+        "ok": ok,
+        "detail": detail,
+    });
+    println!("{payload}");
 }
 
 fn usage() {
@@ -162,7 +208,7 @@ fn usage() {
         "calybris-verify — independent CALY-PROOF v1 auditor\n\n\
          USAGE:\n\
          \x20 calybris-verify chain  <wal.jsonl> [--anchor anchor.json] [--hmac-key-hex HEX]\n\
-         \x20 calybris-verify audit  <wal.jsonl> [--policy policy.json] [--anchor anchor.json] [--hmac-key-hex HEX]\n\
+         \x20 calybris-verify audit  <wal.jsonl> [--policy policy.json ...] [--anchor anchor.json] [--hmac-key-hex HEX]\n\
          \x20 calybris-verify policy <policy.json>\n\n\
          Exit codes: 0 verified, 1 verification failure, 2 usage error.\n\
          Spec: docs/CALY_PROOF.md"
@@ -202,39 +248,60 @@ fn cmd_chain(path: &Path, key: Option<&[u8]>, anchor: Option<&WalAnchor>, json: 
 
 fn cmd_audit(
     path: &Path,
-    policy: Option<PolicySnapshot>,
+    policies: Vec<PolicySnapshot>,
     key: Option<&[u8]>,
     anchor: Option<&WalAnchor>,
     json: bool,
 ) -> ExitCode {
     type Record = AuditedRecord<serde_json::Value>;
-    let expected_policy_hex = policy.as_ref().map(|p| digest_to_hex(&policy_digest(p)));
+    let policies: Vec<_> = policies
+        .into_iter()
+        .map(|policy| {
+            (
+                policy.policy_epoch,
+                policy.catalog_epoch,
+                digest_to_hex(&policy_digest(&policy)),
+                policy,
+            )
+        })
+        .collect();
+    let has_policies = !policies.is_empty();
     let mut failures = 0_u64;
     let mut entries = 0_u64;
     let mut inspect = |entry: calybris_core::wal::WalEntry<Record>| {
         entries += 1;
         let record = &entry.data;
         let mut problems = Vec::new();
+        if let Err(error) = record.audit.validate_canonical() {
+            problems.push(format!("non-canonical audit bundle: {error}"));
+        }
         if digest_to_hex(&input_digest(&record.input)) != record.audit.input_digest_hex {
-            problems.push("input digest mismatch");
+            problems.push("input digest mismatch".to_string());
         }
         if digest_to_hex(&decision_digest(&record.decision)) != record.audit.decision_digest_hex {
-            problems.push("decision digest mismatch");
+            problems.push("decision digest mismatch".to_string());
         }
-        if let Some(expected) = &expected_policy_hex {
-            if &record.audit.policy_digest_hex != expected {
-                problems.push("policy digest mismatch");
-            }
+        let resolved_policy = policies
+            .iter()
+            .find(|(policy_epoch, catalog_epoch, digest, _)| {
+                *policy_epoch == record.audit.policy_epoch
+                    && *catalog_epoch == record.audit.catalog_epoch
+                    && digest == &record.audit.policy_digest_hex
+            });
+        if has_policies && resolved_policy.is_none() {
+            problems.push("policy not resolved".to_string());
         }
-        if let Some(policy) = &policy {
+        if let Some((_, _, _, policy)) = resolved_policy {
             use calybris_core::verify::{verify_decision, VerifyResult};
             if verify_decision(policy, record.input, &record.decision) != VerifyResult::Valid {
-                problems.push("kernel replay mismatch");
+                problems.push("kernel replay mismatch".to_string());
             }
         }
         if !problems.is_empty() {
             failures += 1;
-            eprintln!("seq {}: {}", entry.sequence, problems.join(", "));
+            if !json {
+                eprintln!("seq {}: {}", entry.sequence, problems.join(", "));
+            }
         }
     };
     let head = match key {
@@ -263,8 +330,8 @@ fn cmd_audit(
         }
     }
 
-    let mode = if policy.is_some() {
-        "digests + policy + kernel replay"
+    let mode = if has_policies {
+        "digests + policy resolver + kernel replay"
     } else {
         "digests only (no policy artifact supplied)"
     };
@@ -318,8 +385,8 @@ fn cmd_policy(path: &str, json: bool) -> ExitCode {
 fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(args) => args,
-        Err(message) => {
-            if !message.is_empty() {
+        Err(error) => {
+            if let ArgsError::Message(message) = error {
                 eprintln!("error: {message}\n");
             }
             usage();
@@ -332,7 +399,11 @@ fn main() -> ExitCode {
             let anchor = match args.anchor.as_deref().map(load_anchor) {
                 Some(Ok(anchor)) => Some(anchor),
                 Some(Err(error)) => {
-                    eprintln!("error: {error}");
+                    if args.json {
+                        emit_json("chain", false, &format!("anchor: {error}"));
+                    } else {
+                        eprintln!("error: {error}");
+                    }
                     return ExitCode::FAILURE;
                 }
                 None => None,
@@ -345,25 +416,35 @@ fn main() -> ExitCode {
             )
         }
         "audit" => {
-            let policy = match args.policy.as_deref().map(load_policy) {
-                Some(Ok(policy)) => Some(policy),
-                Some(Err(error)) => {
-                    eprintln!("error: {error}");
-                    return ExitCode::FAILURE;
+            let mut policies = Vec::with_capacity(args.policies.len());
+            for path in &args.policies {
+                match load_policy(path) {
+                    Ok(policy) => policies.push(policy),
+                    Err(error) => {
+                        if args.json {
+                            emit_json("audit", false, &format!("policy: {error}"));
+                        } else {
+                            eprintln!("error: {error}");
+                        }
+                        return ExitCode::FAILURE;
+                    }
                 }
-                None => None,
-            };
+            }
             let anchor = match args.anchor.as_deref().map(load_anchor) {
                 Some(Ok(anchor)) => Some(anchor),
                 Some(Err(error)) => {
-                    eprintln!("error: {error}");
+                    if args.json {
+                        emit_json("audit", false, &format!("anchor: {error}"));
+                    } else {
+                        eprintln!("error: {error}");
+                    }
                     return ExitCode::FAILURE;
                 }
                 None => None,
             };
             cmd_audit(
                 Path::new(&args.target),
-                policy,
+                policies,
                 args.hmac_key.as_deref(),
                 anchor.as_ref(),
                 args.json,

@@ -7,6 +7,24 @@ use crate::digest::{decision_digest, digest_to_hex, input_digest, policy_digest}
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{verify_decision, VerifyResult};
 
+/// Current proof-envelope format version.
+pub const PROOF_ENVELOPE_VERSION: u16 = 1;
+
+/// Structural validation failure for a supposedly complete proof envelope.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProofEnvelopeValidationError {
+    #[error("unsupported proof envelope version: {0}")]
+    ProofVersion(u16),
+    #[error("proof envelope carries replay_valid=false")]
+    ReplayInvalid,
+    #[error("proof envelope is missing required evidence attachments")]
+    MissingAttachments,
+    #[error("WAL sequence must be greater than zero")]
+    InvalidWalSequence,
+    #[error("{field} must be exactly 64 lowercase hexadecimal characters")]
+    NonCanonicalDigest { field: &'static str },
+}
+
 /// A complete proof envelope for a single decision.
 ///
 /// Combines all cryptographic evidence into one struct that can be serialized,
@@ -47,7 +65,7 @@ pub fn seal(
 ) -> ProofEnvelope {
     let replay = verify_decision(snapshot, input, decision);
     ProofEnvelope {
-        proof_version: 1,
+        proof_version: PROOF_ENVELOPE_VERSION,
         policy_digest_hex: digest_to_hex(&policy_digest(snapshot)),
         input_digest_hex: digest_to_hex(&input_digest(&input)),
         decision_digest_hex: digest_to_hex(&decision_digest(decision)),
@@ -103,14 +121,65 @@ impl ProofEnvelopeBuilder {
 }
 
 impl ProofEnvelope {
-    /// Whether all evidence fields are populated (replay + WAL position + WAL hash + budget version + ledger digest).
+    /// Presence predicate retained for compatibility.
+    ///
+    /// This does not validate versions, digest encoding, or attachment content.
+    /// Use [`validate_complete`](Self::validate_complete) at trust boundaries.
     #[must_use]
     pub fn is_complete(&self) -> bool {
+        self.has_all_attachments()
+    }
+
+    /// Whether replay succeeded and all optional evidence slots are populated.
+    #[must_use]
+    pub fn has_all_attachments(&self) -> bool {
         self.replay_valid
             && self.wal_sequence.is_some()
             && self.wal_entry_hash.is_some()
             && self.budget_snapshot_version.is_some()
             && self.ledger_digest_hex.is_some()
+    }
+
+    /// Validate structural completeness and canonical digest encodings.
+    pub fn validate_complete(&self) -> Result<(), ProofEnvelopeValidationError> {
+        if self.proof_version != PROOF_ENVELOPE_VERSION {
+            return Err(ProofEnvelopeValidationError::ProofVersion(
+                self.proof_version,
+            ));
+        }
+        if !self.replay_valid {
+            return Err(ProofEnvelopeValidationError::ReplayInvalid);
+        }
+        if !self.has_all_attachments() {
+            return Err(ProofEnvelopeValidationError::MissingAttachments);
+        }
+        if self.wal_sequence == Some(0) {
+            return Err(ProofEnvelopeValidationError::InvalidWalSequence);
+        }
+        for (field, digest) in [
+            ("policy_digest_hex", self.policy_digest_hex.as_str()),
+            ("input_digest_hex", self.input_digest_hex.as_str()),
+            ("decision_digest_hex", self.decision_digest_hex.as_str()),
+            (
+                "wal_entry_hash",
+                self.wal_entry_hash.as_deref().expect("attachments checked"),
+            ),
+            (
+                "ledger_digest_hex",
+                self.ledger_digest_hex
+                    .as_deref()
+                    .expect("attachments checked"),
+            ),
+        ] {
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(ProofEnvelopeValidationError::NonCanonicalDigest { field });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -175,10 +244,12 @@ mod tests {
         let (snap, input) = snap_and_input();
         let decision = snap.prescribe(input);
         let envelope = ProofEnvelopeBuilder::new(&snap, input, &decision)
-            .wal(42, "abc123".to_string())
-            .budget(7, "def456".to_string())
+            .wal(42, "ab".repeat(32))
+            .budget(7, "de".repeat(32))
             .build();
         assert!(envelope.is_complete());
+        assert!(envelope.has_all_attachments());
+        envelope.validate_complete().unwrap();
         assert_eq!(envelope.wal_sequence, Some(42));
         assert_eq!(envelope.budget_snapshot_version, Some(7));
     }
@@ -191,5 +262,22 @@ mod tests {
         let envelope = seal(&snap, input, &decision);
         assert!(!envelope.replay_valid);
         assert!(!envelope.is_complete());
+    }
+
+    #[test]
+    fn complete_validation_rejects_noncanonical_attachment() {
+        let (snap, input) = snap_and_input();
+        let decision = snap.prescribe(input);
+        let envelope = ProofEnvelopeBuilder::new(&snap, input, &decision)
+            .wal(42, "ABC123".to_string())
+            .budget(7, "de".repeat(32))
+            .build();
+        assert!(envelope.has_all_attachments());
+        assert_eq!(
+            envelope.validate_complete(),
+            Err(ProofEnvelopeValidationError::NonCanonicalDigest {
+                field: "wal_entry_hash"
+            })
+        );
     }
 }

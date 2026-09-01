@@ -13,12 +13,55 @@ from typing_extensions import Self
 from . import _core
 from .errors import ArtifactValidationError
 
+MAX_WAL_METADATA_BYTES = 16 * 1024 * 1024 - 512
+_MAX_METADATA_DEPTH = 100
+
+
+def _preflight_metadata_size(value: Any, limit: int) -> None:
+    """Bound obvious JSON size before ``json.dumps`` can allocate its output."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    seen: set[int] = set()
+    estimated = 0
+    while stack:
+        item, depth = stack.pop()
+        if depth > _MAX_METADATA_DEPTH:
+            raise ArtifactValidationError(
+                f"metadata nesting exceeds {_MAX_METADATA_DEPTH} levels"
+            )
+        if isinstance(item, str):
+            estimated += len(item.encode("utf-8")) + 2
+        elif item is None or isinstance(item, (bool, int, float)):
+            estimated += len(repr(item)) + 1
+        elif isinstance(item, Mapping):
+            identity = id(item)
+            if identity in seen:
+                raise ArtifactValidationError("metadata must not contain cycles")
+            seen.add(identity)
+            estimated += 2 + len(item)
+            for key, nested in item.items():
+                stack.append((key, depth + 1))
+                stack.append((nested, depth + 1))
+        elif isinstance(item, (list, tuple)):
+            identity = id(item)
+            if identity in seen:
+                raise ArtifactValidationError("metadata must not contain cycles")
+            seen.add(identity)
+            estimated += 2 + len(item)
+            stack.extend((nested, depth + 1) for nested in item)
+        else:
+            # Let json.dumps produce the canonical type diagnostic below.
+            estimated += 1
+        if estimated > limit:
+            raise ArtifactValidationError(f"metadata exceeds {limit} bytes")
+
 
 def _canonical_metadata(metadata: Mapping[str, Any] | None) -> str:
     """Encode WAL metadata deterministically and reject non-standard floats."""
+    value = {} if metadata is None else dict(metadata)
+    _preflight_metadata_size(value, MAX_WAL_METADATA_BYTES)
     try:
-        return json.dumps(
-            {} if metadata is None else dict(metadata),
+        encoded = json.dumps(
+            value,
             allow_nan=False,
             ensure_ascii=False,
             separators=(",", ":"),
@@ -26,6 +69,9 @@ def _canonical_metadata(metadata: Mapping[str, Any] | None) -> str:
         )
     except (TypeError, ValueError) as exc:
         raise ArtifactValidationError(f"metadata must be canonical JSON data: {exc}") from exc
+    if len(encoded.encode("utf-8")) > MAX_WAL_METADATA_BYTES:
+        raise ArtifactValidationError(f"metadata exceeds {MAX_WAL_METADATA_BYTES} bytes")
+    return encoded
 
 
 class AuditedWal:
@@ -97,7 +143,20 @@ class AuditedWal:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close(sync=True)
+        if exc is None:
+            self.close(sync=True)
+            return
+        try:
+            self.close(sync=True)
+        except BaseException as close_error:
+            note = f"AuditedWal cleanup also failed: {close_error!r}"
+            add_note = getattr(exc, "add_note", None)
+            if callable(add_note):
+                add_note(note)
+            else:  # Python 3.10 compatibility for the package's declared floor.
+                notes = list(getattr(exc, "__notes__", ()))
+                notes.append(note)
+                setattr(exc, "__notes__", notes)
 
 
 def verify_audited_wal(
@@ -115,9 +174,27 @@ def replay_verify_audited_wal(
     policy: _core.PolicySnapshot,
     *,
     hmac_key: bytes | None = None,
+    max_entries: int = 100_000,
+    max_total_bytes: int = 256 * 1024 * 1024,
 ) -> list[dict[str, Any]]:
-    """Verify every WAL entry's chain, digests, and decision replay."""
-    return list(_core.replay_verify_audited_wal(path, policy, hmac_key=hmac_key))
+    """Verify WAL entries under explicit aggregate memory/input limits."""
+    if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 0:
+        raise ArtifactValidationError("max_entries must be a non-negative integer")
+    if (
+        isinstance(max_total_bytes, bool)
+        or not isinstance(max_total_bytes, int)
+        or max_total_bytes < 0
+    ):
+        raise ArtifactValidationError("max_total_bytes must be a non-negative integer")
+    return list(
+        _core.replay_verify_audited_wal(
+            path,
+            policy,
+            hmac_key=hmac_key,
+            max_entries=max_entries,
+            max_total_bytes=max_total_bytes,
+        )
+    )
 
 
 def plan_recovery(
@@ -139,5 +216,55 @@ def plan_recovery(
 
 
 def verify_state_trajectory(bundles: list[_core.StatefulAuditBundle]) -> None:
-    """Reject dropped, reordered, or disconnected state transitions."""
+    """Verify structural adjacency inside an unanchored compatibility fragment.
+
+    This does not replay or authenticate embedded audit bundles and does not
+    prove genesis or an expected terminal step. New code should prefer the
+    explicitly named :func:`verify_state_trajectory_linkage` surface.
+    """
     _core.verify_state_trajectory(bundles)
+
+
+def verify_state_trajectory_linkage(bundles: list[_core.StatefulAuditBundle]) -> None:
+    """Verify structural linkage only; per-bundle replay remains separate."""
+    _core.verify_state_trajectory(bundles)
+
+
+def verify_complete_state_trajectory(
+    initial_state_bytes: bytes,
+    expected_final_step: int,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify structural linkage from trusted genesis to a trusted final step."""
+    _core.verify_complete_state_trajectory(
+        initial_state_bytes,
+        expected_final_step,
+        bundles,
+    )
+
+
+def verify_complete_state_trajectory_linkage(
+    initial_state_bytes: bytes,
+    expected_final_step: int,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify complete structural linkage; per-bundle replay remains separate."""
+    verify_complete_state_trajectory(initial_state_bytes, expected_final_step, bundles)
+
+
+def verify_state_trajectory_fragment(
+    anchor_step: int,
+    anchor_digest_hex: str,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify structural linkage for a fragment against a trusted anchor."""
+    _core.verify_state_trajectory_fragment(anchor_step, anchor_digest_hex, bundles)
+
+
+def verify_state_trajectory_fragment_linkage(
+    anchor_step: int,
+    anchor_digest_hex: str,
+    bundles: list[_core.StatefulAuditBundle],
+) -> None:
+    """Verify anchored structural linkage; per-bundle replay remains separate."""
+    verify_state_trajectory_fragment(anchor_step, anchor_digest_hex, bundles)

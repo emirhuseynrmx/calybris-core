@@ -117,7 +117,6 @@ fn parse_hex<const N: usize>(field: &'static str, value: &str) -> Result<[u8; N]
         let nibble = |byte: u8| match byte {
             b'0'..=b'9' => Some(byte - b'0'),
             b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
             _ => None,
         };
         let high = nibble(pair[0]).ok_or_else(|| ReceiptError::Malformed {
@@ -383,6 +382,33 @@ pub fn verify_receipt_signature(
         .map_err(|_| ReceiptError::BadSignature)
 }
 
+/// Verify the complete production receipt contract in one fail-closed call.
+///
+/// This combines decision replay, canonical claim integrity, trusted-key
+/// signature verification, and the caller's expected state and WAL anchors.
+/// Use this at trust boundaries instead of treating signature verification as
+/// proof that the disclosed state or log position is the expected one.
+#[cfg(feature = "provenance")]
+pub fn verify_receipt_full(
+    receipt: &DecisionReceipt,
+    snapshot: &PolicySnapshot,
+    input: KernelInput,
+    decision: &KernelDecision,
+    trusted_key: &ed25519_dalek::VerifyingKey,
+    expected_state: &ReceiptState,
+    expected_wal: &ReceiptWal,
+) -> Result<(), ReceiptError> {
+    verify_receipt(receipt, snapshot, input, decision)?;
+    verify_receipt_signature(receipt, Some(trusted_key))?;
+    verify_receipt_state(
+        receipt,
+        expected_state.step,
+        &expected_state.state_digest_before_hex,
+        &expected_state.state_digest_after_hex,
+    )?;
+    verify_receipt_wal(receipt, expected_wal.sequence, &expected_wal.entry_hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +524,21 @@ mod tests {
     }
 
     #[test]
+    fn receipt_rejects_uppercase_noncanonical_digest_encoding() {
+        let (snapshot, input, decision) = fixture();
+        let mut receipt = issue_receipt(&snapshot, input, &decision, anchors()).unwrap();
+        receipt.state.as_mut().unwrap().state_digest_before_hex = "AB".repeat(32);
+
+        assert!(matches!(
+            receipt_claims_digest(&receipt),
+            Err(ReceiptError::Malformed {
+                field: "state_digest_before_hex",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn malformed_anchors_are_rejected_during_issuance_without_panicking() {
         let (snapshot, input, decision) = fixture();
         let malformed_state = ReceiptAnchors {
@@ -596,6 +637,53 @@ mod tests {
         assert_eq!(
             verify_receipt_signature(&tampered_signer, Some(&key.verifying_key())),
             Err(ReceiptError::BadSignature)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "provenance")]
+    fn full_verification_requires_replay_signature_state_and_wal() {
+        let (snapshot, input, decision) = fixture();
+        let expected = anchors();
+        let expected_state = expected.state.clone().unwrap();
+        let expected_wal = expected.wal.clone().unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
+        let mut receipt = issue_receipt(&snapshot, input, &decision, expected).unwrap();
+        sign_receipt(&mut receipt, &key, "receipt-service", 1_700_000_000_000).unwrap();
+
+        verify_receipt_full(
+            &receipt,
+            &snapshot,
+            input,
+            &decision,
+            &key.verifying_key(),
+            &expected_state,
+            &expected_wal,
+        )
+        .unwrap();
+
+        let mut missing_wal = issue_receipt(
+            &snapshot,
+            input,
+            &decision,
+            ReceiptAnchors {
+                state: Some(expected_state.clone()),
+                wal: None,
+            },
+        )
+        .unwrap();
+        sign_receipt(&mut missing_wal, &key, "receipt-service", 1_700_000_000_000).unwrap();
+        assert_eq!(
+            verify_receipt_full(
+                &missing_wal,
+                &snapshot,
+                input,
+                &decision,
+                &key.verifying_key(),
+                &expected_state,
+                &expected_wal,
+            ),
+            Err(ReceiptError::WalAnchorMismatch)
         );
     }
 }

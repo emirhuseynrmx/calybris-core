@@ -328,7 +328,7 @@ def display_reason(reason: object) -> str:
     return REASON_LABELS.get(raw, raw.replace("_", " "))
 
 
-def run_policy(profile: PolicyProfile, order_count: int) -> dict[str, object]:
+def run_policy(profile: PolicyProfile, order_count: int) -> dict[str, Any]:
     engine = build_engine(profile)
     orders = generate_orders(profile, order_count)
 
@@ -444,13 +444,13 @@ def run_policy(profile: PolicyProfile, order_count: int) -> dict[str, object]:
     }
 
 
-def format_optional_mb(value: object) -> str:
+def format_optional_mb(value: float | None) -> str:
     if value is None:
         return "     n/a"
     return f"{float(value):>8.2f}"
 
 
-def print_summary(rows: list[dict[str, object]], order_count: int) -> None:
+def print_summary(rows: list[dict[str, Any]], order_count: int) -> None:
     print("NovaMart Comprehensive Benchmark")
     print(f"Orders per profile: {order_count:,}")
     print(f"Supplier profiles: {len(supplier_catalog())}")
@@ -478,7 +478,7 @@ def print_summary(rows: list[dict[str, object]], order_count: int) -> None:
     print()
 
 
-def print_details(rows: list[dict[str, object]]) -> None:
+def print_details(rows: list[dict[str, Any]]) -> None:
     for row in rows:
         print(f"Policy: {row['profile']} ({str(row['fingerprint'])[:12]}...)")
         print(
@@ -497,7 +497,7 @@ def print_details(rows: list[dict[str, object]]) -> None:
         print()
 
 
-def compact_row(row: dict[str, object]) -> dict[str, object]:
+def compact_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in row.items()
@@ -505,7 +505,7 @@ def compact_row(row: dict[str, object]) -> dict[str, object]:
     }
 
 
-def json_ready(row: dict[str, object]) -> dict[str, Any]:
+def json_ready(row: dict[str, Any]) -> dict[str, Any]:
     output = compact_row(row)
     output["supplier_counts"] = dict(row["supplier_counts"].most_common())
     output["rejection_reasons"] = {
@@ -519,7 +519,7 @@ def json_ready(row: dict[str, object]) -> dict[str, Any]:
     return output
 
 
-def write_json(path: str, rows: list[dict[str, object]], order_count: int) -> None:
+def write_json(path: str, rows: list[dict[str, Any]], order_count: int) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -533,7 +533,7 @@ def write_json(path: str, rows: list[dict[str, object]], order_count: int) -> No
         handle.write("\n")
 
 
-def write_csv(path: str, rows: list[dict[str, object]]) -> None:
+def write_csv(path: str, rows: list[dict[str, Any]]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = list(compact_row(rows[0]).keys())

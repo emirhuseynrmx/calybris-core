@@ -1,6 +1,5 @@
 """Route a batch of requests, inspect substitutions, and collect audit bundles."""
 from calybris import (
-    ALL_PROVIDERS,
     ALL_REGIONS,
     CalybrisEngine,
     EngineConfig,
