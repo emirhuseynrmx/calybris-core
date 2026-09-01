@@ -532,6 +532,7 @@ mod tests {
     use crate::budget::BudgetEngine;
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: 16 MiB artifact is impractical to interpret")]
     fn atomic_writer_and_loader_share_the_same_size_limit() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("limit.json");
@@ -545,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: 16 MiB artifact is impractical to interpret")]
     fn oversized_atomic_save_preserves_previous_checkpoint() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("preserve.json");
@@ -558,6 +560,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "wal")]
+    #[cfg_attr(miri, ignore = "miri: 16 MiB artifact is impractical to interpret")]
     fn oversized_coordinated_snapshot_does_not_commit_manifest() {
         let dir = tempfile::TempDir::new().unwrap();
         let wal_path = dir.path().join("events.wal");
