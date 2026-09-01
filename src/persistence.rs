@@ -1177,6 +1177,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri: contended flock blocks, which miri cannot run")]
     fn concurrent_atomic_saves_do_not_share_a_temp_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("snapshot.json");
