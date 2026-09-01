@@ -1151,7 +1151,7 @@ mod tests {
 
     #[test]
     fn reserve_and_commit() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (_, id) = engine.try_reserve("t1", 25_000_000);
         let settlement = engine.commit(id.unwrap(), 20_000_000);
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn reserve_insufficient() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 10_000_000);
         let (res, id) = engine.try_reserve("t1", 50_000_000);
         assert!(matches!(res, BudgetReservation::Insufficient { .. }));
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn release_returns_full_amount() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (_, id) = engine.try_reserve("t1", 30_000_000);
         engine.release(id.unwrap());
@@ -1179,14 +1179,14 @@ mod tests {
 
     #[test]
     fn missing_tenant_rejected() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         let (res, _) = engine.try_reserve("nonexistent", 1000);
         assert!(matches!(res, BudgetReservation::MissingTenant));
     }
 
     #[test]
     fn missing_reservation_rejected() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         assert!(matches!(
             engine.commit(999, 1000),
             BudgetSettlement::MissingReservation
@@ -1199,7 +1199,7 @@ mod tests {
 
     #[test]
     fn conservation_invariant() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (_, id1) = engine.try_reserve("t1", 30_000_000);
         let (_, id2) = engine.try_reserve("t1", 20_000_000);
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn top_up_extends_initial_and_remaining() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 100_000_000);
         let result = engine.top_up_tenant("desk", 50_000_000);
         assert!(matches!(result, TopUpResult::ToppedUp { .. }));
@@ -1223,7 +1223,7 @@ mod tests {
 
     #[test]
     fn snapshot_balances() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk-a", 50_000_000);
         engine.ensure_tenant("desk-b", 80_000_000);
         let (_, id) = engine.try_reserve("desk-a", 10_000_000);
@@ -1236,7 +1236,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "miri: concurrency stress test")]
     fn snapshots_are_linearizable_with_reservation_mutations() {
-        let engine = Arc::new(BudgetEngine::new());
+        let engine = Arc::new(BudgetEngine::default());
         engine.ensure_tenant("desk", 1_000_000);
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
@@ -1271,7 +1271,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn concurrent_reserve_never_overspends() {
-        let engine = Arc::new(BudgetEngine::new());
+        let engine = Arc::new(BudgetEngine::default());
         engine.ensure_tenant("t1", 100_000_000);
         let handles: Vec<_> = (0..100)
             .map(|_| {
@@ -1292,7 +1292,7 @@ mod tests {
 
     #[test]
     fn zero_cost_rejected() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (res, _) = engine.try_reserve("t1", 0);
         assert!(matches!(res, BudgetReservation::Insufficient { .. }));
@@ -1300,7 +1300,7 @@ mod tests {
 
     #[test]
     fn negative_cost_rejected() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (res, _) = engine.try_reserve("t1", -500);
         assert!(matches!(res, BudgetReservation::Insufficient { .. }));
@@ -1308,7 +1308,7 @@ mod tests {
 
     #[test]
     fn negative_commit_rejected() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (_, id) = engine.try_reserve("t1", 10_000_000);
         let result = engine.commit(id.unwrap(), -5_000_000);
@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn failed_overrun_does_not_create_budget() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 10_000_000);
 
         let (_, id) = engine.try_reserve("t1", 7_000_000);
@@ -1338,7 +1338,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn no_deadlock_under_contention() {
-        let engine = Arc::new(BudgetEngine::new());
+        let engine = Arc::new(BudgetEngine::default());
         engine.ensure_tenant("t1", 1_000_000_000);
         let handles: Vec<_> = (0..50)
             .map(|i| {
@@ -1364,7 +1364,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn concurrent_overrun_never_goes_negative() {
-        let engine = Arc::new(BudgetEngine::new());
+        let engine = Arc::new(BudgetEngine::default());
         engine.ensure_tenant("t1", 50_000_000);
 
         // Reserve small amounts, commit with overrun
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn double_commit_rejected() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (_, id) = engine.try_reserve("t1", 10_000_000);
         let id = id.unwrap();
@@ -1410,7 +1410,7 @@ mod tests {
 
     #[test]
     fn double_release_rejected() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("t1", 100_000_000);
         let (_, id) = engine.try_reserve("t1", 10_000_000);
         let id = id.unwrap();
@@ -1426,13 +1426,13 @@ mod tests {
 
     #[test]
     fn restore_from_snapshot_roundtrip() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000_000);
         let (_, id) = engine.try_reserve("desk", 100_000);
         engine.commit(id.unwrap(), 90_000);
         let snap = engine.snapshot();
         assert!(snap.active_reservations == 0);
-        let fresh = BudgetEngine::new();
+        let fresh = BudgetEngine::default();
         fresh.restore_from_snapshot(snap).unwrap();
         assert_eq!(fresh.remaining_microcents("desk"), Some(910_000));
         assert_eq!(fresh.committed_microcents("desk"), Some(90_000));
@@ -1441,7 +1441,7 @@ mod tests {
 
     #[test]
     fn restore_preserves_reservation_id_monotonicity() {
-        let source = BudgetEngine::new();
+        let source = BudgetEngine::default();
         source.ensure_tenant("desk", 1_000_000);
         let (_, stale_id) = source.try_reserve("desk", 100_000);
         let stale_id = stale_id.expect("source reservation");
@@ -1451,7 +1451,7 @@ mod tests {
         ));
 
         let snapshot = source.snapshot();
-        let recovered = BudgetEngine::new();
+        let recovered = BudgetEngine::default();
         recovered.restore_from_snapshot(snapshot).unwrap();
         let (_, recovered_id) = recovered.try_reserve("desk", 100_000);
         let recovered_id = recovered_id.expect("recovered reservation");
@@ -1466,14 +1466,14 @@ mod tests {
 
     #[test]
     fn legacy_snapshot_migration_requires_and_binds_a_trusted_allocator_fence() {
-        let source = BudgetEngine::new();
+        let source = BudgetEngine::default();
         source.ensure_tenant("desk", 1_000_000);
         let mut legacy = source.snapshot();
         legacy.version = 7;
 
         assert!(migrate_legacy_snapshot(legacy.clone(), 0).is_err());
         let migrated = migrate_legacy_snapshot(legacy, 100).unwrap();
-        let recovered = BudgetEngine::new();
+        let recovered = BudgetEngine::default();
         recovered.restore_from_snapshot(migrated).unwrap();
         let (_, reservation_id) = recovered.try_reserve("desk", 100_000);
 
@@ -1482,7 +1482,7 @@ mod tests {
 
     #[test]
     fn snapshot_fails_closed_when_the_reservation_allocator_is_exhausted() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000_000);
         // Last usable fence, so the next capture has no distinct position left.
         engine
@@ -1503,7 +1503,7 @@ mod tests {
             active_reservations: 0,
             wal_high_watermark: None,
         };
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         assert_eq!(
             engine.restore_from_recovery_snapshot(legacy),
             Err(RecoverySnapshotError::LegacySnapshotRequiresMigration)
@@ -1512,13 +1512,13 @@ mod tests {
 
     #[test]
     fn restore_replaces_all_recovery_sensitive_runtime_state() {
-        let source = BudgetEngine::new();
+        let source = BudgetEngine::default();
         source.ensure_tenant("desk", 1_000_000);
         let (_, id) = source.try_reserve("desk", 100_000);
         source.commit(id.unwrap(), 80_000);
         let snapshot = source.snapshot();
 
-        let recovered = BudgetEngine::new();
+        let recovered = BudgetEngine::default();
         recovered.ensure_tenant("old", 1_000_000);
         recovered.set_max_reserved_microcents("desk", 1);
         assert_eq!(recovered.rotate_certificate_baseline(10), 10);
@@ -1532,7 +1532,7 @@ mod tests {
 
     #[test]
     fn ensure_tenant_rejects_negative_budget() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", -1);
         assert_eq!(engine.tenant_count(), 0);
         assert!(engine.try_ensure_tenant("desk", -1).is_err());
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[test]
     fn negative_exposure_cap_does_not_remove_existing_cap() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000);
         engine.set_max_reserved_microcents("desk", 100);
         assert!(engine.try_set_max_reserved_microcents("desk", -1).is_err());
@@ -1563,7 +1563,7 @@ mod tests {
 
     #[test]
     fn certificate_baseline_is_monotonic() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         assert_eq!(engine.rotate_certificate_baseline(150), 150);
         assert_eq!(engine.rotate_certificate_baseline(100), 0);
         assert_eq!(engine.rotate_certificate_baseline(200), 50);
@@ -1571,7 +1571,7 @@ mod tests {
 
     #[test]
     fn total_committed_microcents_reports_aggregate_overflow() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk-a", 1);
         engine.ensure_tenant("desk-b", 1);
         {
@@ -1611,19 +1611,19 @@ mod tests {
 
     #[test]
     fn restore_rejects_duplicate_tenant() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000_000);
         let mut snap = engine.snapshot();
         snap.tenants.push(snap.tenants[0].clone());
         assert!(matches!(
-            BudgetEngine::new().restore_from_snapshot(snap),
+            BudgetEngine::default().restore_from_snapshot(snap),
             Err(RestoreError::DuplicateTenant { .. })
         ));
     }
 
     #[test]
     fn top_up_rejects_overflow() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", i64::MAX - 10);
         assert!(matches!(
             engine.top_up_tenant("desk", 20),
@@ -1633,7 +1633,7 @@ mod tests {
 
     #[test]
     fn reserve_rejects_reserved_total_overflow() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", i64::MAX);
         engine.set_max_reserved_microcents("desk", 0);
         let (res, _) = engine.try_reserve("desk", i64::MAX);
@@ -1644,7 +1644,7 @@ mod tests {
 
     #[test]
     fn commit_rejects_lifetime_overflow() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", i64::MAX);
         let (_, id) = engine.try_reserve("desk", 1);
         assert!(matches!(
@@ -1660,37 +1660,37 @@ mod tests {
 
     #[test]
     fn restore_rejects_ghost_reserved() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000_000);
         let mut snap = engine.snapshot();
         snap.tenants[0].reserved_microcents = 100_000;
         assert!(matches!(
-            BudgetEngine::new().restore_from_snapshot(snap),
+            BudgetEngine::default().restore_from_snapshot(snap),
             Err(RestoreError::GhostReservation { .. })
         ));
     }
 
     #[test]
     fn restore_rejects_unbalanced_snapshot() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000_000);
         let mut snap = engine.snapshot();
         snap.tenants[0].remaining_microcents = 0;
         assert!(matches!(
-            BudgetEngine::new().restore_from_snapshot(snap),
+            BudgetEngine::default().restore_from_snapshot(snap),
             Err(RestoreError::ConservationViolation { .. })
         ));
     }
 
     #[test]
     fn restore_rejects_active_reservations() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000_000);
         let (_, id) = engine.try_reserve("desk", 50_000);
         id.unwrap();
         let mut snap = engine.snapshot();
         snap.active_reservations = 1;
-        let fresh = BudgetEngine::new();
+        let fresh = BudgetEngine::default();
         assert!(matches!(
             fresh.restore_from_snapshot(snap),
             Err(RestoreError::ActiveReservations { count: 1 })
@@ -1700,7 +1700,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "miri: use Loom for concurrent interleavings")]
     fn exposure_limit_holds_under_concurrent_reserve() {
-        let engine = Arc::new(BudgetEngine::new());
+        let engine = Arc::new(BudgetEngine::default());
         engine.ensure_tenant("desk", 10_000_000);
         engine.set_max_reserved_microcents("desk", 100_000);
         let handles: Vec<_> = (0..32)
@@ -1723,7 +1723,7 @@ mod tests {
 
     #[test]
     fn exposure_limit_blocks_reserve() {
-        let engine = BudgetEngine::new();
+        let engine = BudgetEngine::default();
         engine.ensure_tenant("desk", 1_000_000);
         engine.set_max_reserved_microcents("desk", 100_000);
         let (_, id1) = engine.try_reserve("desk", 60_000);
@@ -1755,7 +1755,7 @@ mod tests {
             tenant_count in 1_usize..8,
             seed_ops in prop::collection::vec((0u8..6, any::<u8>(), edge_amounts()), 5..80),
         ) {
-            let engine = BudgetEngine::new();
+            let engine = BudgetEngine::default();
             for t in 0..tenant_count {
                 engine.ensure_tenant(&format!("tenant-{t}"), 2_000_000);
                 if t % 2 == 0 {
@@ -1830,7 +1830,7 @@ mod tests {
         fn random_ops_maintain_conservation(
             seed_ops in prop::collection::vec((0u8..4, any::<u8>(), 1i64..50_000), 1..40),
         ) {
-            let engine = BudgetEngine::new();
+            let engine = BudgetEngine::default();
             engine.ensure_tenant("t0", 5_000_000);
             engine.ensure_tenant("t1", 5_000_000);
             let mut open_ids = Vec::new();
