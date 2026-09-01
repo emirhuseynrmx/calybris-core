@@ -13,12 +13,55 @@ from typing_extensions import Self
 from . import _core
 from .errors import ArtifactValidationError
 
+MAX_WAL_METADATA_BYTES = 16 * 1024 * 1024 - 512
+_MAX_METADATA_DEPTH = 100
+
+
+def _preflight_metadata_size(value: Any, limit: int) -> None:
+    """Bound obvious JSON size before ``json.dumps`` can allocate its output."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    seen: set[int] = set()
+    estimated = 0
+    while stack:
+        item, depth = stack.pop()
+        if depth > _MAX_METADATA_DEPTH:
+            raise ArtifactValidationError(
+                f"metadata nesting exceeds {_MAX_METADATA_DEPTH} levels"
+            )
+        if isinstance(item, str):
+            estimated += len(item.encode("utf-8")) + 2
+        elif item is None or isinstance(item, (bool, int, float)):
+            estimated += len(repr(item)) + 1
+        elif isinstance(item, Mapping):
+            identity = id(item)
+            if identity in seen:
+                raise ArtifactValidationError("metadata must not contain cycles")
+            seen.add(identity)
+            estimated += 2 + len(item)
+            for key, nested in item.items():
+                stack.append((key, depth + 1))
+                stack.append((nested, depth + 1))
+        elif isinstance(item, (list, tuple)):
+            identity = id(item)
+            if identity in seen:
+                raise ArtifactValidationError("metadata must not contain cycles")
+            seen.add(identity)
+            estimated += 2 + len(item)
+            stack.extend((nested, depth + 1) for nested in item)
+        else:
+            # Let json.dumps produce the canonical type diagnostic below.
+            estimated += 1
+        if estimated > limit:
+            raise ArtifactValidationError(f"metadata exceeds {limit} bytes")
+
 
 def _canonical_metadata(metadata: Mapping[str, Any] | None) -> str:
     """Encode WAL metadata deterministically and reject non-standard floats."""
+    value = {} if metadata is None else dict(metadata)
+    _preflight_metadata_size(value, MAX_WAL_METADATA_BYTES)
     try:
-        return json.dumps(
-            {} if metadata is None else dict(metadata),
+        encoded = json.dumps(
+            value,
             allow_nan=False,
             ensure_ascii=False,
             separators=(",", ":"),
@@ -26,6 +69,9 @@ def _canonical_metadata(metadata: Mapping[str, Any] | None) -> str:
         )
     except (TypeError, ValueError) as exc:
         raise ArtifactValidationError(f"metadata must be canonical JSON data: {exc}") from exc
+    if len(encoded.encode("utf-8")) > MAX_WAL_METADATA_BYTES:
+        raise ArtifactValidationError(f"metadata exceeds {MAX_WAL_METADATA_BYTES} bytes")
+    return encoded
 
 
 class AuditedWal:
@@ -128,9 +174,27 @@ def replay_verify_audited_wal(
     policy: _core.PolicySnapshot,
     *,
     hmac_key: bytes | None = None,
+    max_entries: int = 100_000,
+    max_total_bytes: int = 256 * 1024 * 1024,
 ) -> list[dict[str, Any]]:
-    """Verify every WAL entry's chain, digests, and decision replay."""
-    return list(_core.replay_verify_audited_wal(path, policy, hmac_key=hmac_key))
+    """Verify WAL entries under explicit aggregate memory/input limits."""
+    if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 0:
+        raise ArtifactValidationError("max_entries must be a non-negative integer")
+    if (
+        isinstance(max_total_bytes, bool)
+        or not isinstance(max_total_bytes, int)
+        or max_total_bytes < 0
+    ):
+        raise ArtifactValidationError("max_total_bytes must be a non-negative integer")
+    return list(
+        _core.replay_verify_audited_wal(
+            path,
+            policy,
+            hmac_key=hmac_key,
+            max_entries=max_entries,
+            max_total_bytes=max_total_bytes,
+        )
+    )
 
 
 def plan_recovery(

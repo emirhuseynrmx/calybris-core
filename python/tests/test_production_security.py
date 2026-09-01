@@ -302,7 +302,7 @@ def test_keyed_wal_anchor_replay_and_receipt_roundtrip(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     engine = CalybrisEngine(_policy())
     request = _request()
     decision = engine.prescribe(request)
@@ -355,7 +355,7 @@ def test_wal_rejects_short_key_and_second_writer(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     wal_path = tmp_path / "decisions.wal"
     with pytest.raises(ArtifactValidationError, match="at least 32 bytes"):
         AuditedWal(wal_path, hmac_key=b"too-short")
@@ -372,7 +372,7 @@ def test_metadata_nan_is_rejected_without_advancing_wal(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     engine = CalybrisEngine(_policy())
     request = _request()
     decision = engine.prescribe(request)
@@ -388,11 +388,21 @@ def test_metadata_nan_is_rejected_without_advancing_wal(
         assert wal.sequence == 0
 
 
+def test_metadata_is_bounded_before_crossing_native_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from calybris import audit
+
+    monkeypatch.setattr(audit, "MAX_WAL_METADATA_BYTES", 128)
+    with pytest.raises(ArtifactValidationError, match="exceeds 128 bytes"):
+        audit._canonical_metadata({"oversized": "x" * 1_000})
+
+
 def test_anchor_detects_clean_suffix_truncation(
     tmp_path: Path,
     lock_dir: Path,
 ) -> None:
-    del lock_dir
+    del lock_dir  # skipcq: PTC-W0043 - fixture requested for its side effect only
     engine = CalybrisEngine(_policy())
     wal_path = tmp_path / "decisions.wal"
 

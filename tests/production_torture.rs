@@ -241,6 +241,9 @@ fn production_torture_benchmark() {
     );
 
     let directory = tempfile::tempdir().expect("temporary WAL directory");
+    // skipcq: RS-W1015
+    // This binary holds one test, so the process environment is not mutated
+    // concurrently. Edition 2024 will require an `unsafe` block here.
     std::env::set_var("CALYBRIS_WAL_LOCK_DIR", directory.path().join("locks"));
     let wal_path = directory.path().join("torture.wal.jsonl");
     let wal_operations = 25_000_usize;

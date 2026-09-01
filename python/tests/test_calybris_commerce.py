@@ -1023,7 +1023,7 @@ def test_property_tamper_detected_for_different_order(seq: int, other_seq: int):
     """verified_audit_bundle_for_order raises when the order doesn't match the decision."""
     engine = EcomEngine(_standard_policy())
     decision = engine.prescribe_raw(_standard_order(seq=seq))
-    with pytest.raises((VerificationError, Exception)):
+    with pytest.raises(VerificationError):
         engine.verified_audit_bundle_for_order(_standard_order(seq=other_seq), decision)
 
 

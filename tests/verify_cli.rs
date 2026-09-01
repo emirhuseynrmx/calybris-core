@@ -373,3 +373,46 @@ fn policy_command_uses_trusted_policy_validation() {
     let (ok, out) = run(&["policy", policy_path.to_str().unwrap()]);
     assert!(!ok, "reserved model ID was accepted: {out}");
 }
+
+#[test]
+fn policy_command_rejects_oversized_artifact_without_unbounded_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy_path = dir.path().join("oversized-policy.json");
+    let file = std::fs::File::create(&policy_path).unwrap();
+    file.set_len(16 * 1024 * 1024 + 1).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_calybris-verify"))
+        .args(["policy", policy_path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let verdict: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(verdict["ok"], false);
+    assert!(verdict["detail"].as_str().unwrap().contains("exceeds"));
+}
+
+#[test]
+fn audit_json_failure_keeps_stderr_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("wrongpolicy-json.wal.jsonl");
+    let policy_path = dir.path().join("wrong-policy.json");
+    write_audited_wal(&wal_path, 1);
+    write_policy_artifact_at(&policy_path, 999, 999);
+    let output = Command::new(env!("CARGO_BIN_EXE_calybris-verify"))
+        .args([
+            "audit",
+            wal_path.to_str().unwrap(),
+            "--policy",
+            policy_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "stderr was not quiet: {:?}",
+        output.stderr
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+}

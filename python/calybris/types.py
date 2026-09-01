@@ -171,6 +171,26 @@ class ProofEnvelope(BaseModel):
     estimated_cost_microunits: U64
     expected_utility_microunits: I64
 
+    def validate_complete(self) -> ProofEnvelope:
+        """Fail closed unless all external attachments are present and replay-valid."""
+        if not self.replay_valid:
+            raise ValueError("proof envelope replay is not valid")
+        missing = [
+            field
+            for field in (
+                "wal_sequence",
+                "wal_entry_hash",
+                "budget_snapshot_version",
+                "ledger_digest_hex",
+            )
+            if getattr(self, field) is None
+        ]
+        if missing:
+            raise ValueError(f"proof envelope is incomplete: missing {', '.join(missing)}")
+        if self.wal_sequence == 0:
+            raise ValueError("proof envelope wal_sequence must be greater than zero")
+        return self
+
 
 class AuditBundle(BaseModel):
     """Binds a decision to its policy and input via SHA-256 digests.

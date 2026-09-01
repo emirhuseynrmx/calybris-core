@@ -22,7 +22,6 @@ from calybris_commerce import (
     REGION_TR_ANKARA,
     REGION_TR_IST,
     REGION_TR_IZMIR,
-    EcomEngine,
     OrderInput,
     SupplierPolicy,
     SupplierSpec,
@@ -143,7 +142,7 @@ print(f"  Rejected    : {rejected:,} ({rejected/len(orders)*100:.1f}%)")
 if batch.rejection_histogram:
     print(f"  Rejections  : {batch.rejection_histogram}")
 print(f"  Avg cost    : {avg_cost/1_000_000:.2f} TL")
-print(f"\nSupplier share:")
+print("\nSupplier share:")
 for sid, count in sorted(by_supplier.items()):
     pct = count / (accepted + substituted) * 100
     print(f"  Supplier {sid:2d}: {count:5,} orders ({pct:.1f}%)")

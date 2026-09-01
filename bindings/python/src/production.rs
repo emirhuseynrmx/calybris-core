@@ -17,7 +17,7 @@ use calybris_core_rs::state::{
     verify_trajectory_fragment, StateChain, StateTransition, StatefulAuditBundle,
 };
 use calybris_core_rs::wal::{
-    replay_audited_wal_keyed, verify_wal, verify_wal_against_anchor, verify_wal_keyed,
+    replay_audited_wal_keyed_bounded, verify_wal, verify_wal_against_anchor, verify_wal_keyed,
     verify_wal_keyed_against_anchor, AuditedRecord, WalAnchor, WalWriter,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -904,18 +904,33 @@ fn verify_audited_wal(
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, snapshot, *, hmac_key=None))]
+#[pyo3(signature = (
+    path,
+    snapshot,
+    *,
+    hmac_key=None,
+    max_entries=100_000,
+    max_total_bytes=268_435_456
+))]
 fn replay_verify_audited_wal<'py>(
     py: Python<'py>,
     path: PathBuf,
     snapshot: &PyPolicySnapshot,
     hmac_key: Option<&[u8]>,
+    max_entries: usize,
+    max_total_bytes: u64,
 ) -> PyResult<Bound<'py, PyList>> {
     if let Some(key) = hmac_key {
         validate_hmac_key(key)?;
     }
-    let verdicts =
-        replay_audited_wal_keyed::<Value>(&path, &snapshot.inner, hmac_key).map_err(wal_error)?;
+    let verdicts = replay_audited_wal_keyed_bounded::<Value>(
+        &path,
+        &snapshot.inner,
+        hmac_key,
+        max_entries,
+        max_total_bytes,
+    )
+    .map_err(wal_error)?;
     let values = PyList::empty(py);
     for verdict in verdicts {
         let value = PyDict::new(py);
@@ -1066,12 +1081,12 @@ impl PyPolicySnapshot {
 #[pymethods]
 impl PyBudgetEngine {
     #[staticmethod]
-    fn migrate_legacy_snapshot_file<'py>(
-        py: Python<'py>,
+    fn migrate_legacy_snapshot_file(
+        py: Python<'_>,
         source: PathBuf,
         destination: PathBuf,
         trusted_next_reservation_id: u64,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'_, PyDict>> {
         let snapshot =
             migrate_legacy_snapshot_file(&source, &destination, trusted_next_reservation_id)
                 .map_err(persistence_error)?;
@@ -1100,6 +1115,8 @@ impl PyBudgetEngine {
     }
 }
 
+// skipcq: RS-R1000
+// Flat module registration: every branch is one `add`/`add_class` call.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("CalybrisError", py.get_type::<CalybrisError>())?;

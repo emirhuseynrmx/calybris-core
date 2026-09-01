@@ -369,7 +369,6 @@ fn from_hex_digit(byte: u8, index: usize) -> Result<u8, DigestDecodeError> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(DigestDecodeError::InvalidHexCharacter { digit: byte, index }),
     }
 }
@@ -640,6 +639,13 @@ mod tests {
     }
 
     #[test]
+    fn raw_digest_decode_rejects_non_canonical_uppercase() {
+        let mut digest = "00".repeat(32);
+        digest.replace_range(0..1, "A");
+        assert!(decode_hex32(&digest).is_err());
+    }
+
+    #[test]
     fn decode_hex32_rejects_wrong_length() {
         let bundle = audit_bundle_stub("00".repeat(30), "00".repeat(32), "00".repeat(32), true);
         assert_eq!(
@@ -681,7 +687,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn decode_hex32_rejects_non_hex_strings(s in "[^0-9a-fA-F]{1,20}") {
+        fn decode_hex32_rejects_non_hex_strings(s in "[^0-9a-f]{1,20}") {
             let bundle = audit_bundle_stub(
                 s,
                 "00".repeat(32),

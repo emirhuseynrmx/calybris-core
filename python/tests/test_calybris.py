@@ -186,7 +186,7 @@ def test_verified_audit_bundle_succeeds_for_valid_decision(engine, request_):
 def test_verified_audit_bundle_raises_for_wrong_request(engine, request_):
     decision = engine.prescribe(request_)
     wrong_request = _make_request(seq=999, model_id=2)
-    with pytest.raises((VerificationError, Exception)):
+    with pytest.raises(VerificationError):
         engine.verified_audit_bundle(wrong_request, decision)
 
 
@@ -198,8 +198,21 @@ def test_policy_validation_rejects_empty_catalog():
 
 
 def test_policy_validation_rejects_hard_risk_above_10000():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         EngineConfig(hard_risk_limit_bps=10_001)
+
+
+@pytest.mark.parametrize(
+    ("factory", "value"),
+    [
+        (lambda value: PolicyBuilder(EngineConfig(), policy_epoch=value), 2**64),
+        (lambda value: InputBuilder(request_sequence=value, requested_model_id=1), 2**64),
+        (lambda value: InputBuilder(request_sequence=1, requested_model_id=value), 2**32),
+    ],
+)
+def test_builders_reject_values_outside_rust_integer_widths(factory, value):
+    with pytest.raises(InputValidationError):
+        factory(value)
 
 
 def test_policy_validation_rejects_duplicate_model_ids():
@@ -364,6 +377,17 @@ def test_proof_envelope_seals_decision(engine, request_):
     assert envelope.replay_valid
     assert envelope.proof_version == 1
     assert len(envelope.policy_digest_hex) == 64
+    with pytest.raises(ValueError, match="incomplete"):
+        envelope.validate_complete()
+    complete = envelope.model_copy(
+        update={
+            "wal_sequence": 1,
+            "wal_entry_hash": "a" * 64,
+            "budget_snapshot_version": 1,
+            "ledger_digest_hex": "b" * 64,
+        }
+    )
+    assert complete.validate_complete() is complete
 
 
 def test_package_version_is_exposed():
@@ -394,6 +418,45 @@ def test_budget_guard_reserve_commit_and_certificate():
     assert len(proof.ledger_digest_hex) == 64
     assert cert.conservation_balanced
     assert cert.total_committed_microcents == 90 * MICROCENTS_PER_CENT
+
+
+def test_budget_guard_rejects_negative_budget_and_preserves_exposure_cap():
+    guard = BudgetGuard().ensure_tenant("desk", 1_000, max_reserved_microcents=100)
+    with pytest.raises(InputValidationError):
+        guard.ensure_tenant("bad", -1)
+    with pytest.raises(InputValidationError):
+        guard.set_max_reserved_microcents("desk", -1)
+    assert guard.reserve("desk", 101).status == "exposure_limit_exceeded"
+
+
+def test_budget_guard_validates_every_argument_before_mutation():
+    guard = BudgetGuard()
+    with pytest.raises(InputValidationError, match="max_reserved_microcents"):
+        guard.ensure_tenant("must-not-exist", 1_000, max_reserved_microcents=-1)
+    assert guard.initial_microcents("must-not-exist") is None
+
+
+@pytest.mark.parametrize(
+    ("operation", "arguments"),
+    [
+        ("top_up", ("desk", True)),
+        ("reserve", ("desk", True)),
+        ("commit", (True, 1)),
+        ("commit", (1, True)),
+        ("release", (True,)),
+    ],
+)
+def test_budget_guard_rejects_boolean_integer_arguments(operation, arguments):
+    guard = BudgetGuard().ensure_tenant("desk", 1_000)
+    with pytest.raises(InputValidationError):
+        getattr(guard, operation)(*arguments)
+
+
+def test_input_builder_rejects_boolean_basis_points():
+    with pytest.raises(InputValidationError, match="risk_bps"):
+        InputBuilder(request_sequence=1, requested_model_id=1).risk(
+            bps=True, confidence_bps=9_000
+        )
 
 
 @given(seq=st.integers(min_value=0, max_value=10_000_000))
@@ -701,7 +764,7 @@ def test_property_tamper_always_detected(seq: int):
     req = _make_request(seq=seq)
     dec = engine.prescribe(req)
     wrong_req = _make_request(seq=seq + 500_000)
-    with pytest.raises((VerificationError, Exception)):
+    with pytest.raises(VerificationError):
         engine.verified_audit_bundle(wrong_req, dec)
 
 

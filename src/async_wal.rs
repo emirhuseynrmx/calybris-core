@@ -4,6 +4,7 @@
 //! synchronous [`wal`](crate::wal) module — HMAC-SHA256, constant-time
 //! comparison, chain validation on open — but with non-blocking I/O.
 
+use crate::bounded_io::LimitedWriter;
 use crate::digest::bytes_to_hex;
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{audit_bundle, verified_audit_bundle};
@@ -20,7 +21,6 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 
 use std::fs::{File as StdFile, OpenOptions as StdOpenOptions};
-use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -129,7 +129,8 @@ async fn validate_chain_async_reader(
     let mut line = Vec::new();
 
     let mut expected_sequence = 1_u64;
-    let mut expected_prev_hash = "genesis".to_string();
+    // The expected previous hash is always the last accepted entry hash, so one
+    // variable carries both roles.
     let mut last_hash = "genesis".to_string();
     let mut last_sequence = 0_u64;
 
@@ -161,10 +162,10 @@ async fn validate_chain_async_reader(
             return Err(AsyncWalError::DuplicateSequence(entry.sequence));
         }
 
-        if entry.previous_hash != expected_prev_hash {
+        if entry.previous_hash != last_hash {
             return Err(AsyncWalError::ChainBroken {
                 sequence: entry.sequence,
-                expected: expected_prev_hash,
+                expected: last_hash,
                 found: entry.previous_hash,
             });
         }
@@ -191,7 +192,6 @@ async fn validate_chain_async_reader(
                 "WAL sequence overflow",
             ))
         })?;
-        expected_prev_hash = last_hash.clone();
     }
 
     Ok((last_sequence, last_hash))
@@ -264,7 +264,7 @@ impl<T: Serialize> AsyncWalWriter<T> {
             .await?;
         let writer_lock = acquire_writer_lock(path)?;
         let mut read_file = file.try_clone().await?;
-        read_file.seek(SeekFrom::Start(0)).await?;
+        read_file.rewind().await?;
         let (sequence, last_hash) =
             validate_chain_async_reader(read_file, hmac_key.as_deref()).await?;
 
@@ -296,34 +296,46 @@ impl<T: Serialize> AsyncWalWriter<T> {
             ))
         })?;
 
-        let data_json = serde_json::to_string(&data)?;
-        if data_json.len() > MAX_WAL_PAYLOAD_BYTES {
-            return Err(async_wal_io_error(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "WAL payload exceeds {MAX_WAL_PAYLOAD_BYTES} bytes: found {}",
-                    data_json.len()
-                ),
-            ));
+        let mut writer = LimitedWriter::new(Vec::new(), MAX_WAL_PAYLOAD_BYTES);
+        if let Err(error) = serde_json::to_writer(&mut writer, &data) {
+            if writer.limit_exceeded() {
+                return Err(async_wal_io_error(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("WAL payload exceeds {MAX_WAL_PAYLOAD_BYTES} bytes"),
+                ));
+            }
+            return Err(AsyncWalError::Json(error));
         }
+        let data_json = String::from_utf8(writer.into_inner()).map_err(|error| {
+            async_wal_io_error(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
         let entry_hash = compute_hash(&self.last_hash, &data_json, self.hmac_key.as_deref())?;
         let previous_hash = self.last_hash.clone();
 
-        let line = format!(
-            "{{\"sequence\":{},\"previous_hash\":\"{}\",\"entry_hash\":\"{}\",\"data\":{}}}\n",
-            next_sequence, previous_hash, entry_hash, data_json
+        let header = format!(
+            "{{\"sequence\":{},\"previous_hash\":\"{}\",\"entry_hash\":\"{}\",\"data\":",
+            next_sequence, previous_hash, entry_hash
         );
-        if line.len() > MAX_WAL_ENTRY_BYTES {
+        let line_len = header.len() + data_json.len() + 2;
+        if line_len > MAX_WAL_ENTRY_BYTES {
             return Err(async_wal_io_error(
                 std::io::ErrorKind::InvalidInput,
                 format!(
                     "WAL entry exceeds {MAX_WAL_ENTRY_BYTES} bytes: found {}",
-                    line.len()
+                    line_len
                 ),
             ));
         }
 
-        if let Err(error) = self.file.write_all(line.as_bytes()).await {
+        if let Err(error) = self.file.write_all(header.as_bytes()).await {
+            self.poisoned = true;
+            return Err(AsyncWalError::Io(error));
+        }
+        if let Err(error) = self.file.write_all(data_json.as_bytes()).await {
+            self.poisoned = true;
+            return Err(AsyncWalError::Io(error));
+        }
+        if let Err(error) = self.file.write_all(b"}\n").await {
             self.poisoned = true;
             return Err(AsyncWalError::Io(error));
         }
@@ -336,7 +348,7 @@ impl<T: Serialize> AsyncWalWriter<T> {
         }
 
         self.sequence = next_sequence;
-        self.last_hash = entry_hash.clone();
+        self.last_hash.clone_from(&entry_hash);
 
         Ok(WalEntry {
             sequence: self.sequence,

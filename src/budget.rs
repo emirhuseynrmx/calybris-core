@@ -61,6 +61,13 @@ pub enum TopUpResult {
     Overflow,
 }
 
+/// Invalid configuration supplied at a budget-engine trust boundary.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BudgetConfigurationError {
+    #[error("{field} must be >= 0, got {value}")]
+    NegativeAmount { field: &'static str, value: i64 },
+}
+
 /// Budget settlement result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BudgetSettlement {
@@ -324,6 +331,13 @@ pub enum RecoverySnapshotError {
     InvalidSnapshot(#[from] RestoreError),
 }
 
+/// Snapshot allocator errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SnapshotAllocatorError {
+    #[error("reservation allocator exhausted")]
+    AllocatorExhausted,
+}
+
 const RECOVERY_SNAPSHOT_TAG: u64 = 1 << 63;
 const RECOVERY_ALLOCATOR_MASK: u64 = RECOVERY_SNAPSHOT_TAG - 1;
 
@@ -437,6 +451,21 @@ impl BudgetEngine {
     /// prospective: existing holds are not revoked, while every admission that
     /// linearizes after this method returns observes the new cap.
     pub fn set_max_reserved_microcents(&self, tenant_id: &str, max_microcents: i64) {
+        let _ = self.try_set_max_reserved_microcents(tenant_id, max_microcents);
+    }
+
+    /// Checked exposure-cap update. Zero removes the cap; negative values are rejected.
+    pub fn try_set_max_reserved_microcents(
+        &self,
+        tenant_id: &str,
+        max_microcents: i64,
+    ) -> Result<(), BudgetConfigurationError> {
+        if max_microcents < 0 {
+            return Err(BudgetConfigurationError::NegativeAmount {
+                field: "max_reserved_microcents",
+                value: max_microcents,
+            });
+        }
         let _mutation = self
             .checkpoint_gate
             .write()
@@ -446,11 +475,12 @@ impl BudgetEngine {
             .max_reserved_microcents
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if max_microcents <= 0 {
+        if max_microcents == 0 {
             limits.remove(&key);
         } else {
             limits.insert(key, max_microcents);
         }
+        Ok(())
     }
 
     /// Last emitted tagged recovery allocator fence, or zero before any snapshot.
@@ -601,8 +631,20 @@ impl BudgetEngine {
     ///
     /// Negative `budget_microcents` is rejected (no-op).
     pub fn ensure_tenant(&self, tenant_id: &str, budget_microcents: i64) {
+        let _ = self.try_ensure_tenant(tenant_id, budget_microcents);
+    }
+
+    /// Checked tenant initialization for external trust boundaries.
+    pub fn try_ensure_tenant(
+        &self,
+        tenant_id: &str,
+        budget_microcents: i64,
+    ) -> Result<(), BudgetConfigurationError> {
         if budget_microcents < 0 {
-            return;
+            return Err(BudgetConfigurationError::NegativeAmount {
+                field: "budget_microcents",
+                value: budget_microcents,
+            });
         }
         let _mutation = self
             .checkpoint_gate
@@ -634,6 +676,7 @@ impl BudgetEngine {
             committed.insert(Arc::clone(&key), 0);
             reserved_totals.insert(key, Arc::new(AtomicI64::new(0)));
         }
+        Ok(())
     }
 
     /// Add funds to an existing tenant (extends `initial` and `remaining` equally).
@@ -730,8 +773,22 @@ impl BudgetEngine {
     /// Capture a point-in-time ledger snapshot (mutex read — not on hot path).
     ///
     /// Lock order: reservations → budgets → initials → committed (matches hot path).
+    /// This takes the exclusive checkpoint guard, so it waits for in-flight
+    /// mutations. `std::sync::RwLock` gives writers no priority on every
+    /// platform, so a sustained mutation stream can delay a snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the reservation allocator is exhausted. Prefer
+    /// [`Self::try_snapshot`] at API boundaries that must surface that error.
     #[must_use]
     pub fn snapshot(&self) -> BudgetSnapshot {
+        self.try_snapshot()
+            .expect("reservation allocator exhausted — use try_snapshot() for fallible capture")
+    }
+
+    /// Capture a snapshot, failing closed instead of repeating an allocator fence.
+    pub fn try_snapshot(&self) -> Result<BudgetSnapshot, SnapshotAllocatorError> {
         let _checkpoint = self
             .checkpoint_gate
             .write()
@@ -771,20 +828,22 @@ impl BudgetEngine {
         // Reserve one allocator position for the snapshot itself. Encoding the
         // resulting next ID in `version` gives recovery an exact, monotonic
         // allocator fence without changing the public 0.5.x struct layout.
-        let next_reservation_id = self
+        // Saturating here would re-emit one fence for every later snapshot, so
+        // exhaustion fails closed instead.
+        let previous_id = self
             .next_id
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < RECOVERY_ALLOCATOR_MASK).then_some(current + 1)
             })
-            .map_or(RECOVERY_ALLOCATOR_MASK, |previous| previous + 1);
-        let version = RECOVERY_SNAPSHOT_TAG | next_reservation_id;
+            .map_err(|_| SnapshotAllocatorError::AllocatorExhausted)?;
+        let version = RECOVERY_SNAPSHOT_TAG | (previous_id + 1);
         self.snapshot_version.store(version, Ordering::Release);
-        BudgetSnapshot {
+        Ok(BudgetSnapshot {
             version,
             tenants,
             active_reservations: reservations.len(),
             wal_high_watermark: None,
-        }
+        })
     }
 
     /// Verify conservation on a point-in-time snapshot.
@@ -960,8 +1019,6 @@ impl BudgetEngine {
                 }
             }
         };
-        drop(reservations);
-
         let tenant_key = Arc::clone(&reservation.tenant_id);
         let mut committed_guard = self
             .committed_microcents
@@ -972,7 +1029,6 @@ impl BudgetEngine {
             Some(v) => v,
             None => {
                 drop(committed_guard);
-                let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
                 reservations.insert(reservation_id, reservation);
                 return BudgetSettlement::Overflow {
                     remaining_microcents: budget.load(Ordering::Acquire),
@@ -985,8 +1041,6 @@ impl BudgetEngine {
             std::cmp::Ordering::Greater => {
                 if let Err(remaining) = debit_if_available(&budget, delta) {
                     drop(committed_guard);
-                    let mut reservations =
-                        self.reservations.lock().unwrap_or_else(|e| e.into_inner());
                     reservations.insert(reservation_id, reservation);
                     return BudgetSettlement::Overrun {
                         remaining_microcents: remaining,
@@ -1045,8 +1099,6 @@ impl BudgetEngine {
                 }
             }
         };
-        drop(reservations);
-
         {
             let totals = self
                 .tenant_reserved_totals
@@ -1086,6 +1138,8 @@ impl BudgetEngine {
 }
 
 impl Default for BudgetEngine {
+    // skipcq: RS-A1008
+    // Delegating to `new()` is the form `clippy::new_without_default` requires.
     fn default() -> Self {
         Self::new()
     }
@@ -1427,6 +1481,21 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_fails_closed_when_the_reservation_allocator_is_exhausted() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000_000);
+        // Last usable fence, so the next capture has no distinct position left.
+        engine
+            .next_id
+            .store(RECOVERY_ALLOCATOR_MASK, Ordering::Release);
+
+        assert_eq!(
+            engine.try_snapshot(),
+            Err(SnapshotAllocatorError::AllocatorExhausted)
+        );
+    }
+
+    #[test]
     fn recovery_restore_reports_legacy_format_without_ledger_error_aliasing() {
         let legacy = BudgetSnapshot {
             version: 7,
@@ -1466,6 +1535,30 @@ mod tests {
         let engine = BudgetEngine::new();
         engine.ensure_tenant("desk", -1);
         assert_eq!(engine.tenant_count(), 0);
+        assert!(engine.try_ensure_tenant("desk", -1).is_err());
+    }
+
+    #[test]
+    fn negative_exposure_cap_does_not_remove_existing_cap() {
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant("desk", 1_000);
+        engine.set_max_reserved_microcents("desk", 100);
+        assert!(engine.try_set_max_reserved_microcents("desk", -1).is_err());
+        engine.set_max_reserved_microcents("desk", -1);
+        let (result, id) = engine.try_reserve("desk", 101);
+        assert!(matches!(
+            result,
+            BudgetReservation::ExposureLimitExceeded {
+                max_reserved_microcents: 100,
+                ..
+            }
+        ));
+        assert!(id.is_none());
+
+        engine.set_max_reserved_microcents("desk", 0);
+        let (result, id) = engine.try_reserve("desk", 101);
+        assert!(matches!(result, BudgetReservation::Reserved { .. }));
+        engine.release(id.unwrap());
     }
 
     #[test]

@@ -43,6 +43,42 @@ pre-trade admission are **reference mappings** onto one API, not three products.
 | You need hard gates (budget, risk, latency, region, capability) in your control plane | A hosted routing API or managed decision service |
 | Post-mortems and compliance need proof bundles, not log grep | Live market data, order matching, exchange connectivity |
 
+## Use cases
+
+Four reference mappings onto one kernel. Each is a runnable example in this
+repository, not a pitch.
+
+**Model and provider routing.** A gateway picks among premium, fast, and budget
+providers under quality, latency, risk, provider, and budget ceilings. Every
+decision is verified before it enters the audited WAL, so "why did this request
+get the premium model" is answered from the proof rather than from log
+archaeology.
+→ `cargo run --example llm_routing`
+
+**Pre-trade admission.** A desk runs a VWAP algo at the cash open. Each child
+order clears a policy gate (an eligible venue under risk, latency, quality, and
+fee caps) and an exposure gate (notional reserved against the desk budget,
+routing fees committed on admit). The ledger carries the conservation proof
+`remaining + reserved + committed == initial`, in checked integers. Calybris owns
+the two gates and the proof — not the OMS, the market-data feed, or the matching
+engine.
+→ `cargo run --example pretrade_guard`
+
+**Fulfillment and supplier routing.** 10,000 orders across 8 courier networks
+with distinct SLAs, regional coverage, and risk tolerances. Substitutions are
+recorded as decisions, so "why this courier, for this order" stays answerable
+months later.
+→ `python bindings/python/examples/orion_market.py`
+
+**Defending a policy change with numbers.** The same catalog evaluated under
+strict, medium, and relaxed profiles, reporting fulfillment and substitution
+rates, cost percentiles, batch and single-decision throughput, resident memory,
+and the audit success and tamper-detection counts for the resulting trail. Copy
+this one when a policy change needs evidence instead of intuition.
+→ `python bindings/python/examples/novamart_benchmark.py`
+
+The domain objects differ. The kernel, the digests, and the replay contract do not.
+
 ## Stability model
 
 | Layer | Status | Notes |

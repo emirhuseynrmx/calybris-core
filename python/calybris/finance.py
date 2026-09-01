@@ -13,9 +13,33 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from . import _core
+from .errors import InputValidationError
 from .types import I64, SHA256_HEX, STRICT_CONFIG, U64
 
 MICROCENTS_PER_CENT: int = _core.MICROCENTS_PER_CENT
+_U64_MAX = 2**64 - 1
+
+
+def _require_non_negative_i64(field: str, value: int) -> None:
+    maximum = 2**63 - 1
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise InputValidationError(
+            f"{field} must be an integer between 0 and {maximum}, got {value!r}"
+        )
+
+
+def _require_u64(field: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _U64_MAX:
+        raise InputValidationError(
+            f"{field} must be an integer between 0 and {_U64_MAX}, got {value!r}"
+        )
+
+
+def _require_tenant_id(tenant_id: str) -> None:
+    if not isinstance(tenant_id, str) or not tenant_id or len(tenant_id.encode("utf-8")) > 1024:
+        raise InputValidationError(
+            "tenant_id must be a non-empty UTF-8 string of at most 1024 bytes"
+        )
 
 
 class BudgetReservationResult(BaseModel):
@@ -153,6 +177,9 @@ class BudgetGuard:
         *,
         max_reserved_microcents: int = 0,
     ) -> BudgetGuard:
+        _require_tenant_id(tenant_id)
+        _require_non_negative_i64("budget_microcents", budget_microcents)
+        _require_non_negative_i64("max_reserved_microcents", max_reserved_microcents)
         self._engine.ensure_tenant(tenant_id, budget_microcents)
         if max_reserved_microcents:
             self._engine.set_max_reserved_microcents(tenant_id, max_reserved_microcents)
@@ -163,15 +190,21 @@ class BudgetGuard:
         tenant_id: str,
         max_microcents: int,
     ) -> BudgetGuard:
+        _require_tenant_id(tenant_id)
+        _require_non_negative_i64("max_microcents", max_microcents)
         self._engine.set_max_reserved_microcents(tenant_id, max_microcents)
         return self
 
     def top_up(self, tenant_id: str, amount_microcents: int) -> BudgetTopUpResult:
+        _require_tenant_id(tenant_id)
+        _require_non_negative_i64("amount_microcents", amount_microcents)
         return BudgetTopUpResult.model_validate(
             self._engine.top_up_tenant(tenant_id, amount_microcents)
         )
 
     def reserve(self, tenant_id: str, amount_microcents: int) -> BudgetReservationResult:
+        _require_tenant_id(tenant_id)
+        _require_non_negative_i64("amount_microcents", amount_microcents)
         return BudgetReservationResult.model_validate(
             self._engine.try_reserve(tenant_id, amount_microcents)
         )
@@ -181,11 +214,14 @@ class BudgetGuard:
         reservation_id: int,
         actual_microcents: int,
     ) -> BudgetSettlementResult:
+        _require_u64("reservation_id", reservation_id)
+        _require_non_negative_i64("actual_microcents", actual_microcents)
         return BudgetSettlementResult.model_validate(
             self._engine.commit(reservation_id, actual_microcents)
         )
 
     def release(self, reservation_id: int) -> BudgetSettlementResult:
+        _require_u64("reservation_id", reservation_id)
         return BudgetSettlementResult.model_validate(self._engine.release(reservation_id))
 
     def initial_microcents(self, tenant_id: str) -> int | None:

@@ -15,6 +15,12 @@ from typing import Any, Literal
 ALL_PROVIDERS: int
 ALL_REGIONS: int
 MICROCENTS_PER_CENT: int
+BUILD_COMMIT_SHA: str
+BUILD_TREE_SHA: str
+BUILD_SOURCE_DIGEST: str
+BUILD_CARGO_LOCK_SHA256: str
+BUILD_DIRTY: bool
+BUILD_IDENTITY_VERIFIED: bool
 
 ACTION_EXECUTE_REQUESTED: int
 ACTION_SUBSTITUTE: int
@@ -461,6 +467,8 @@ def replay_verify_audited_wal(
     snapshot: PolicySnapshot,
     *,
     hmac_key: bytes | None = None,
+    max_entries: int = 100_000,
+    max_total_bytes: int = 268_435_456,
 ) -> list[dict[str, Any]]: ...
 
 def verify_state_trajectory(bundles: list[StatefulAuditBundle]) -> None: ...

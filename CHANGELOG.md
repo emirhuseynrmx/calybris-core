@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async WAL writers reject oversized payloads before hashing or allocating the
   encoded entry, matching the synchronous writer's resource-exhaustion guard.
 - Checked state-chain advancement that rejects step-counter exhaustion.
+- Checked snapshot capture (`try_snapshot`) that rejects reservation-allocator
+  exhaustion instead of re-emitting a saturated fence. `checkpoint`,
+  `checkpoint_with_wal`, `checkpoint_coordinated` and the Python `snapshot`
+  binding return that error; infallible `snapshot` panics as documented.
 - Bounded JSON persistence reads and an additive coordinated-checkpoint loader
   that verifies the complete actual WAL against the committed checkpoint prefix
   while allowing valid later entries to proceed to deterministic replay.

@@ -54,10 +54,14 @@ for client_id, symbol, side, notional, fee in child_orders:
 proof = guard.prove_conservation()
 certificate = guard.certificate()
 
+# `remaining_microcents` is None for an unknown tenant; this desk was funded above.
+remaining = guard.remaining_microcents("desk-alpha")
+assert remaining is not None
+
 print()
 print(f"admitted:        {admitted}/{len(child_orders)}")
 print(f"open reserved:   {guard.reserved_microcents('desk-alpha') // USD:,} USD")
-print(f"remaining:       {guard.remaining_microcents('desk-alpha') // USD:,} USD")
+print(f"remaining:       {remaining // USD:,} USD")
 print(f"conservation:    {guard.verify_conservation().status}")
 print(f"ledger digest:   {proof.ledger_digest_hex[:16]}...")
 print(f"certificate ok:  {certificate.conservation_balanced}")

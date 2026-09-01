@@ -140,7 +140,7 @@ pub fn certify_ledger(engine: &BudgetEngine) -> FinancialCertificate {
     let per_tenant_balanced =
         conservation_status_for_snapshot(&snapshot) == ConservationStatus::Balanced;
     let totals = snapshot_totals(&snapshot);
-    let total_committed = totals.as_ref().map(|(_, c)| *c).unwrap_or(0);
+    let total_committed = totals.as_ref().map_or(0, |(_, c)| *c);
     let committed_since = if totals.is_ok() {
         engine.rotate_certificate_baseline(total_committed)
     } else {

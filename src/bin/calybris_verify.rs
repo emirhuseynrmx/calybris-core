@@ -27,6 +27,7 @@
 //! }
 //! ```
 
+use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -64,17 +65,38 @@ impl PolicyArtifact {
     }
 }
 
+const MAX_AUDITOR_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+
+fn read_artifact_bounded(path: &str, kind: &str) -> Result<String, String> {
+    let file =
+        std::fs::File::open(path).map_err(|error| format!("cannot read {kind} {path}: {error}"))?;
+    if file
+        .metadata()
+        .map_err(|error| format!("cannot read {kind} {path}: {error}"))?
+        .len()
+        > MAX_AUDITOR_ARTIFACT_BYTES as u64
+    {
+        return Err(format!("{kind} exceeds {MAX_AUDITOR_ARTIFACT_BYTES} bytes"));
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_AUDITOR_ARTIFACT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {kind} {path}: {error}"))?;
+    if bytes.len() > MAX_AUDITOR_ARTIFACT_BYTES {
+        return Err(format!("{kind} exceeds {MAX_AUDITOR_ARTIFACT_BYTES} bytes"));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("cannot read {kind} {path}: {error}"))
+}
+
 fn load_policy(path: &str) -> Result<PolicySnapshot, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read policy artifact {path}: {error}"))?;
+    let raw = read_artifact_bounded(path, "policy artifact")?;
     let artifact: PolicyArtifact = serde_json::from_str(&raw)
         .map_err(|error| format!("cannot parse policy artifact {path}: {error}"))?;
     artifact.into_snapshot()
 }
 
 fn load_anchor(path: &str) -> Result<WalAnchor, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read WAL anchor {path}: {error}"))?;
+    let raw = read_artifact_bounded(path, "WAL anchor")?;
     serde_json::from_str(&raw).map_err(|error| format!("cannot parse WAL anchor {path}: {error}"))
 }
 
@@ -114,7 +136,26 @@ struct Args {
     json: bool,
 }
 
-fn parse_args() -> Result<Args, String> {
+/// A bare usage request is distinct from a real parse failure, so the two are
+/// not encoded as an empty message string.
+enum ArgsError {
+    Usage,
+    Message(String),
+}
+
+impl From<&str> for ArgsError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_string())
+    }
+}
+
+impl From<String> for ArgsError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+fn parse_args() -> Result<Args, ArgsError> {
     let mut positional = Vec::new();
     let mut policies = Vec::new();
     let mut anchor = None;
@@ -135,12 +176,12 @@ fn parse_args() -> Result<Args, String> {
                 hmac_key = Some(parse_hex_key(&raw)?);
             }
             "--json" => json = true,
-            "-h" | "--help" => return Err(String::new()),
+            "-h" | "--help" => return Err(ArgsError::Usage),
             other => positional.push(other.to_string()),
         }
     }
     if positional.len() != 2 {
-        return Err(String::new());
+        return Err(ArgsError::Usage);
     }
     Ok(Args {
         command: positional[0].clone(),
@@ -258,7 +299,9 @@ fn cmd_audit(
         }
         if !problems.is_empty() {
             failures += 1;
-            eprintln!("seq {}: {}", entry.sequence, problems.join(", "));
+            if !json {
+                eprintln!("seq {}: {}", entry.sequence, problems.join(", "));
+            }
         }
     };
     let head = match key {
@@ -342,8 +385,8 @@ fn cmd_policy(path: &str, json: bool) -> ExitCode {
 fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(args) => args,
-        Err(message) => {
-            if !message.is_empty() {
+        Err(error) => {
+            if let ArgsError::Message(message) = error {
                 eprintln!("error: {message}\n");
             }
             usage();

@@ -105,7 +105,7 @@ pub fn trace_wal_append(sequence: u64, entry_hash: &str) {
     tracing::debug!(
         target: "calybris.wal",
         sequence,
-        hash = &entry_hash[..16],
+        hash = entry_hash.get(..16).unwrap_or(entry_hash),
         "appended"
     );
 }
@@ -146,6 +146,11 @@ pub struct EngineMetrics {
 mod tests {
     use super::*;
     use crate::kernel::*;
+
+    #[test]
+    fn short_wal_hash_is_safe_to_trace() {
+        trace_wal_append(1, "short");
+    }
 
     fn test_snapshot() -> PolicySnapshot {
         PolicySnapshot::try_new(

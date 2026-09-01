@@ -8,9 +8,10 @@
 //! standard library does not expose portable Windows directory fsync, so the
 //! directory-entry durability guarantee is platform dependent there.
 
+use crate::bounded_io::LimitedWriter;
 use crate::budget::{validate_snapshot_for_restore, BudgetEngine, BudgetSnapshot, RestoreError};
 use fs2::FileExt;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 /// Maximum accepted size for one JSON persistence artifact.
@@ -69,7 +70,6 @@ pub fn save_snapshot(snapshot: &BudgetSnapshot, path: &Path) -> Result<(), Persi
 }
 
 fn save_json_atomic<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), PersistenceError> {
-    let json = serde_json::to_string_pretty(value)?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -81,7 +81,9 @@ fn save_json_atomic<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), P
     // Windows does not guarantee that concurrent replace-existing operations
     // against the same destination all succeed. A durable sibling lock file
     // serializes writers across both threads and processes while preserving
-    // atomic visibility of the final rename/persist operation.
+    // atomic visibility of the final rename/persist operation. The lock is held
+    // for the rest of this function and released when the handle drops, so error
+    // paths release it too.
     let lock_path: PathBuf = parent.join(format!(".{filename}.calybris.lock"));
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -93,14 +95,24 @@ fn save_json_atomic<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), P
     let mut temporary = tempfile::Builder::new()
         .prefix(&format!(".{filename}.tmp."))
         .tempfile_in(parent)?;
-    temporary.write_all(json.as_bytes())?;
+    {
+        let mut writer = LimitedWriter::new(&mut temporary, MAX_PERSISTENCE_ARTIFACT_BYTES);
+        if let Err(error) = serde_json::to_writer_pretty(&mut writer, value) {
+            if writer.limit_exceeded() {
+                return Err(PersistenceError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("persistence artifact exceeds {MAX_PERSISTENCE_ARTIFACT_BYTES} bytes"),
+                )));
+            }
+            return Err(PersistenceError::Json(error));
+        }
+    }
     temporary.as_file().sync_all()?;
     temporary
         .persist(path)
         .map_err(|error| PersistenceError::Io(error.error))?;
 
     sync_parent_directory(path)?;
-    FileExt::unlock(&lock_file)?;
     Ok(())
 }
 
@@ -221,7 +233,9 @@ fn ensure_distinct_migration_files(
 /// Use [`checkpoint_with_wal`] when you have a WAL writer — it records the
 /// WAL sequence so recovery knows where to start replaying.
 pub fn checkpoint(engine: &BudgetEngine, path: &Path) -> Result<BudgetSnapshot, PersistenceError> {
-    let snapshot = engine.snapshot();
+    let snapshot = engine
+        .try_snapshot()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
     validate_snapshot_for_restore(&snapshot)?;
     save_snapshot(&snapshot, path)?;
     Ok(snapshot)
@@ -237,7 +251,9 @@ pub fn checkpoint_with_wal(
     path: &Path,
     wal_sequence: u64,
 ) -> Result<BudgetSnapshot, PersistenceError> {
-    let mut snapshot = engine.snapshot();
+    let mut snapshot = engine
+        .try_snapshot()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
     snapshot.wal_high_watermark = Some(wal_sequence);
     validate_snapshot_for_restore(&snapshot)?;
     save_snapshot(&snapshot, path)?;
@@ -263,7 +279,9 @@ pub fn checkpoint_coordinated<T: serde::Serialize>(
     wal.flush_and_sync()
         .map_err(|error| invalid_recovery_data(error.to_string()))?;
     let anchor = wal.anchor();
-    let mut snapshot = engine.snapshot();
+    let mut snapshot = engine
+        .try_snapshot()
+        .map_err(|error| invalid_recovery_data(error.to_string()))?;
     snapshot.wal_high_watermark = Some(anchor.sequence);
     validate_snapshot_for_restore(&snapshot)?;
 
@@ -514,6 +532,43 @@ mod tests {
     use crate::budget::BudgetEngine;
 
     #[test]
+    fn atomic_writer_and_loader_share_the_same_size_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("limit.json");
+        let value = "x".repeat(MAX_PERSISTENCE_ARTIFACT_BYTES - 2);
+        save_json_atomic(&value, &path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_PERSISTENCE_ARTIFACT_BYTES as u64
+        );
+        assert_eq!(load_json_bounded::<String>(&path).unwrap(), value);
+    }
+
+    #[test]
+    fn oversized_atomic_save_preserves_previous_checkpoint() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("preserve.json");
+        save_json_atomic(&"previous", &path).unwrap();
+        let previous = std::fs::read(&path).unwrap();
+        let oversized = "x".repeat(MAX_PERSISTENCE_ARTIFACT_BYTES);
+        assert!(save_json_atomic(&oversized, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert_eq!(load_json_bounded::<String>(&path).unwrap(), "previous");
+    }
+
+    #[test]
+    #[cfg(feature = "wal")]
+    fn oversized_coordinated_snapshot_does_not_commit_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_path = dir.path().join("events.wal");
+        let mut wal = crate::wal::WalWriter::<serde_json::Value>::open(&wal_path).unwrap();
+        let engine = BudgetEngine::new();
+        engine.ensure_tenant(&"x".repeat(MAX_PERSISTENCE_ARTIFACT_BYTES), 1);
+        assert!(checkpoint_coordinated(&engine, &mut wal, dir.path()).is_err());
+        assert!(!dir.path().join("checkpoint-manifest.json").exists());
+    }
+
+    #[test]
     #[cfg_attr(
         all(miri, windows),
         ignore = "miri/windows: tempfile directory creation is unsupported"
@@ -644,8 +699,14 @@ mod tests {
         let mut legacy = engine.snapshot();
         legacy.version = 7;
         save_snapshot(&legacy, &destination_path).unwrap();
+        // Without Developer Mode or elevation Windows reports
+        // ERROR_PRIVILEGE_NOT_HELD, which std does not map to `PermissionDenied`,
+        // so the raw code is matched too and the alias check is skipped.
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
         if let Err(error) = symlink_file(&destination_path, &source_path) {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+            {
                 return;
             }
             panic!("could not create migration alias symlink: {error}");

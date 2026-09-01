@@ -17,6 +17,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CALYBRIS_RELEASE_BUILD: "1"
+
 jobs:
   preflight:
     name: Release preflight
@@ -174,7 +177,10 @@ jobs:
         run: |
           python -m pip install twine==6.2.0
           python -m twine check dist/*
+          version=$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+          python scripts/release_contract.py --source-zip "${RUNNER_TEMP}/calybris-core-${version}-source.zip"
           python scripts/release_contract.py --dist dist --provenance release-metadata/PROVENANCE.json
+          mv "${RUNNER_TEMP}/calybris-core-${version}-source.zip" release-metadata/
           cargo cyclonedx -f json --all-features
           mv calybris-core.cdx.json release-metadata/calybris-core.cdx.json
           mv bindings/python/calybris-core-python.cdx.json release-metadata/calybris-python.cdx.json

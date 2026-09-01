@@ -756,13 +756,16 @@ impl PyBudgetEngine {
         )
     }
 
-    fn ensure_tenant(&self, tenant_id: &str, budget_microcents: i64) {
-        self.inner.ensure_tenant(tenant_id, budget_microcents);
+    fn ensure_tenant(&self, tenant_id: &str, budget_microcents: i64) -> PyResult<()> {
+        self.inner
+            .try_ensure_tenant(tenant_id, budget_microcents)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
     }
 
-    fn set_max_reserved_microcents(&self, tenant_id: &str, max_microcents: i64) {
+    fn set_max_reserved_microcents(&self, tenant_id: &str, max_microcents: i64) -> PyResult<()> {
         self.inner
-            .set_max_reserved_microcents(tenant_id, max_microcents);
+            .try_set_max_reserved_microcents(tenant_id, max_microcents)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
     }
 
     fn top_up_tenant<'py>(
@@ -826,7 +829,10 @@ impl PyBudgetEngine {
     }
 
     fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let snapshot = self.inner.snapshot();
+        let snapshot = self
+            .inner
+            .try_snapshot()
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let d = PyDict::new(py);
         d.set_item("version", snapshot.version)?;
         d.set_item("active_reservations", snapshot.active_reservations)?;
@@ -1012,6 +1018,8 @@ fn conservation_to_dict(py: Python<'_>, status: ConservationStatus) -> PyResult<
 
 #[pymodule]
 #[pyo3(name = "_core")]
+// skipcq: RS-R1000
+// Flat module registration: every branch is one `add_class`/`add_function` call.
 fn calybris_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKernelModel>()?;
     m.add_class::<PyKernelInput>()?;
@@ -1024,6 +1032,18 @@ fn calybris_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ALL_PROVIDERS", ALL_PROVIDERS)?;
     m.add("ALL_REGIONS", ALL_REGIONS)?;
     m.add("MICROCENTS_PER_CENT", MICROCENTS_PER_CENT)?;
+    m.add("BUILD_COMMIT_SHA", env!("CALYBRIS_BUILD_COMMIT"))?;
+    m.add("BUILD_TREE_SHA", env!("CALYBRIS_BUILD_TREE"))?;
+    m.add("BUILD_SOURCE_DIGEST", env!("CALYBRIS_BUILD_SOURCE_DIGEST"))?;
+    m.add(
+        "BUILD_CARGO_LOCK_SHA256",
+        env!("CALYBRIS_BUILD_LOCK_SHA256"),
+    )?;
+    m.add("BUILD_DIRTY", env!("CALYBRIS_BUILD_DIRTY") == "true")?;
+    m.add(
+        "BUILD_IDENTITY_VERIFIED",
+        env!("CALYBRIS_BUILD_IDENTITY_VERIFIED") == "true",
+    )?;
 
     // Action codes — avoids magic numbers in Python callers
     m.add("ACTION_EXECUTE_REQUESTED", 1u8)?;
@@ -1128,6 +1148,58 @@ mod tests {
     #[test]
     fn fingerprint_is_64_hex_chars() {
         assert_eq!(sample_snapshot().fingerprint().len(), 64);
+    }
+
+    #[test]
+    fn module_exports_exact_build_identity() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_core").unwrap();
+            calybris_core(&module).unwrap();
+            let commit: String = module
+                .getattr("BUILD_COMMIT_SHA")
+                .unwrap()
+                .extract()
+                .unwrap();
+            let tree: String = module.getattr("BUILD_TREE_SHA").unwrap().extract().unwrap();
+            let lock: String = module
+                .getattr("BUILD_CARGO_LOCK_SHA256")
+                .unwrap()
+                .extract()
+                .unwrap();
+            let source: String = module
+                .getattr("BUILD_SOURCE_DIGEST")
+                .unwrap()
+                .extract()
+                .unwrap();
+            let dirty: bool = module.getattr("BUILD_DIRTY").unwrap().extract().unwrap();
+            let identity_verified: bool = module
+                .getattr("BUILD_IDENTITY_VERIFIED")
+                .unwrap()
+                .extract()
+                .unwrap();
+
+            assert_eq!(lock.len(), 64);
+            assert!(source.len() == 40 || source.len() == 64);
+            if identity_verified {
+                assert_eq!(commit.len(), 40);
+                assert_eq!(tree.len(), 40);
+                assert_eq!(dirty, !git_status_is_clean_for_test());
+            } else {
+                assert!(
+                    dirty,
+                    "an unidentified build must never advertise a clean source tree"
+                );
+            }
+        });
+    }
+
+    fn git_status_is_clean_for_test() -> bool {
+        std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .is_ok_and(|output| output.status.success() && output.stdout.is_empty())
     }
 
     #[test]

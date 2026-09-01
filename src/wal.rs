@@ -8,6 +8,7 @@
 //! The chain is validated on startup before accepting new decisions.
 //! Generic over the decision type: any `Serialize` type works.
 
+use crate::bounded_io::LimitedWriter;
 use crate::digest::{bytes_to_hex, digest_to_hex, policy_digest};
 use crate::kernel::{KernelDecision, KernelInput, PolicySnapshot};
 use crate::verify::{audit_bundle, verified_audit_bundle, verify_decision, VerifyResult};
@@ -16,7 +17,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use subtle::ConstantTimeEq;
@@ -426,7 +427,7 @@ impl<T: Serialize> WalWriter<T> {
             .open(path)?;
         let writer_lock = acquire_writer_lock(path)?;
         let mut read_file = file.try_clone()?;
-        read_file.seek(SeekFrom::Start(0))?;
+        read_file.rewind()?;
         let (sequence, last_hash) =
             validate_chain_reader(BufReader::new(read_file), hmac_key.as_deref())?;
 
@@ -470,16 +471,18 @@ impl<T: Serialize> WalWriter<T> {
             ))
         })?;
         // Serialize data once — reuse for both hash computation and file write.
-        let data_json = serde_json::to_string(&data)?;
-        if data_json.len() > MAX_WAL_PAYLOAD_BYTES {
-            return Err(wal_io_error(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "WAL entry exceeds {MAX_WAL_PAYLOAD_BYTES} bytes: found {}",
-                    data_json.len()
-                ),
-            ));
+        let mut writer = LimitedWriter::new(Vec::new(), MAX_WAL_PAYLOAD_BYTES);
+        if let Err(error) = serde_json::to_writer(&mut writer, &data) {
+            if writer.limit_exceeded() {
+                return Err(wal_io_error(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("WAL entry exceeds {MAX_WAL_PAYLOAD_BYTES} bytes"),
+                ));
+            }
+            return Err(WalError::Json(error));
         }
+        let data_json = String::from_utf8(writer.into_inner())
+            .map_err(|error| wal_io_error(std::io::ErrorKind::InvalidData, error.to_string()))?;
         let entry_hash = compute_hash(&self.last_hash, &data_json, self.hmac_key.as_deref())?;
         let previous_hash = self.last_hash.clone();
 
@@ -495,7 +498,7 @@ impl<T: Serialize> WalWriter<T> {
         }
 
         self.sequence = next_sequence;
-        self.last_hash = entry_hash.clone();
+        self.last_hash.clone_from(&entry_hash);
 
         Ok(WalEntry {
             sequence: self.sequence,
@@ -600,7 +603,8 @@ fn validate_chain_reader<R: BufRead>(
     key: Option<&[u8]>,
 ) -> Result<(u64, String), WalError> {
     let mut expected_sequence = 1_u64;
-    let mut expected_prev_hash = "genesis".to_string();
+    // The expected previous hash is always the last accepted entry hash, so one
+    // variable carries both roles.
     let mut last_hash = "genesis".to_string();
     let mut last_sequence = 0_u64;
 
@@ -616,10 +620,10 @@ fn validate_chain_reader<R: BufRead>(
             return Err(WalError::DuplicateSequence(entry.sequence));
         }
 
-        if entry.previous_hash != expected_prev_hash {
+        if entry.previous_hash != last_hash {
             return Err(WalError::ChainBroken {
                 sequence: entry.sequence,
-                expected: expected_prev_hash,
+                expected: last_hash,
                 found: entry.previous_hash,
             });
         }
@@ -647,7 +651,6 @@ fn validate_chain_reader<R: BufRead>(
                 "WAL sequence overflow",
             ))
         })?;
-        expected_prev_hash = last_hash.clone();
     }
 
     Ok((last_sequence, last_hash))
@@ -659,6 +662,38 @@ fn read_verified_wal_inner<T: for<'de> Deserialize<'de>>(
 ) -> Result<Vec<WalEntry<T>>, WalError> {
     let mut entries = Vec::new();
     visit_verified_wal_inner(path, key, |entry| entries.push(entry))?;
+    Ok(entries)
+}
+
+fn read_verified_wal_bounded_inner<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    key: Option<&[u8]>,
+    max_entries: usize,
+    max_total_bytes: u64,
+) -> Result<Vec<WalEntry<T>>, WalError> {
+    let file_bytes = File::open(path)?.metadata()?.len();
+    if file_bytes > max_total_bytes {
+        return Err(wal_io_error(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "WAL byte size exceeds configured limit: found {file_bytes}, limit {max_total_bytes}"
+            ),
+        ));
+    }
+    let mut entries = Vec::with_capacity(max_entries.min(1024));
+    let mut found = 0_usize;
+    visit_verified_wal_inner(path, key, |entry| {
+        found = found.saturating_add(1);
+        if found <= max_entries {
+            entries.push(entry);
+        }
+    })?;
+    if found > max_entries {
+        return Err(wal_io_error(
+            std::io::ErrorKind::InvalidData,
+            format!("WAL entry count exceeds configured limit: found {found}, limit {max_entries}"),
+        ));
+    }
     Ok(entries)
 }
 
@@ -678,8 +713,9 @@ where
     let mut reader = BufReader::new(file);
 
     let mut expected_sequence = 1_u64;
-    let mut expected_prev_hash = "genesis".to_string();
     let mut last_sequence = 0_u64;
+    // The expected previous hash is always the last accepted entry hash, so one
+    // variable carries both roles.
     let mut last_hash = "genesis".to_string();
 
     let mut line = Vec::new();
@@ -695,10 +731,10 @@ where
             return Err(WalError::DuplicateSequence(value_entry.sequence));
         }
 
-        if value_entry.previous_hash != expected_prev_hash {
+        if value_entry.previous_hash != last_hash {
             return Err(WalError::ChainBroken {
                 sequence: value_entry.sequence,
-                expected: expected_prev_hash,
+                expected: last_hash,
                 found: value_entry.previous_hash,
             });
         }
@@ -725,7 +761,6 @@ where
         })?;
         last_sequence = value_entry.sequence;
         last_hash = value_entry.entry_hash;
-        expected_prev_hash = last_hash.clone();
 
         // Parse the typed entry from the already-validated line. This avoids a
         // validate-then-reopen race while keeping the public API generic over T.
@@ -866,6 +901,27 @@ pub fn read_verified_wal_keyed<T: for<'de> Deserialize<'de>>(
     read_verified_wal_inner(path, Some(key))
 }
 
+/// Read and chain-verify an unkeyed WAL under explicit aggregate limits.
+///
+/// Prefer [`visit_verified_wal`] when the caller does not need collection.
+pub fn read_verified_wal_bounded<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    max_entries: usize,
+    max_total_bytes: u64,
+) -> Result<Vec<WalEntry<T>>, WalError> {
+    read_verified_wal_bounded_inner(path, None, max_entries, max_total_bytes)
+}
+
+/// Read and chain-verify a keyed WAL under explicit aggregate limits.
+pub fn read_verified_wal_keyed_bounded<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    key: &[u8],
+    max_entries: usize,
+    max_total_bytes: u64,
+) -> Result<Vec<WalEntry<T>>, WalError> {
+    read_verified_wal_bounded_inner(path, Some(key), max_entries, max_total_bytes)
+}
+
 /// Stream an unkeyed WAL through `visit` after validating each entry.
 ///
 /// Memory use is constant with respect to WAL length.
@@ -912,6 +968,32 @@ where
     M: for<'de> Deserialize<'de>,
 {
     let entries = read_verified_wal_inner::<AuditedRecord<M>>(path, key)?;
+    let expected_policy = digest_to_hex(&policy_digest(snapshot));
+    verify_audited_entries(entries, &|policy_epoch, catalog_epoch, digest: &str| {
+        (policy_epoch == snapshot.policy_epoch
+            && catalog_epoch == snapshot.catalog_epoch
+            && digest == expected_policy)
+            .then(|| snapshot.clone())
+    })
+}
+
+/// Replay-verify an audited WAL under explicit aggregate collection limits.
+pub fn replay_audited_wal_keyed_bounded<M>(
+    path: &Path,
+    snapshot: &PolicySnapshot,
+    key: Option<&[u8]>,
+    max_entries: usize,
+    max_total_bytes: u64,
+) -> Result<Vec<WalReplayVerdict>, WalError>
+where
+    M: for<'de> Deserialize<'de>,
+{
+    let entries = read_verified_wal_bounded_inner::<AuditedRecord<M>>(
+        path,
+        key,
+        max_entries,
+        max_total_bytes,
+    )?;
     let expected_policy = digest_to_hex(&policy_digest(snapshot));
     verify_audited_entries(entries, &|policy_epoch, catalog_epoch, digest: &str| {
         (policy_epoch == snapshot.policy_epoch
@@ -1098,6 +1180,26 @@ mod tests {
         .unwrap();
         assert_eq!(costs, vec![1, 2, 3]);
         assert_eq!(head, (3, expected_head));
+    }
+
+    #[test]
+    fn bounded_verified_reader_rejects_aggregate_entry_limit() {
+        let (_dir, path) = temp_wal("bounded-reader");
+        {
+            let mut wal = WalWriter::<TestDecision>::open(&path).unwrap();
+            for cost in [1, 2] {
+                wal.append(TestDecision {
+                    model: "bounded".into(),
+                    cost,
+                })
+                .unwrap();
+            }
+            wal.flush_and_sync().unwrap();
+        }
+
+        let error = read_verified_wal_bounded::<TestDecision>(&path, 1, MAX_WAL_ENTRY_BYTES as u64)
+            .unwrap_err();
+        assert!(error.to_string().contains("entry count exceeds"));
     }
 
     struct FailingSerialize;

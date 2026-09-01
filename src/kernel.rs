@@ -275,7 +275,9 @@ impl KernelDecision {
 
 /// An immutable snapshot of the decision policy and model catalog.
 ///
-/// Create with [`PolicySnapshot::try_new`] (validated) or [`PolicySnapshot::new_unchecked`],
+/// Create production policies with [`PolicySnapshot::try_new_trusted`] or `PolicyBuilder`.
+/// [`PolicySnapshot::try_new`] remains for legacy replay compatibility, while
+/// [`PolicySnapshot::new_unchecked`] is an explicit test/fixture escape hatch.
 /// then call [`prescribe`](PolicySnapshot::prescribe)
 /// for each request. The snapshot is `Clone` and can be shared across threads via `Arc`.
 #[derive(Clone, Debug)]
@@ -386,7 +388,8 @@ impl PolicySnapshot {
     ///
     /// # Production guidance
     ///
-    /// Use [`try_new`](Self::try_new) for any policy served to real traffic. `new_unchecked`
+    /// Use [`try_new_trusted`](Self::try_new_trusted) or `PolicyBuilder` for any policy served
+    /// to real traffic. `new_unchecked`
     /// is for unit tests, fuzz fixtures, and experiments where you call [`validate`](Self::validate)
     /// yourself or intentionally construct invalid catalogs.
     ///
@@ -529,7 +532,10 @@ impl PolicySnapshot {
         Ok(())
     }
 
-    /// Build a snapshot and validate the catalog.
+    /// Build and validate a legacy-compatible snapshot.
+    ///
+    /// This constructor remains available for deterministic replay of older artifacts.
+    /// New production policy boundaries should use [`try_new_trusted`](Self::try_new_trusted).
     pub fn try_new(
         policy_epoch: u64,
         catalog_epoch: u64,

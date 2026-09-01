@@ -13,16 +13,29 @@ from calybris.errors import InputValidationError, PolicyValidationError
 from calybris.types import STRICT_CONFIG, ModelSpec
 
 _MAX_BPS = 10_000
+_U32_MAX = 2**32 - 1
+_U64_MAX = 2**64 - 1
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
 
 
 def _require_bps_range(field: str, value: int) -> None:
-    if not 0 <= value <= _MAX_BPS:
-        raise InputValidationError(f"{field} must be between 0 and {_MAX_BPS}, got {value}")
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _MAX_BPS:
+        raise InputValidationError(
+            f"{field} must be an integer between 0 and {_MAX_BPS}, got {value!r}"
+        )
 
 
 def _require_non_negative(field: str, value: int) -> None:
     if value < 0:
         raise InputValidationError(f"{field} must be >= 0, got {value}")
+
+
+def _require_int_range(field: str, value: int, minimum: int, maximum: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise InputValidationError(
+            f"{field} must be an integer between {minimum} and {maximum}, got {value!r}"
+        )
 
 
 class EngineConfig(BaseModel):
@@ -38,7 +51,7 @@ class EngineConfig(BaseModel):
         default=9_600,
         ge=0,
         le=10_000,
-        description="Requests with risk_bps above this are always rejected.",
+        description="Requests with risk_bps at or above this are always rejected.",
     )
     minimum_confidence_bps: int = Field(
         default=5_500,
@@ -55,6 +68,7 @@ class EngineConfig(BaseModel):
     latency_penalty_microunits_per_ms: int = Field(
         default=2,
         ge=0,
+        le=_U64_MAX,
         description="Cost subtracted from utility per millisecond of p95 latency.",
     )
 
@@ -79,6 +93,8 @@ class PolicyBuilder:
         policy_epoch: int = 1,
         catalog_epoch: int = 1,
     ) -> None:
+        _require_int_range("policy_epoch", policy_epoch, 0, _U64_MAX)
+        _require_int_range("catalog_epoch", catalog_epoch, 0, _U64_MAX)
         self._config = config
         self._policy_epoch = policy_epoch
         self._catalog_epoch = catalog_epoch
@@ -86,6 +102,8 @@ class PolicyBuilder:
 
     def epoch(self, policy_epoch: int, catalog_epoch: int) -> PolicyBuilder:
         """Override the epoch numbers (defaults to 1/1)."""
+        _require_int_range("policy_epoch", policy_epoch, 0, _U64_MAX)
+        _require_int_range("catalog_epoch", catalog_epoch, 0, _U64_MAX)
         self._policy_epoch = policy_epoch
         self._catalog_epoch = catalog_epoch
         return self
@@ -101,22 +119,22 @@ class PolicyBuilder:
         Raises :exc:`PolicyValidationError` when the catalog or constraint
         values are invalid (duplicate IDs, no enabled models, bps out of range).
         """
-        rust_models = [
-            _core.KernelModel(
-                m.model_id,
-                m.provider_id,
-                m.quality_bps,
-                m.risk_ceiling_bps,
-                1 if m.enabled else 0,
-                m.p95_latency_ms,
-                m.capabilities,
-                m.region_mask,
-                m.input_cost_microunits_per_million_tokens,
-                m.output_cost_microunits_per_million_tokens,
-            )
-            for m in self._models
-        ]
         try:
+            rust_models = [
+                _core.KernelModel(
+                    m.model_id,
+                    m.provider_id,
+                    m.quality_bps,
+                    m.risk_ceiling_bps,
+                    1 if m.enabled else 0,
+                    m.p95_latency_ms,
+                    m.capabilities,
+                    m.region_mask,
+                    m.input_cost_microunits_per_million_tokens,
+                    m.output_cost_microunits_per_million_tokens,
+                )
+                for m in self._models
+            ]
             return _core.PolicySnapshot(
                 self._policy_epoch,
                 self._catalog_epoch,
@@ -126,7 +144,7 @@ class PolicyBuilder:
                 self._config.latency_penalty_microunits_per_ms,
                 rust_models,
             )
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             raise PolicyValidationError(str(exc)) from exc
 
 
@@ -151,8 +169,8 @@ class InputBuilder:
     """
 
     def __init__(self, *, request_sequence: int, requested_model_id: int) -> None:
-        _require_non_negative("request_sequence", request_sequence)
-        _require_non_negative("requested_model_id", requested_model_id)
+        _require_int_range("request_sequence", request_sequence, 0, _U64_MAX)
+        _require_int_range("requested_model_id", requested_model_id, 0, _U32_MAX)
         self._seq = request_sequence
         self._model_id = requested_model_id
         self._input_tokens: int = 0
@@ -167,22 +185,29 @@ class InputBuilder:
         self._allowed_providers: int = _core.ALL_PROVIDERS
         self._required_regions: int = 0
 
-    def tokens(self, *, input: int, output: int) -> InputBuilder:
-        """Set input and output token counts."""
-        _require_non_negative("input_tokens", input)
-        _require_non_negative("output_tokens", output)
+    def tokens(self, *, input: int, output: int) -> InputBuilder:  # skipcq: PYL-W0622
+        """Set input and output token counts.
+
+        `input` shadows the builtin inside this method only. Renaming it would
+        break every published `tokens(input=..., output=...)` call site.
+        """
+        _require_int_range("input_tokens", input, 0, _U32_MAX)
+        _require_int_range("output_tokens", output, 0, _U32_MAX)
         self._input_tokens = input
         self._output_tokens = output
         return self
 
     def budget(self, limit_microunits: int) -> InputBuilder:
         """Set the maximum spend allowed, in microunits."""
-        _require_non_negative("budget_limit_microunits", limit_microunits)
+        _require_int_range("budget_limit_microunits", limit_microunits, 0, _U64_MAX)
         self._budget = limit_microunits
         return self
 
     def value(self, business_value_microunits: int) -> InputBuilder:
         """Set the expected business value of this request, in microunits."""
+        _require_int_range(
+            "business_value_microunits", business_value_microunits, _I64_MIN, _I64_MAX
+        )
         self._business_value = business_value_microunits
         return self
 
@@ -202,25 +227,25 @@ class InputBuilder:
 
     def latency(self, *, max_p95_ms: int) -> InputBuilder:
         """Set the maximum acceptable p95 latency in milliseconds (0 = no limit)."""
-        _require_non_negative("max_p95_latency_ms", max_p95_ms)
+        _require_int_range("max_p95_latency_ms", max_p95_ms, 0, _U32_MAX)
         self._max_latency_ms = max_p95_ms
         return self
 
     def capabilities(self, required: int) -> InputBuilder:
         """Set required capability bitmask (all bits must match)."""
-        _require_non_negative("required_capabilities", required)
+        _require_int_range("required_capabilities", required, 0, _U64_MAX)
         self._required_capabilities = required
         return self
 
     def providers(self, allowed_mask: int) -> InputBuilder:
         """Restrict to specific providers via bitmask (default: ALL_PROVIDERS)."""
-        _require_non_negative("allowed_provider_mask", allowed_mask)
+        _require_int_range("allowed_provider_mask", allowed_mask, 0, _U64_MAX)
         self._allowed_providers = allowed_mask
         return self
 
     def regions(self, required_mask: int) -> InputBuilder:
         """Require specific regions via bitmask (default: 0 = no restriction)."""
-        _require_non_negative("required_region_mask", required_mask)
+        _require_int_range("required_region_mask", required_mask, 0, _U64_MAX)
         self._required_regions = required_mask
         return self
 
@@ -250,5 +275,5 @@ class InputBuilder:
                 self._allowed_providers,
                 self._required_regions,
             )
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             raise InputValidationError(str(exc)) from exc
