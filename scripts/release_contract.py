@@ -158,14 +158,14 @@ def _distribution_metadata(path: Path) -> tuple[str, str]:
             metadata = archive.read(candidates[0]).decode("utf-8")
     elif path.name.endswith(".tar.gz"):
         with tarfile.open(path, "r:gz") as archive:
-            candidates = [
+            members = [
                 member
                 for member in archive.getmembers()
                 if member.name.endswith("/PKG-INFO")
             ]
-            if len(candidates) != 1:
-                raise SystemExit(f"sdist has {len(candidates)} PKG-INFO files: {path.name}")
-            extracted = archive.extractfile(candidates[0])
+            if len(members) != 1:
+                raise SystemExit(f"sdist has {len(members)} PKG-INFO files: {path.name}")
+            extracted = archive.extractfile(members[0])
             if extracted is None:
                 raise SystemExit(f"cannot read PKG-INFO: {path.name}")
             metadata = extracted.read().decode("utf-8")
