@@ -63,8 +63,7 @@ def test_source_archive_roundtrip_preserves_required_paths(tmp_path: Path) -> No
     assert "python/calybris/__init__.py" in names
     assert ".github/workflows/release.yml" in names
     assert "proptest-regressions/budget.txt" in names
-    assert "docs/calyra-audit-report-0.5.7.typ" in names
-    assert "docs/CALYRA_AUDIT_REPORT_0.5.7.pdf" in names
+    assert not any(name.startswith(release_contract.SOURCE_INTERNAL_PREFIXES) for name in names)
     denied = (".pyd", ".pdb", ".dll", ".so", ".dylib", ".whl")
     assert not any(name.endswith(denied) for name in names)
     assert len(names) == len(set(names))

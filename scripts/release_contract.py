@@ -99,6 +99,16 @@ SOURCE_REQUIRED_FILES = {
     ".github/workflows/release.yml",
     "proptest-regressions/budget.txt",
 }
+# Internal working notes and unpublished validation artifacts. The manifest walks
+# the filesystem rather than the index, so ignore rules alone do not keep these
+# out of a published archive.
+SOURCE_INTERNAL_PREFIXES = (
+    "docs/CALYRA_AUDIT_REPORT_",
+    "docs/ENTERPRISE_GAUNTLET.md",
+    "docs/audits/",
+    "docs/calyra-audit-report-",
+    "docs/superpowers/",
+)
 SOURCE_MAX_ENTRY_BYTES = 32 * 1024 * 1024
 SOURCE_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 
@@ -190,6 +200,8 @@ def _validate_source_name(name: str) -> PurePosixPath:
         raise SystemExit(f"generated artifact path in source archive: {name!r}")
     if path.suffix.lower() in SOURCE_DENIED_SUFFIXES:
         raise SystemExit(f"generated artifact in source archive: {name!r}")
+    if name.startswith(SOURCE_INTERNAL_PREFIXES):
+        raise SystemExit(f"internal document in source archive: {name!r}")
     if path.parts[0] in SOURCE_ROOT_FILES and len(path.parts) == 1:
         return path
     if path.parts[0] not in SOURCE_ROOTS or path.suffix.lower() not in SOURCE_ALLOWED_SUFFIXES:

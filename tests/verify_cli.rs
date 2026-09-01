@@ -117,7 +117,7 @@ fn json_verdict_escapes_control_characters() {
     let verdict: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|error| panic!("invalid JSON verdict: {error}; output={stdout:?}"));
     assert_eq!(verdict["command"], "policy");
-    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["ok"].as_bool(), Some(false));
     assert!(verdict["detail"].as_str().unwrap().contains('\n'));
 }
 
@@ -141,7 +141,7 @@ fn chain_json_reports_anchor_load_failure() {
     assert!(output.stderr.is_empty(), "JSON mode wrote plain stderr");
     let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(verdict["command"], "chain");
-    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["ok"].as_bool(), Some(false));
     assert!(verdict["detail"].as_str().unwrap().contains("anchor:"));
 }
 
@@ -165,7 +165,7 @@ fn audit_json_reports_anchor_load_failure() {
     assert!(output.stderr.is_empty(), "JSON mode wrote plain stderr");
     let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(verdict["command"], "audit");
-    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["ok"].as_bool(), Some(false));
     assert!(verdict["detail"].as_str().unwrap().contains("anchor:"));
 }
 
@@ -387,7 +387,7 @@ fn policy_command_rejects_oversized_artifact_without_unbounded_read() {
     assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let verdict: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["ok"].as_bool(), Some(false));
     assert!(verdict["detail"].as_str().unwrap().contains("exceeds"));
 }
 
