@@ -70,11 +70,18 @@ jobs:
         with:
           tool: cargo-semver-checks@0.49.0
 
+      # cargo-semver-checks builds rustdoc JSON and refuses any rustc older than
+      # 1.91. It inspects the public API rather than compiling what ships, so it runs
+      # on its own toolchain; the default stays at the MSRV that every build,
+      # test, and lint gate below is meant to prove.
+      - name: Install a current toolchain for cargo-semver-checks
+        run: rustup toolchain install stable --profile minimal
+
       - name: Security and patch-SemVer gates on release commit
         run: |
           cargo audit
           cargo deny check
-          cargo semver-checks check-release --baseline-version 0.5.5
+          cargo +stable semver-checks check-release --baseline-version 0.5.5
           semgrep scan --config p/rust --config p/python --config p/secrets --config p/security-audit --metrics off --error --exclude target .
           bandit -r python/calybris python/calybris_commerce -q
           pip-audit . --strict --progress-spinner off
