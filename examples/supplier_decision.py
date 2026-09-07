@@ -39,8 +39,11 @@ def main():
         required_capabilities=1,
     )
     result = engine.decide(request)
-    assert result.selected_candidate_id == 2
-    assert engine.verify(request, result)
+    # The faster quote wins because the slower one misses the deadline. Checked
+    # rather than asserted: `python -O` would drop an assert and leave an example
+    # that prints something plausible without having confirmed anything.
+    if result.selected_candidate_id != 2 or not engine.verify(request, result):
+        raise SystemExit("the worked example did not reproduce its documented decision")
     print(result.model_dump_json(indent=2))
     stricter = DecisionEngine(
         catalog,

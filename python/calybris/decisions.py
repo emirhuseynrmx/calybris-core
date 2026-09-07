@@ -61,20 +61,6 @@ class Candidate(BaseModel):
     capabilities: U64 = 0
     enabled: bool = True
 
-    def _native_model(self) -> ModelSpec:
-        return ModelSpec(
-            model_id=self.candidate_id,
-            provider_id=self.provider_id,
-            quality_bps=self.quality_bps,
-            risk_ceiling_bps=self.risk_ceiling_bps,
-            p95_latency_ms=self.lead_time_ms,
-            region_mask=self.region_mask,
-            input_cost_microunits_per_million_tokens=self.quoted_cost_microunits,
-            output_cost_microunits_per_million_tokens=0,
-            capabilities=self.capabilities,
-            enabled=self.enabled,
-        )
-
 
 class DecisionRequest(BaseModel):
     """An immutable request for one fixed-quote job, not a schedule optimizer."""
@@ -92,23 +78,43 @@ class DecisionRequest(BaseModel):
     allowed_provider_mask: U64 = 2**64 - 1
     required_region_mask: U64 = 0
 
-    def _native_input(self) -> _core.KernelInput:
-        return (
-            InputBuilder(
-                request_sequence=self.request_sequence,
-                requested_model_id=self.requested_candidate_id,
-            )
-            .tokens(input=1_000_000, output=0)
-            .budget(self.budget_microunits)
-            .value(self.business_value_microunits)
-            .risk(bps=self.risk_bps, confidence_bps=self.confidence_bps)
-            .quality(minimum_bps=self.minimum_quality_bps)
-            .latency(max_p95_ms=self.maximum_lead_time_ms)
-            .capabilities(self.required_capabilities)
-            .providers(self.allowed_provider_mask)
-            .regions(self.required_region_mask)
-            .build()
+
+# The two models above are data. Translating them into the kernel's own types is a
+# separate job, kept out of the classes so the engine is not reaching into them.
+
+
+def _native_model(candidate: Candidate) -> ModelSpec:
+    return ModelSpec(
+        model_id=candidate.candidate_id,
+        provider_id=candidate.provider_id,
+        quality_bps=candidate.quality_bps,
+        risk_ceiling_bps=candidate.risk_ceiling_bps,
+        p95_latency_ms=candidate.lead_time_ms,
+        region_mask=candidate.region_mask,
+        input_cost_microunits_per_million_tokens=candidate.quoted_cost_microunits,
+        output_cost_microunits_per_million_tokens=0,
+        capabilities=candidate.capabilities,
+        enabled=candidate.enabled,
+    )
+
+
+def _native_input(request: DecisionRequest) -> _core.KernelInput:
+    return (
+        InputBuilder(
+            request_sequence=request.request_sequence,
+            requested_model_id=request.requested_candidate_id,
         )
+        .tokens(input=1_000_000, output=0)
+        .budget(request.budget_microunits)
+        .value(request.business_value_microunits)
+        .risk(bps=request.risk_bps, confidence_bps=request.confidence_bps)
+        .quality(minimum_bps=request.minimum_quality_bps)
+        .latency(max_p95_ms=request.maximum_lead_time_ms)
+        .capabilities(request.required_capabilities)
+        .providers(request.allowed_provider_mask)
+        .regions(request.required_region_mask)
+        .build()
+    )
 
 
 class DecisionResult(BaseModel):
@@ -154,7 +160,7 @@ class DecisionEngine:
             self._config, policy_epoch=policy_epoch, catalog_epoch=catalog_epoch
         )
         for item in self._candidates:
-            builder.add_model(item._native_model())
+            builder.add_model(_native_model(item))
         self._engine = CalybrisEngine(builder.build())
 
     @property
@@ -185,7 +191,7 @@ class DecisionEngine:
     def decide(self, request: DecisionRequest) -> DecisionResult:
         """Select once with the native kernel, then replay-verify the decision."""
         request = DecisionRequest.model_validate(request.model_dump())
-        native = request._native_input()
+        native = _native_input(request)
         raw, trace = self._engine.prescribe_with_trace(native)
         decision = self._engine.decision_model(raw)
         return DecisionResult(

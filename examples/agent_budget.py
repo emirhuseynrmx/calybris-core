@@ -18,7 +18,8 @@ async def main():
     result = await budget.acall(
         "lookup-1", 60, completed_call, lambda response: response["cost_microcents"]
     )
-    assert result["answer"] == "done"
+    if result["answer"] != "done":
+        raise SystemExit("the paid call did not return its response")
 
     async def response_lost():
         raise TimeoutError("The provider may already have charged this call")
@@ -38,9 +39,14 @@ async def main():
     budget.reconcile("lookup-2", 25)
     budget.close()
     report = budget.report()
-    assert report.remaining_microcents == 45
-    assert report.committed_microcents == 55
-    assert report.reserved_microcents == 0
+    # The ledger is the point of this example, so it is checked, not asserted:
+    # an assert disappears under `python -O` and CI runs this file.
+    if (report.remaining_microcents, report.committed_microcents, report.reserved_microcents) != (
+        45,
+        55,
+        0,
+    ):
+        raise SystemExit(f"unexpected ledger: {report}")
     print(json.dumps(asdict(report), indent=2))
 
 

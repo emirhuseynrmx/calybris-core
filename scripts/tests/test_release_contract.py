@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+# `release_contract` reads Cargo.toml with `tomllib`, which is standard library only
+# from 3.11. The wheel supports 3.10 and the release tooling does not have to, so the
+# requirement is declared here rather than by dropping the directory from CI.
+pytest.importorskip("tomllib", reason="the release contract tooling requires Python 3.11 or newer")
+
 SCRIPT = Path(__file__).parents[1] / "release_contract.py"
 SPEC = importlib.util.spec_from_file_location("release_contract", SCRIPT)
 # Module setup rather than a test assertion: `assert` here would vanish under

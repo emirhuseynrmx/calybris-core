@@ -100,8 +100,9 @@ def threaded_soak(workers, steps):
                     expected += actual
             else:
                 check(
-                    run.call(attempt, 100, lambda: actual, lambda r: r) == actual,
-                    "run.call(attempt, 100, lambda: actual, lambda r: r) == actual",
+                    run.call(attempt, 100, lambda actual=actual: actual, lambda cost: cost)
+                    == actual,
+                    "the reported cost did not match the observed one",
                 )
                 expected += actual
             if i % 1000 == 0:
@@ -251,7 +252,9 @@ def settlement_races(rounds=200):
                 pass
             barrier = threading.Barrier(32)
 
-            def settle(i):
+            # `run`, `attempt` and `barrier` are rebound every round, so they are
+            # bound here rather than captured.
+            def settle(i, run=run, attempt=attempt, barrier=barrier):
                 barrier.wait(timeout=20)
                 try:
                     if i % 2:

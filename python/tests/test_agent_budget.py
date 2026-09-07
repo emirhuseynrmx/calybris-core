@@ -113,7 +113,7 @@ def test_cost_callback_exception_keeps_hold():
         raise LookupError("missing usage")
 
     with pytest.raises(LookupError):
-        run.call("a", 10, lambda: object(), bad_usage)
+        run.call("a", 10, object, bad_usage)
     assert run.report().reserved_microcents == 10
 
 
