@@ -91,6 +91,19 @@ class BudgetOverrunError(AgentBudgetError):
         super().__init__(f"Attempt {attempt_id!r} exceeded its reservation; run closed")
 
 
+def _held(value: T | None, invariant: str) -> T:
+    """Returns a value this attempt's state guarantees, or fails closed if it is absent.
+
+    These are internal invariants rather than caller input, which is what `assert`
+    normally expresses. `python -O` removes assertions, and a ledger that drops its
+    own consistency checks the moment someone optimises the interpreter is a worse
+    ledger than one that stops. They are cheap, so they are always on.
+    """
+    if value is None:
+        raise AttemptStateError(f"budget invariant violated: {invariant}")
+    return value
+
+
 @dataclass(frozen=True)
 class AttemptReport:
     """Immutable snapshot; never contains the operation response or exception text.
@@ -282,14 +295,16 @@ class AgentBudget:
                 entry.report = replace(entry.report, status="uncertain")
 
     def _settle_locked(self, entry: _Attempt, actual_microcents: int) -> None:
-        assert entry.reservation_id is not None
+        reservation_id = _held(
+            entry.reservation_id, "settling an attempt that holds no reservation"
+        )
         overrun = actual_microcents > entry.report.reserved_microcents
         if overrun:
             self._closed = True
             self._close_reason = "overrun"
         # Preserve observed cost before crossing the native settlement boundary.
         entry.report = replace(entry.report, actual_microcents=actual_microcents)
-        settled = self._guard.commit(entry.reservation_id, actual_microcents)
+        settled = self._guard.commit(reservation_id, actual_microcents)
         if settled.is_committed:
             entry.report = replace(
                 entry.report, status="overrun_settled" if overrun else "committed"
@@ -406,8 +421,10 @@ class AgentBudget:
             entry = self._unresolved(attempt_id)
             if entry.report.actual_microcents is not None:
                 raise AttemptStateError("Observed cost must be reconciled, not released")
-            assert entry.reservation_id is not None
-            result = self._guard.release(entry.reservation_id)
+            reservation_id = _held(
+                entry.reservation_id, "releasing an attempt that holds no reservation"
+            )
+            result = self._guard.release(reservation_id)
             if not result.is_released:
                 self._closed = True
                 self._close_reason = "settlement_error"
@@ -434,14 +451,17 @@ class AgentBudget:
             entry = self._attempts.get(attempt_id)
             if entry is None or entry.report.status != "overrun_unsettled":
                 raise CorrectionError("Only an unsettled overrun can be corrected")
-            observed = entry.report.actual_microcents
-            assert observed is not None
+            observed = _held(
+                entry.report.actual_microcents, "correcting an overrun with no observed cost"
+            )
             if corrected_microcents >= observed:
                 raise CorrectionError(
                     f"correction must be below the observed {observed} microcents"
                 )
-            assert entry.reservation_id is not None
-            settled = self._guard.commit(entry.reservation_id, corrected_microcents)
+            reservation_id = _held(
+                entry.reservation_id, "correcting an attempt that holds no reservation"
+            )
+            settled = self._guard.commit(reservation_id, corrected_microcents)
             if not settled.is_committed:
                 raise CorrectionError(f"Correction could not be settled: {settled.status}")
             entry.reservation_id = None
