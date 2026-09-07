@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.1] - 2026-09-08
 
-No code change. The crates.io page for 0.6.0 shipped without the banner and the
-badges: splitting `README-crates.md` off from the repository README dropped both
-without anyone deciding to, and a published version's README cannot be replaced.
-This release exists to correct that page. `calybris-core` 0.6.1 and `calybris`
-0.6.1 are byte-identical in behaviour to 0.6.0.
+No code change, and **crates.io only**. `calybris-core` 0.6.1 behaves exactly as
+0.6.0 does; there is no `calybris` 0.6.1 on PyPI, where 0.6.0 remains current.
+`pip install calybris==0.6.1` will not resolve — ask for `calybris` and take
+0.6.0, which is the same software.
+
+The crates.io page for 0.6.0 shipped without the banner and the badges:
+splitting `README-crates.md` off from the repository README dropped both without
+anyone deciding to, and a published version's README cannot be replaced. A
+release is the only way to correct that page, so this is one, and it was not
+worth spending a PyPI version on.
 
 ## [0.6.0] - 2026-09-08
 
