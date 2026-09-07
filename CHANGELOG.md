@@ -5,6 +5,97 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-08
+
+0.5.8 and 0.5.9 were never published. Everything they carried ships here, so
+this section is the whole distance from 0.5.7.
+
+### Added — decisions
+
+- A typed, domain-neutral decision API on the existing kernel: `Candidate`,
+  `DecisionRequest`, `DecisionEngine`, `DecisionResult` and `compare_policies`,
+  exported from `calybris`. One already-priced job in, one selected candidate
+  plus a replay-verified audit bundle out. No selection algorithm was added; the
+  adapter maps a fixed quote onto the native cost rate as exactly one million
+  input units and zero output units, so the native estimated cost is the quote.
+  Suppliers, carriers, venues and models are the same call with a different
+  catalog. See [docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md).
+- `DecisionEngine.verify` recomputes the entire result from the caller's own
+  catalog, policy and request rather than trusting a self-declared flag, and the
+  catalog digest (`calybris.catalog.v1`) is kept distinct from the native policy,
+  input and decision digests. It is a content identity, not a signature.
+- `compare_policies` replays identical frozen requests through two policies and
+  reports how many outcomes changed and how many became rejections, with bounded
+  stored detail and totals that are never silently truncated. It names which
+  configuration fields differ; it does not attribute a change to one of them, and
+  it does not claim realized savings or a better real-world outcome.
+- The comparison carries `before_policy` and `after_policy` — the native policy
+  digest and both epochs for each side — and a `policy_changed` flag derived from
+  them. These sit at the top level, so a comparison whose per-change detail was
+  truncated still says which two policies produced it. `changed_fields` compares
+  configured knobs only: two engines can share every field and still differ by
+  epoch, and `policy_changed` is what answers that.
+- `AgentBudget.lifecycle_report`, one atomic view of balance, unresolved work and
+  its next action, corrections, denials and reservation accuracy, taken under a
+  single lock so the parts cannot disagree. It is a presentation of facts the
+  ledger already holds: no second ledger, no inferred reservation advice, and it
+  is local accounting rather than an attestation of a provider's bill.
+
+### Added — budget
+
+- Python `AgentBudget` for shared in-process sync/async call admission backed by
+  the Rust budget engine. Uncertain usage retains holds; explicit reconciliation,
+  duplicate-attempt protection, bounded reports and fail-closed overruns are included.
+- Credential-free example and reproducible threaded/async accounting stress harness.
+- Regression tests for cancellation, timeout, concurrent admission/settlement,
+  invalid usage, inherited-process rejection and unsupported response protocols.
+- `AgentBudget` no longer spends its admitted-attempt limit on calls it refused.
+  A denial leaves its identifier free to retry and is recorded in a bounded ring
+  with a full count, so a long run is not ended by work it never did.
+- Added `AgentBudget.correct`, which settles an overrun the budget could not
+  absorb at a lower documented amount, keeps the originally observed cost and the
+  stated reason, and refuses a second application or an amount that is not lower.
+- Added `AgentBudget.reservation_accuracy`, which reports what the run's own history
+  says about the reservations it was given: how much of each reserve was actually
+  spent, how much was held and never used, and how many refusals happened while the
+  budget could still have covered the most expensive call that completed. Nothing is
+  suggested; a recommendation from a handful of calls would carry a confidence the
+  history does not have.
+- Added `AgentBudget.balance` for callers that need the ledger without a record of
+  every attempt, and an explicit `__all__` for `calybris.agent`.
+
+### Fixed
+
+- `reservation_accuracy` counted an attempt as settled whenever it carried an
+  observed cost, so an unabsorbed overrun and an attempt left uncertain by a failed
+  operation both entered `settled_attempts` and skewed `median_ratio_ppm` and
+  `held_unused_microcents`. The ledger was never wrong; the report was. Membership
+  now follows the attempt's status, published as `SETTLED_STATUSES`. A corrected
+  overrun does count, because the ledger took it.
+
+### Changed
+
+- The README leads with the decision API. Calybris is a decision engine that
+  selects under explicit constraints and makes the decision verifiable afterwards;
+  budget control is a component beside that decision, and model routing is one
+  adapter among several rather than the subject.
+- Python quickstart uses installed wheels. Core proof formats are unchanged, and
+  the Rust decision and replay protocol is untouched by this release.
+
+### Scope
+
+- The decision adapter does not compute quantity discounts, exchange rates or
+  schedules. Quotes, budget and business value are integers in one currency and
+  scale chosen by the caller.
+- The rejection trace counts the first failed gate per candidate. Global policy
+  rejections happen before candidate gates, so an all-zero histogram does not mean
+  every candidate was eligible.
+- Lead time is milliseconds in a `u32`, which bounds it at roughly 49.7 days. A
+  longer planning horizon needs a separately versioned adapter.
+- No distributed or durable AgentBudget recovery, streaming adapter, automatic
+  retries, provider price estimation, or guarantee over external provider billing.
+- Existing snapshot-size and torn-WAL recovery limits remain unchanged.
+
 ## [0.5.7] - 2026-07-22
 
 ### Added

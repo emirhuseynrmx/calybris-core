@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+# `release_contract` reads Cargo.toml with `tomllib`, which is standard library only
+# from 3.11. The wheel supports 3.10 and the release tooling does not have to, so the
+# requirement is declared here rather than by dropping the directory from CI.
+pytest.importorskip("tomllib", reason="the release contract tooling requires Python 3.11 or newer")
+
 SCRIPT = Path(__file__).parents[1] / "release_contract.py"
 SPEC = importlib.util.spec_from_file_location("release_contract", SCRIPT)
 # Module setup rather than a test assertion: `assert` here would vanish under
@@ -18,13 +23,13 @@ SPEC.loader.exec_module(release_contract)
 
 def test_repository_release_manifests_are_aligned() -> None:
     root = Path(__file__).parents[2]
-    assert release_contract.validate_manifests(root, "v0.5.7") == "0.5.7"  # skipcq: BAN-B101
+    assert release_contract.validate_manifests(root, "v0.6.0") == "0.6.0"  # skipcq: BAN-B101
 
 
 def test_mismatched_tag_is_rejected() -> None:
     root = Path(__file__).parents[2]
     with pytest.raises(SystemExit, match="tag/package mismatch"):
-        release_contract.validate_manifests(root, "v0.5.8")
+        release_contract.validate_manifests(root, "v0.5.7")
 
 
 @pytest.mark.parametrize("tag", ["0.5.7", "v0.5", "v0.5.7+local", "release-v0.5.7"])
@@ -67,6 +72,7 @@ def test_source_archive_roundtrip_preserves_required_paths(tmp_path: Path) -> No
     assert ".github/workflows/release.yml" in names  # skipcq: BAN-B101
     assert "proptest-regressions/budget.txt" in names  # skipcq: BAN-B101
     # skipcq: BAN-B101
+    # skipcq: BAN-B101
     assert not any(name.startswith(release_contract.SOURCE_INTERNAL_PREFIXES) for name in names)
     denied = (".pyd", ".pdb", ".dll", ".so", ".dylib", ".whl")
     assert not any(name.endswith(denied) for name in names)  # skipcq: BAN-B101
@@ -88,5 +94,6 @@ def test_provenance_rejects_untracked_files(
     monkeypatch.setattr(release_contract, "_command", fake_command)
     with pytest.raises(SystemExit, match="source tree is dirty"):
         release_contract.write_provenance(tmp_path, tmp_path / "provenance.json", "0.5.7", None)
+    # skipcq: BAN-B101
     # skipcq: BAN-B101
     assert ("git", "status", "--porcelain=v1", "--untracked-files=all") in commands
