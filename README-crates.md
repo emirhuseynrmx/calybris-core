@@ -1,4 +1,18 @@
+<div align="center">
+  <img src="https://raw.githubusercontent.com/emirhuseynrmx/calybris-core/main/assets/banner.png" alt="Calybris Core" width="100%" />
+</div>
+
+<br/>
+
 # Calybris Core
+
+[![CI](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/calybris-core/actions/workflows/ci.yml)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/emirhuseynrmx/calybris-core?utm_source=badge)
+[![codecov](https://codecov.io/gh/emirhuseynrmx/calybris-core/graph/badge.svg)](https://codecov.io/gh/emirhuseynrmx/calybris-core)
+[![Crates.io](https://img.shields.io/crates/v/calybris-core)](https://crates.io/crates/calybris-core)
+[![docs.rs](https://img.shields.io/docsrs/calybris-core)](https://docs.rs/calybris-core)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
 
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
@@ -156,9 +170,11 @@ policy comparison that identifies both policies it compared, and an atomic
 budget lifecycle report. The Rust decision and replay protocol is unchanged, and
 `calybris-core` remains the contract that surface is built on.
 
-Two reporting defects were fixed here: the kernel dropped its rejection
+Two reporting defects were fixed here. The kernel dropped its rejection
 histogram on the trace path, so a rejected decision reported every gate as zero.
-Neither touched the ledger. See the [CHANGELOG](CHANGELOG.md).
+The Python budget counted an unabsorbed overrun as a settled attempt, which
+skewed its reservation-accuracy figures. Neither touched the ledger. See the
+[CHANGELOG](CHANGELOG.md).
 
 ## Performance
 
