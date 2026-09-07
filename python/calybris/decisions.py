@@ -10,11 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
-from calybris import _core
 from calybris.builder import EngineConfig, InputBuilder, PolicyBuilder
 from calybris.engine import CalybrisEngine
 from calybris.types import (
@@ -28,6 +27,13 @@ from calybris.types import (
     DecisionTrace,
     ModelSpec,
 )
+
+if TYPE_CHECKING:  # `_core` is only named in an annotation, and this module is
+    # imported from the package __init__ before the package binds `_core`. Importing
+    # it at run time closes that loop for no benefit: postponed annotations mean the
+    # name is never evaluated.
+    from calybris import _core
+
 
 __all__ = [
     "Candidate",

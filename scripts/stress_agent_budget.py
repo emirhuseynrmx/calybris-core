@@ -26,6 +26,17 @@ from calybris import (
 )
 
 
+def check(condition, detail):
+    """Fails the harness loudly, and keeps doing so under `python -O`.
+
+    `assert` would say this more briefly and would also be removed by the
+    optimiser, leaving a stress harness that prints PASS without having verified
+    anything. Checking is the entire job of this script, so it is never optional.
+    """
+    if not condition:
+        raise AssertionError(detail)
+
+
 def emit(name, started, **fields):
     print(
         json.dumps(dict(test=name, status="PASS", seconds=time.perf_counter() - started, **fields)),
@@ -34,11 +45,14 @@ def emit(name, started, **fields):
 
 
 def ledger(report, initial, committed, reserved=0):
-    assert report.initial_microcents == initial
-    assert report.committed_microcents == committed
-    assert report.reserved_microcents == reserved
-    assert report.remaining_microcents == initial - committed - reserved
-    assert report.conservation_balanced
+    check(report.initial_microcents == initial, "report.initial_microcents == initial")
+    check(report.committed_microcents == committed, "report.committed_microcents == committed")
+    check(report.reserved_microcents == reserved, "report.reserved_microcents == reserved")
+    check(
+        report.remaining_microcents == initial - committed - reserved,
+        "report.remaining_microcents == initial - committed - reserved",
+    )
+    check(report.conservation_balanced, "report.conservation_balanced")
 
 
 def threaded_soak(workers, steps):
@@ -85,7 +99,10 @@ def threaded_soak(workers, steps):
                     run.reconcile(attempt, actual)
                     expected += actual
             else:
-                assert run.call(attempt, 100, lambda: actual, lambda r: r) == actual
+                check(
+                    run.call(attempt, 100, lambda: actual, lambda r: r) == actual,
+                    "run.call(attempt, 100, lambda: actual, lambda r: r) == actual",
+                )
                 expected += actual
             if i % 1000 == 0:
                 try:
@@ -106,15 +123,18 @@ def threaded_soak(workers, steps):
             expected = sum(pool.map(worker, range(workers)))
         report = run.report()
         ledger(report, count * 100, expected)
-        assert len(report.attempts) == count
-        assert all(a.status in ("committed", "released") for a in report.attempts)
+        check(len(report.attempts) == count, "len(report.attempts) == count")
+        check(
+            all(a.status in ("committed", "released") for a in report.attempts),
+            'all(a.status in ("committed", "released") for a in report.attempts)',
+        )
         try:
             run.call("beyond-limit", 1, lambda: None, lambda r: 0)
         except AttemptLimitError:
             pass
         else:
             raise AssertionError("attempt registry grew beyond bound")
-        assert not failures, failures
+        check(not failures, failures)
         peak[0] = max(peak[0], psutil.Process().memory_info().rss)
         emit(
             "threaded_mixed_accounting_soak",
@@ -152,7 +172,7 @@ def contention():
 
     with ThreadPoolExecutor(max_workers=128) as pool:
         accepted = sum(pool.map(worker, range(128)))
-    assert accepted == 17
+    check(accepted == 17, "accepted == 17")
     ledger(run.report(), 1700, 1700)
     emit("128_thread_inflight_admission", start, accepted=17, denied=111)
 
@@ -192,16 +212,19 @@ async def async_storm():
             return "uncertain"
 
     result = await asyncio.wait_for(asyncio.gather(*(worker(i) for i in range(10_000))), 120)
-    assert result.count("denied") == 9000
+    check(result.count("denied") == 9000, 'result.count("denied") == 9000')
     committed = result.count("committed") * 37
     unresolved = result.count("cancelled") + result.count("uncertain")
     report = run.report()
     ledger(report, 100_000, committed, unresolved * 100)
     # Denials are history rather than capacity, so the registry holds the admitted 1000
     # while the count of refusals still accounts for every one of the 10,000 tasks.
-    assert len(report.attempts) == 1000
-    assert report.denied_total == 9000
-    assert len(report.attempts) + report.denied_total == 10_000
+    check(len(report.attempts) == 1000, "len(report.attempts) == 1000")
+    check(report.denied_total == 9000, "report.denied_total == 9000")
+    check(
+        len(report.attempts) + report.denied_total == 10_000,
+        "len(report.attempts) + report.denied_total == 10_000",
+    )
     # Reconcile each actually admitted uncertain call from the independent outcomes.
     for i, state in enumerate(result):
         if state in ("cancelled", "uncertain"):
@@ -241,11 +264,10 @@ def settlement_races(rounds=200):
 
             results = list(pool.map(settle, range(32)))
             winners = [x for x in results if x is not None]
-            assert len(winners) == 1
+            check(len(winners) == 1, "len(winners) == 1")
             expected += winners[0]
     ledger(run.report(), rounds * 100, expected)
     emit("settlement_races", start, attempts=rounds, settlement_calls=rounds * 32)
-
 
 
 def denial_pressure(workers=64, steps=4000):
@@ -281,12 +303,15 @@ def denial_pressure(workers=64, steps=4000):
 
     report = run.report()
     # Capacity is spent by admitted work alone, and every refusal is still counted.
-    assert counts["admitted"] == affordable, counts
-    assert counts["denied"] == workers * steps - affordable, counts
-    assert counts["limit"] == 0, "the registry ended a run the budget had not"
-    assert len(report.attempts) == counts["admitted"]
-    assert report.denied_total == counts["denied"]
-    assert len(report.denied) == min(64, counts["denied"])
+    check(counts["admitted"] == affordable, counts)
+    check(counts["denied"] == workers * steps - affordable, counts)
+    check(counts["limit"] == 0, "the registry ended a run the budget had not")
+    check(len(report.attempts) == counts["admitted"], 'len(report.attempts) == counts["admitted"]')
+    check(report.denied_total == counts["denied"], 'report.denied_total == counts["denied"]')
+    check(
+        len(report.denied) == min(64, counts["denied"]),
+        'len(report.denied) == min(64, counts["denied"])',
+    )
     ledger(report, affordable * 10, counts["admitted"] * 10)
     emit(
         "denial_pressure",
@@ -304,16 +329,22 @@ def correction_races(rounds=200, racers=32):
     start = time.perf_counter()
     settled = 0
     with ThreadPoolExecutor(max_workers=racers) as pool:
-        for r in range(rounds):
+        for round_index in range(rounds):
             run = AgentBudget(50)
             try:
-                run.call("x", 40, lambda: "ok", lambda r: 60)
+                run.call("x", 40, lambda: "ok", lambda _response: 60)
             except BudgetOverrunError:
                 pass
-            assert run.report().attempts[0].status == "overrun_unsettled"
+            check(
+                run.report().attempts[0].status == "overrun_unsettled",
+                "the overrun did not stay unsettled",
+            )
             barrier = threading.Barrier(racers)
 
-            def correct(i):
+            # `run` and `barrier` are rebound every round, so they are bound here
+            # rather than captured: a closure that reads them late would race the
+            # next round's objects.
+            def correct(i, run=run, barrier=barrier):
                 barrier.wait(timeout=20)
                 amount = 10 + i
                 try:
@@ -324,13 +355,16 @@ def correction_races(rounds=200, racers=32):
 
             results = list(pool.map(correct, range(racers)))
             winners = [x for x in results if x is not None]
-            assert len(winners) == 1, f"round {r}: {len(winners)} winners"
+            check(len(winners) == 1, f"round {round_index}: {len(winners)} winners")
             report = run.report()
             attempt = report.attempts[0]
-            assert attempt.status == "corrected"
-            assert attempt.actual_microcents == 60, "observed cost was lost"
-            assert attempt.corrected_microcents == winners[0]
-            assert attempt.correction_reason is not None
+            check(attempt.status == "corrected", 'attempt.status == "corrected"')
+            check(attempt.actual_microcents == 60, "observed cost was lost")
+            check(
+                attempt.corrected_microcents == winners[0],
+                "attempt.corrected_microcents == winners[0]",
+            )
+            check(attempt.correction_reason is not None, "attempt.correction_reason is not None")
             ledger(report, 50, winners[0])
             settled += winners[0]
     emit(

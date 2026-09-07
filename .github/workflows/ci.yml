@@ -197,7 +197,10 @@ jobs:
           python -c "import calybris; import calybris_commerce; import calybris_core; print(calybris.__version__)"
 
       - name: Python tests
-        run: pytest python/tests -q
+        # `scripts/tests` covers the release manifests and the source archive. It
+        # was never in this command, so a version assertion there could disagree
+        # with Cargo.toml without anything reporting it.
+        run: pytest python/tests scripts/tests -q
 
       - name: AgentBudget stress smoke
         timeout-minutes: 5
