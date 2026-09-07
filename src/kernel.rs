@@ -881,12 +881,15 @@ impl PolicySnapshot {
 
         let evaluated_models = u16::try_from(self.models.len()).unwrap_or(u16::MAX);
         let Some(best) = best else {
-            return self.reject(
-                input,
-                dominant_rejection_reason(&rejected),
-                evaluated_models,
-                eligible_models,
-            );
+            let decision = self
+                .reject(
+                    input,
+                    dominant_rejection_reason(&rejected),
+                    evaluated_models,
+                    eligible_models,
+                )
+                .0;
+            return (decision, rejected);
         };
         let action = if best.model_id == input.requested_model_id {
             KernelAction::ExecuteRequested

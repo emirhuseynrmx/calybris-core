@@ -18,13 +18,13 @@ SPEC.loader.exec_module(release_contract)
 
 def test_repository_release_manifests_are_aligned() -> None:
     root = Path(__file__).parents[2]
-    assert release_contract.validate_manifests(root, "v0.5.7") == "0.5.7"  # skipcq: BAN-B101
+    assert release_contract.validate_manifests(root, "v0.5.8") == "0.5.8"  # skipcq: BAN-B101
 
 
 def test_mismatched_tag_is_rejected() -> None:
     root = Path(__file__).parents[2]
     with pytest.raises(SystemExit, match="tag/package mismatch"):
-        release_contract.validate_manifests(root, "v0.5.8")
+        release_contract.validate_manifests(root, "v0.5.7")
 
 
 @pytest.mark.parametrize("tag", ["0.5.7", "v0.5", "v0.5.7+local", "release-v0.5.7"])

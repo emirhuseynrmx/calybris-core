@@ -14,7 +14,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
 
-**Deterministic, auditable decision primitive for high-stakes routing & guardrails.**
+**A deterministic decision engine: it selects under explicit constraints, and makes
+the decision verifiable afterwards.**
 
 Given a frozen catalog, a policy snapshot, and a typed request, Calybris returns
 one action plus an audit bundle that replays to the same answer.
@@ -95,7 +96,63 @@ versions even though its runtime integrity guarantees match the Rust core.
 See the [0.5.7 trust-release migration](docs/TRUST_RELEASE_0.5.7.md) for the
 canonical production path and CALY-PROOF v1 compatibility boundary.
 
+## What 0.6.0 adds
+
+A typed decision surface on the kernel that was already there, and a way to ask
+what a policy change would have done.
+
+- **`DecisionEngine`, `Candidate`, `DecisionRequest`.** One already-priced job in,
+  one selected candidate plus a replay-verified audit bundle out. No new
+  selection algorithm: a fixed quote is mapped onto the native cost rate, so the
+  kernel prices it without a second pricing path.
+- **`compare_policies`.** Replay the same frozen requests through two policies and
+  see how many outcomes changed. Both policies are named in the result, so a
+  comparison whose stored detail was capped still says which two produced it.
+- **`AgentBudget.lifecycle_report()`.** Balance, unresolved work and its next
+  action, corrections, denials and reservation accuracy — taken under one lock,
+  so the parts cannot disagree with each other.
+
+0.5.8 and 0.5.9 were never published; everything they carried ships here. See
+[docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md) for units, identities and the
+exact limits of the rejection trace, and the [CHANGELOG](CHANGELOG.md) for the
+full distance from 0.5.7.
+
 ## Quickstart (~5 minutes)
+
+Python users can start from a published wheel (`pip install calybris`). The
+shortest path to a decision is the typed adapter added in 0.6.0: fixed quotes in,
+one selected candidate plus a replay-verified proof out.
+
+```python
+from calybris import Candidate, DecisionEngine, DecisionRequest
+
+engine = DecisionEngine([
+    Candidate(candidate_id=1, provider_id=0, quality_bps=9000, risk_ceiling_bps=8000,
+              lead_time_ms=8 * 86_400_000, region_mask=1, quoted_cost_microunits=80_000_000),
+    Candidate(candidate_id=2, provider_id=1, quality_bps=9500, risk_ceiling_bps=8000,
+              lead_time_ms=3 * 86_400_000, region_mask=1, quoted_cost_microunits=100_000_000),
+])
+result = engine.decide(DecisionRequest(
+    request_sequence=1,
+    budget_microunits=120_000_000,
+    business_value_microunits=200_000_000,
+    maximum_lead_time_ms=5 * 86_400_000,
+))
+result.status                     # "selected"
+result.selected_candidate_id      # 2
+engine.verify(request, result)    # recomputed against the same catalog and policy
+```
+
+Quotes, budget and business value are integers in one currency and scale you
+choose; nothing converts between currencies. `python examples/supplier_decision.py`
+runs the full version offline, including a policy comparison. Candidates are
+suppliers here, but the kernel does not know that — carriers, venues and models
+are the same call with a different catalog.
+
+See [docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md) for units, identities and
+the exact limits of the rejection trace.
+
+For the Rust surface:
 
 ```bash
 git clone https://github.com/emirhuseynrmx/calybris-core.git
@@ -104,13 +161,14 @@ cargo run --example quickstart
 ```
 
 That example builds a two-model policy, prescribes one request, verifies replay,
-and prints an audit bundle. For Python:
+and prints an audit bundle.
 
-```bash
-pip install maturin pydantic
-maturin develop --release
-python bindings/python/examples/quickstart.py
-```
+Budget control is a separate component that sits beside the decision, not in
+front of it: **AgentBudget** holds one shared budget across paid calls, with
+pre-call reservations, explicit uncertain-usage reconciliation and bounded
+immutable reports. Try `python examples/agent_budget.py`; it needs no provider
+credentials. See [AgentBudget](docs/AGENT_BUDGET.md) for the same-process,
+non-streaming support boundary.
 
 ## What gets proved
 
@@ -225,9 +283,10 @@ CodSpeed CI (Linux x86_64, release): ~**8.6M** `prescribe`/sec, ~115 ns/decision
 reproduction recipe are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); run
 `cargo bench --bench kernel_bench` on your own hardware.
 
-0.5.7 carries a release-blocking production torture suite covering a
-64-model checked kernel, state trajectories, signed receipts, keyed audited WAL,
-suffix-truncation detection, contended budgets, and a 25,000-tenant ledger.
+A release-blocking production torture suite, introduced in 0.5.7 and still
+enforced, covers a 64-model checked kernel, state trajectories, signed receipts,
+keyed audited WAL, suffix-truncation detection, contended budgets, and a
+25,000-tenant ledger.
 
 ## Security posture
 

@@ -37,6 +37,21 @@ try:
 except PackageNotFoundError:
     __version__ = "0.0.0+local"
 
+from calybris.agent import (
+    AgentBudget,
+    AgentBudgetError,
+    AttemptLimitError,
+    AttemptReport,
+    AttemptStateError,
+    BudgetDeniedError,
+    BudgetOverrunError,
+    CorrectionError,
+    DuplicateAttemptError,
+    RunAccuracy,
+    RunBalance,
+    RunClosedError,
+    RunReport,
+)
 from calybris.audit import (
     AuditedWal,
     plan_recovery,
@@ -50,6 +65,16 @@ from calybris.audit import (
     verify_state_trajectory_linkage,
 )
 from calybris.builder import EngineConfig, InputBuilder, PolicyBuilder
+from calybris.decisions import (
+    Candidate,
+    DecisionEngine,
+    DecisionRequest,
+    DecisionResult,
+    PolicyChange,
+    PolicyComparison,
+    PolicyIdentity,
+    compare_policies,
+)
 from calybris.engine import CalybrisEngine
 from calybris.errors import (
     ArtifactValidationError,
@@ -123,6 +148,27 @@ from ._core import (
 )
 
 __all__ = [
+    "Candidate",
+    "DecisionEngine",
+    "DecisionRequest",
+    "DecisionResult",
+    "PolicyChange",
+    "PolicyComparison",
+    "PolicyIdentity",
+    "compare_policies",
+    "AgentBudget",
+    "AgentBudgetError",
+    "AttemptLimitError",
+    "AttemptReport",
+    "AttemptStateError",
+    "BudgetDeniedError",
+    "BudgetOverrunError",
+    "CorrectionError",
+    "DuplicateAttemptError",
+    "RunAccuracy",
+    "RunBalance",
+    "RunClosedError",
+    "RunReport",
     "__version__",
     # High-level API
     "CalybrisEngine",

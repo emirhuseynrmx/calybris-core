@@ -199,6 +199,13 @@ jobs:
       - name: Python tests
         run: pytest python/tests -q
 
+      - name: AgentBudget stress smoke
+        timeout-minutes: 5
+        run: |
+          python -m pip install psutil
+          python examples/agent_budget.py
+          python scripts/stress_agent_budget.py --steps 100 --workers 8
+
   python-quality:
     name: Python lint & types
     runs-on: ubuntu-latest
