@@ -8,7 +8,10 @@ description = "Deterministic proof-carrying decision core with replay verificati
 repository = "https://github.com/emirhuseynrmx/calybris-core"
 homepage = "https://github.com/emirhuseynrmx/calybris-core"
 documentation = "https://docs.rs/calybris-core"
-readme = "README.md"
+# crates.io gets its own page: README.md leads with the Python decision surface,
+# which is the right first thing on GitHub and the wrong first thing for someone
+# who just ran `cargo add calybris-core`.
+readme = "README-crates.md"
 keywords = ["decision-engine", "proof-carrying", "write-ahead-log", "budget-engine", "deterministic"]
 categories = ["algorithms", "finance"]
 # Published crate is kernel-only: the Python wrapper source and its build
