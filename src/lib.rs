@@ -55,6 +55,8 @@ pub mod instrument;
 pub mod kernel;
 /// Snapshot persistence and crash recovery.
 #[cfg(feature = "serde")]
+/// Decision outcomes: what happened after a decision, and how it was chosen.
+pub mod outcome;
 pub mod persistence;
 
 pub mod proof;
