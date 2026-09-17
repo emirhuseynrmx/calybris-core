@@ -405,3 +405,30 @@ jobs:
             echo "::error::a clean checkout was stamped dirty"
             exit 1
           fi
+
+  c-abi:
+    name: C ABI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.85.0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      # The Rust tests use Rust's idea of the struct layouts, so a header that
+      # declared a field in the wrong order or width would pass all of them. A C
+      # compiler reading the header would not, which is what this is for.
+      - name: Compile and run smoke.c against the static library
+        run: python scripts/check_c_abi.py
+
+      - name: The same check against an optimised build
+        run: python scripts/check_c_abi.py --release

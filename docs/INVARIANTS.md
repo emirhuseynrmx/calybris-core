@@ -136,6 +136,29 @@ run on every machine.
 | CAL-I077 | Every WAL seed has at least one decodable line | `fuzz_seeds::every_wal_seed_has_at_least_one_decodable_line` |
 | CAL-I078 | Every kernel seed is long enough to reach the kernel | `fuzz_seeds::every_kernel_seed_is_long_enough_to_reach_the_kernel` |
 
+## The C ABI
+
+`calybris-ffi` is outside the core and adds no behaviour, but its layouts are
+frozen too. The Rust tests below run from Rust, so they cannot catch a header
+that disagrees with the library; `scripts/check_c_abi.py` compiles
+`calybris-ffi/tests/smoke.c` and is what does.
+
+| ID | Invariant | Guarded by |
+|---|---|---|
+| CAL-I079 | A decision made across the C boundary is the decision the kernel makes | `calybris-ffi::a_decision_across_the_boundary_matches_the_kernel` |
+| CAL-I080 | A digest computed from the C struct equals the one the kernel computes | `calybris-ffi::a_digest_computed_from_the_c_struct_matches_the_kernel` |
+| CAL-I081 | A buffer one byte short writes nothing, so a truncated digest cannot be read as a whole one | `calybris-ffi::a_buffer_one_byte_short_writes_nothing` |
+| CAL-I082 | An invented action is refused rather than transmuted into a variant the kernel never produces | `calybris-ffi::an_invented_action_is_refused_rather_than_transmuted` |
+| CAL-I083 | A tampered decision fails verification, and `*valid` is cleared before anything else | `calybris-ffi::a_tampered_decision_fails_verification` |
+| CAL-I084 | Every null is refused rather than dereferenced | `calybris-ffi::every_null_is_refused_rather_than_dereferenced` |
+| CAL-I085 | An empty catalog never yields a handle alongside an error | `calybris-ffi::an_empty_catalog_builds_and_rejects_everything` |
+| CAL-I086 | The ABI version and crate version are reported, so a caller can refuse a mismatch | `calybris-ffi::the_abi_version_and_crate_version_are_reported` |
+
+A C program compiled against the header asserts the same three digests the Rust
+and Python golden tests pin — one set of bytes, three callers. That is checked by
+`scripts/check_c_abi.py` rather than by `cargo test`, so it carries no CAL-I of
+its own; the `c-abi` CI job is where it runs.
+
 ## The API itself
 
 | ID | Invariant | Guarded by |

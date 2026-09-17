@@ -51,13 +51,25 @@ fn every_invariant_names_a_test_that_exists() {
     let mut missing = Vec::new();
 
     for (id, file, test) in registry_entries() {
-        let path = tests_dir.join(format!("{file}.rs"));
-        let Ok(source) = fs::read_to_string(&path) else {
-            missing.push(format!("{id}: no such file tests/{file}.rs"));
+        // An integration test, or a sibling crate's own unit tests. Both are
+        // places an invariant legitimately lives.
+        let candidates = [
+            tests_dir.join(format!("{file}.rs")),
+            repo().join(&file).join("src/lib.rs"),
+        ];
+
+        let found = candidates.iter().find_map(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .map(|source| (path.clone(), source))
+        });
+
+        let Some((path, source)) = found else {
+            missing.push(format!("{id}: no tests/{file}.rs and no {file}/src/lib.rs"));
             continue;
         };
         if !source.contains(&format!("fn {test}(")) {
-            missing.push(format!("{id}: tests/{file}.rs has no fn {test}"));
+            missing.push(format!("{id}: {} has no fn {test}", path.display()));
         }
     }
 
