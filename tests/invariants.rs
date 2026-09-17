@@ -66,20 +66,33 @@ fn every_invariant_names_a_test_that_exists() {
 }
 
 /// CAL-I048
+///
+/// Uniqueness and shape, deliberately not position. An identifier has to mean
+/// the same thing next year as it does today, so inserting a row must not
+/// renumber the ones below it — which is exactly what requiring a gapless
+/// sequence would force.
 #[test]
-fn the_identifiers_are_unique_and_unbroken() {
+fn the_identifiers_are_unique_and_well_formed() {
     let entries = registry_entries();
     let ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
 
     let unique: BTreeSet<&&str> = ids.iter().collect();
-    assert_eq!(unique.len(), ids.len(), "duplicate identifier in the registry");
+    assert_eq!(
+        unique.len(),
+        ids.len(),
+        "the same identifier is used twice in the registry"
+    );
 
-    for (position, id) in ids.iter().enumerate() {
-        let expected = format!("CAL-I{:03}", position + 1);
-        assert_eq!(
-            *id, &expected,
-            "identifiers must run in order without gaps; found {id} where {expected} belongs",
+    for id in &ids {
+        let digits = id
+            .strip_prefix("CAL-I")
+            .unwrap_or_else(|| panic!("{id} is not a CAL-Innn identifier"));
+        assert_eq!(digits.len(), 3, "{id} must have three digits");
+        assert!(
+            digits.chars().all(|c| c.is_ascii_digit()),
+            "{id} must be CAL-I followed by digits",
         );
+        assert_ne!(digits, "000", "identifiers start at CAL-I001");
     }
 }
 
@@ -186,7 +199,10 @@ fn semantics_enums_stay_exhaustively_matchable() {
     // Compiling is the test. Calling them keeps the compiler from deciding they
     // are dead code, and pins the names each variant reports itself under.
     assert_eq!(name_action(KernelAction::Reject), "reject");
-    assert_eq!(name_reason(KernelReason::BudgetConstraint), "budget_constraint");
+    assert_eq!(
+        name_reason(KernelReason::BudgetConstraint),
+        "budget_constraint"
+    );
     assert_eq!(name_gate(GateKind::RiskCeiling), "risk_ceiling");
     assert_eq!(
         name_verdict(&CandidateVerdict::OverBudget {

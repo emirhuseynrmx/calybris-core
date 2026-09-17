@@ -1,8 +1,9 @@
 # Invariant registry
 
 Every property this crate promises, with the test that fails when it stops being
-true. The identifiers are stable: `CAL-I012` means the same thing in a bug
-report next year as it does today.
+true. The identifiers are stable: `CAL-I012` means the same thing in a bug report
+next year as it does today. That is why they are not renumbered when a row is
+inserted, and why the sequence has gaps wherever an invariant was retired.
 
 `tests/invariants.rs` reads this file and refuses to pass if a row names a test
 that does not exist, so the right-hand column cannot quietly go stale. Adding an
@@ -51,6 +52,16 @@ that is wrong.
 | CAL-I026 | The pinned golden decision semantics are stable | `golden_caly_proof::golden_decision_semantics_are_stable` |
 | CAL-I027 | The pinned WAL chain hashes are reproduced | `golden_caly_proof::golden_wal_chain_hashes_are_reproduced` |
 | CAL-I028 | Every conformance case reproduces its pinned digests | `conformance_caly_proof::every_conformance_case_reproduces_its_pinned_digests` |
+| CAL-I049 | The pinned policy is the one the outcome vectors were generated from | `golden_outcome::the_pinned_policy_is_the_policy_these_vectors_were_made_from` |
+| CAL-I050 | A followed, fully measured outcome is reproduced byte for byte | `golden_outcome::a_followed_and_fully_measured_outcome_is_reproduced_byte_for_byte` |
+| CAL-I051 | An abandoned outcome is reproduced byte for byte | `golden_outcome::an_abandoned_outcome_is_reproduced_byte_for_byte` |
+| CAL-I052 | A partially measured in-flight outcome is reproduced byte for byte | `golden_outcome::a_partial_in_flight_outcome_is_reproduced_byte_for_byte` |
+| CAL-I053 | An exploration at one basis point is reproduced byte for byte | `golden_outcome::an_exploration_at_one_basis_point_is_reproduced_byte_for_byte` |
+| CAL-I054 | A human choice carrying no propensity is reproduced byte for byte — the vector that would catch a dropped presence byte | `golden_outcome::a_human_choice_with_no_propensity_is_reproduced_byte_for_byte` |
+| CAL-I055 | Zero measurements at a non-zero revision are reproduced byte for byte | `golden_outcome::zero_measurements_at_revision_seven_are_reproduced_byte_for_byte` |
+| CAL-I056 | An abandoned rejection is reproduced byte for byte | `golden_outcome::an_abandoned_rejection_is_reproduced_byte_for_byte` |
+| CAL-I057 | No two pinned outcomes collide, so no field has stopped reaching the hash | `golden_outcome::the_pinned_outcomes_are_all_different_from_each_other` |
+| CAL-I058 | Every pinned identity is rebuildable from its policy, input and decision | `golden_outcome::every_pinned_identity_is_rebuildable_from_its_three_parts` |
 
 ## Outcomes
 
@@ -85,7 +96,7 @@ that is wrong.
 | CAL-I045 | Every semantics enum stays exhaustively matchable, so a caller that handles every case keeps doing so | `invariants::semantics_enums_stay_exhaustively_matchable` |
 | CAL-I046 | Every error enum stays `#[non_exhaustive]`, so a security fix can add a variant | `invariants::error_enums_stay_extendable` |
 | CAL-I047 | Every row in this file names a test that exists | `invariants::every_invariant_names_a_test_that_exists` |
-| CAL-I048 | Every identifier in this file is unique and unbroken in sequence | `invariants::the_identifiers_are_unique_and_unbroken` |
+| CAL-I048 | Every identifier in this file is unique and well formed | `invariants::the_identifiers_are_unique_and_well_formed` |
 
 ## What is deliberately not here
 

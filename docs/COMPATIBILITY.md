@@ -87,5 +87,7 @@ that is not what this line is for.
 
 Fork it. Apache-2.0 does not expire when maintenance does, and a fork is the
 supported answer to a requirement this repository has decided not to meet. The
-decision semantics are documented and the test suite is the specification, which
-is roughly everything a fork needs that is usually missing.
+decision semantics are documented, the digest layouts are written out byte by byte
+in [SPECIFICATION.md](SPECIFICATION.md), and every property the crate promises is
+listed in [INVARIANTS.md](INVARIANTS.md) against the test that guards it. That is
+roughly everything a fork needs and usually does not get.
