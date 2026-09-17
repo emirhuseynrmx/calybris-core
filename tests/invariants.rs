@@ -31,9 +31,12 @@ fn registry_entries() -> Vec<(String, String, String)> {
         // "", id, invariant, guarded by, ""
         assert_eq!(cells.len(), 5, "malformed row: {line}");
         let guard = cells[3].trim_matches('`');
-        let (file, test) = guard
+        let (file, rest) = guard
             .split_once("::")
             .unwrap_or_else(|| panic!("`{guard}` is not `file::test_name`"));
+        // A test inside a module is named `file::module::test`, so the function
+        // is the last segment rather than everything after the first `::`.
+        let test = rest.rsplit("::").next().unwrap_or(rest);
         entries.push((cells[1].to_string(), file.to_string(), test.to_string()));
     }
 

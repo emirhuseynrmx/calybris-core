@@ -542,6 +542,8 @@ class Outcome:
     policy_digest: str
     input_digest: str
     decision_digest: str
+    identity_digest: str
+    selection_digest: str
     request_sequence: int
     observed_at_micros: int
     revision: int

@@ -1,0 +1,19 @@
+{
+  "schema_version": "calybris.receipt.v1",
+  "policy_epoch": 1,
+  "catalog_epoch": 1,
+  "policy_digest_hex": "d3f12aa201a164f2668d3a4055710bc895a2345acb0b89cf39a91f35f6d7c173",
+  "input_digest_hex": "ccb29ca46a0533292092a00258e6ea6220befbe4f4071e81a57f18b85689c31e",
+  "decision_digest_hex": "55cc31eba5dcf8c2d5702723feaebb359b754019154980dd4fef54b70cd1a554",
+  "replay_valid": true,
+  "state": {
+    "step": 3,
+    "state_digest_before_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state_digest_after_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "wal": {
+    "sequence": 7,
+    "entry_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "claims_digest_hex": "4082c539add8adcaad7f23155aec94d1df01b96cc465c44c9afff221cf7e9b05"
+}

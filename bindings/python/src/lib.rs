@@ -7,8 +7,8 @@ use calybris_core_rs::kernel::{
     ALL_REGIONS,
 };
 use calybris_core_rs::outcome::{
-    outcome_digest, Disposition, Observation, Outcome, Selection, SelectionStrategy,
-    FULL_PROBABILITY_BPS,
+    identity_digest, outcome_digest, selection_digest, Disposition, Observation, Outcome,
+    Selection, SelectionStrategy, FULL_PROBABILITY_BPS,
 };
 use calybris_core_rs::proof::seal;
 use calybris_core_rs::verify::{
@@ -1331,6 +1331,20 @@ impl PyOutcome {
     #[getter]
     fn decision_digest(&self) -> String {
         calybris_core_rs::digest::digest_to_hex(&self.inner.identity.decision_digest)
+    }
+
+    /// The whole decision identity as one digest: policy, input, decision and
+    /// sequence folded together.
+    #[getter]
+    fn identity_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&identity_digest(&self.inner.identity))
+    }
+
+    /// How the acted-on candidate was chosen, as one digest. Distinct for an
+    /// absent propensity and a recorded one.
+    #[getter]
+    fn selection_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&selection_digest(&self.inner.selection))
     }
 
     #[getter]

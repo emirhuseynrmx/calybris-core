@@ -1,0 +1,70 @@
+[package]
+name = "calybris-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace root: the fuzz crate needs nightly, so it must not be pulled
+# into a stable build of the parent.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.calybris-core]
+path = ".."
+features = ["full"]
+
+# Fuzzing an unoptimised build finds the same defects far more slowly, and
+# overflow checks stay on so that an arithmetic bug is a crash rather than a
+# quietly wrong number.
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "snapshot_decode"
+path = "fuzz_targets/snapshot_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receipt_decode"
+path = "fuzz_targets/receipt_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_decode"
+path = "fuzz_targets/wal_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "outcome_decode"
+path = "fuzz_targets/outcome_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_decode"
+path = "fuzz_targets/policy_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kernel_decide"
+path = "fuzz_targets/kernel_decide.rs"
+test = false
+doc = false
+bench = false

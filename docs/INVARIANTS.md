@@ -89,6 +89,53 @@ that is wrong.
 | CAL-I043 | The audit pipeline binds the decision, the budget and the keyed WAL into one verifiable whole | `audit_pipeline::full_audit_pipeline_with_budget_and_keyed_wal` |
 | CAL-I044 | A receipt binds replay, state, WAL anchor and signature together | `receipt_pipeline::receipt_pipeline_binds_replay_state_wal_anchor_and_signature` |
 
+## Crash and recovery
+
+A crash stops mid-write, not politely between records, so these walk every byte
+prefix and every single-bit flip of a real WAL and a real snapshot. The property
+is never that recovery succeeds — a damaged file should fail — but that it never
+reports state that was not durably written.
+
+| ID | Invariant | Guarded by |
+|---|---|---|
+| CAL-I059 | A WAL truncated at any byte never yields an entry nobody wrote, and the trusted anchor is satisfied only when nothing was lost | `crash_injection::a_wal_truncated_at_every_byte_never_yields_an_entry_nobody_wrote` |
+| CAL-I060 | A single bit flipped anywhere in a WAL never passes the trusted anchor | `crash_injection::a_single_bit_flipped_anywhere_in_a_wal_never_passes_the_anchor` |
+| CAL-I061 | A flipped WAL that still parses never reports the original head at full length | `crash_injection::a_flipped_wal_that_still_parses_never_reports_the_original_head` |
+| CAL-I062 | A snapshot truncated at any byte never loads as the original ledger | `crash_injection::a_snapshot_truncated_at_every_byte_never_loads_as_the_original_ledger` |
+| CAL-I063 | A flipped snapshot never loads as the original ledger | `crash_injection::a_flipped_snapshot_never_loads_as_the_original_ledger` |
+| CAL-I064 | A crash damaging both the snapshot and the WAL never produces a trusted recovery plan | `crash_injection::a_crash_between_the_snapshot_and_the_wal_never_produces_a_trusted_plan` |
+| CAL-I065 | An undamaged pair still recovers — without this, every row above could pass on a broken fixture | `crash_injection::the_undamaged_pair_still_recovers` |
+
+## Untrusted input
+
+`fuzz/` holds coverage-guided targets for the same properties. libFuzzer does not
+link on Windows MSVC, so these proptest equivalents are what runs everywhere.
+
+| ID | Invariant | Guarded by |
+|---|---|---|
+| CAL-I066 | A snapshot reported balanced actually balances, per tenant | `decoder_robustness::a_snapshot_reported_balanced_actually_balances` |
+| CAL-I067 | An outcome that validation accepts satisfies every documented rule | `decoder_robustness::an_accepted_outcome_satisfies_every_documented_rule` |
+| CAL-I068 | A decoded outcome survives re-encoding, so two readers cannot disagree about it | `decoder_robustness::a_decoded_outcome_survives_re_encoding` |
+| CAL-I069 | An invented signature never verifies, even when it names the right policy | `decoder_robustness::provenance::an_invented_signature_never_verifies` |
+| CAL-I070 | The kernel decides identically twice on any input it accepts, and `explain` never disagrees | `decoder_robustness::the_kernel_decides_identically_twice_on_any_input_it_accepts` |
+| CAL-I071 | The decoders are actually reached — the guard against the version of that file that tested nothing | `decoder_robustness::zz_entry_rate_is_not_zero` |
+
+## The fuzz corpus
+
+A seed that never decodes makes a target look seeded while leaving it to
+rediscover the format. Nothing else would notice, because the fuzzer cannot be
+run on every machine.
+
+| ID | Invariant | Guarded by |
+|---|---|---|
+| CAL-I072 | Every fuzz target has seeds, and every seed directory has a target | `fuzz_seeds::every_fuzz_target_has_seeds_and_every_seed_directory_has_a_target` |
+| CAL-I073 | Every snapshot seed decodes as a snapshot | `fuzz_seeds::every_snapshot_seed_decodes_as_a_snapshot` |
+| CAL-I074 | Every outcome seed decodes as an outcome | `fuzz_seeds::every_outcome_seed_decodes_as_an_outcome` |
+| CAL-I075 | Every policy seed decodes as a signed policy | `fuzz_seeds::every_policy_seed_decodes_as_a_signed_policy` |
+| CAL-I076 | Every receipt seed decodes as a receipt | `fuzz_seeds::every_receipt_seed_decodes_as_a_receipt` |
+| CAL-I077 | Every WAL seed has at least one decodable line | `fuzz_seeds::every_wal_seed_has_at_least_one_decodable_line` |
+| CAL-I078 | Every kernel seed is long enough to reach the kernel | `fuzz_seeds::every_kernel_seed_is_long_enough_to_reach_the_kernel` |
+
 ## The API itself
 
 | ID | Invariant | Guarded by |
