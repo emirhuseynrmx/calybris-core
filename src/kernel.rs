@@ -383,6 +383,281 @@ pub enum TrustPolicyError {
 
 type RejectionCounts = RejectionHistogram;
 
+/// Which gate a candidate failed, before any cost or utility arithmetic.
+///
+/// Field-less on purpose. `prescribe` runs this for every candidate and only
+/// needs to know which counter to bump; the measured values behind a gate are
+/// recovered by [`PolicySnapshot::gate_detail`] on the explanation path, which
+/// is allowed to be slower.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum GateKind {
+    /// `enabled == 0` in the policy catalog.
+    Disabled,
+    /// Below `minimum_quality_bps`.
+    Quality,
+    /// Above the request's latency cap.
+    Latency,
+    /// Missing a required capability bit.
+    Capability,
+    /// `provider_id` cannot be represented in the provider mask.
+    ProviderUnrepresentable,
+    /// Representable, but not in `allowed_provider_mask`.
+    ProviderNotAllowed,
+    /// Shares no bit with `required_region_mask`.
+    Region,
+    /// The request carries more risk than the candidate accepts.
+    RiskCeiling,
+}
+
+/// The first gate `model` fails for `input`, or `None` when it reaches costing.
+///
+/// Ordered cheapest check first, and that order is load-bearing: a candidate that
+/// fails three gates is reported against the first one, and every surface has to
+/// agree on which that is.
+#[inline(always)]
+fn first_failed_gate(model: &KernelModel, input: &KernelInput) -> Option<GateKind> {
+    if model.enabled == 0 {
+        return Some(GateKind::Disabled);
+    }
+    if model.quality_bps < input.minimum_quality_bps {
+        return Some(GateKind::Quality);
+    }
+    if input.max_p95_latency_ms > 0 && model.p95_latency_ms > input.max_p95_latency_ms {
+        return Some(GateKind::Latency);
+    }
+    if model.capabilities & input.required_capabilities != input.required_capabilities {
+        return Some(GateKind::Capability);
+    }
+    // Provider fence: provider_id >= 64 is always unrepresentable in a 64-bit
+    // mask, so reject unconditionally regardless of ALL_PROVIDERS.
+    if model.provider_id > MAX_PROVIDER_ID {
+        return Some(GateKind::ProviderUnrepresentable);
+    }
+    if input.allowed_provider_mask != ALL_PROVIDERS
+        && input.allowed_provider_mask & (1_u64 << model.provider_id) == 0
+    {
+        return Some(GateKind::ProviderNotAllowed);
+    }
+    if input.required_region_mask != 0 && model.region_mask & input.required_region_mask == 0 {
+        return Some(GateKind::Region);
+    }
+    if input.risk_bps > model.risk_ceiling_bps {
+        return Some(GateKind::RiskCeiling);
+    }
+    None
+}
+
+/// The terms behind one candidate's utility.
+///
+/// `utility = quality_adjusted - risk_penalty - cost - latency_penalty`, with the
+/// terms kept separately so an explanation can say which one decided the outcome
+/// rather than only reporting the total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct UtilityTerms {
+    /// Business value scaled by request confidence and candidate quality.
+    pub quality_adjusted: i128,
+    /// Charged from the request's risk, not the candidate's.
+    pub risk_penalty: i128,
+    /// What this candidate costs for the request's token counts.
+    pub cost_microunits: u64,
+    /// Charged from the candidate's p95 latency.
+    pub latency_penalty: i128,
+    /// The clamped total the kernel ranks on.
+    pub utility: i64,
+}
+
+/// Loop-invariant half of the economic calculation.
+///
+/// Built once per request and applied to every candidate. `explain` builds the
+/// same value, so a reported utility is the utility that was used rather than a
+/// second formula that happens to agree.
+#[derive(Clone, Copy)]
+struct Pricing {
+    value: u64,
+    confidence_bps: u64,
+    quality_prefix: Option<u64>,
+    risk_penalty: i128,
+    all_costs_fit: bool,
+    all_latencies_fit: bool,
+    latency_pen_per_ms: u64,
+}
+
+impl Pricing {
+    #[inline(always)]
+    fn new(policy: &PolicySnapshot, input: &KernelInput) -> Self {
+        let value = input.business_value_microunits.max(0) as u64;
+        let confidence_bps = u64::from(input.confidence_bps);
+        Self {
+            value,
+            confidence_bps,
+            quality_prefix: value.checked_mul(confidence_bps).filter(|prefix| {
+                prefix
+                    .checked_mul(u64::from(policy.max_quality_bps))
+                    .is_some()
+            }),
+            risk_penalty: scaled_term_exact(
+                value,
+                u64::from(input.risk_bps),
+                u64::from(policy.risk_penalty_multiplier_bps),
+            ),
+            all_costs_fit: policy.all_costs_fit_u64(input.input_tokens, input.output_tokens),
+            all_latencies_fit: u64::from(policy.max_p95_latency_ms)
+                .checked_mul(policy.latency_penalty_microunits_per_ms)
+                .is_some(),
+            latency_pen_per_ms: policy.latency_penalty_microunits_per_ms,
+        }
+    }
+
+    #[inline(always)]
+    fn cost(&self, model: &KernelModel, input: &KernelInput) -> u64 {
+        if self.all_costs_fit {
+            model_cost_fast(model, input.input_tokens, input.output_tokens)
+        } else {
+            model_cost_reference(model, input.input_tokens, input.output_tokens)
+        }
+    }
+
+    /// The terms for a candidate whose cost is already known to fit the budget.
+    #[inline(always)]
+    fn terms(&self, model: &KernelModel, cost_microunits: u64) -> UtilityTerms {
+        let quality_adjusted = self.quality_prefix.map_or_else(
+            || {
+                scaled_term_reference(
+                    self.value,
+                    self.confidence_bps,
+                    u64::from(model.quality_bps),
+                )
+            },
+            |prefix| {
+                // `quality_prefix` is admitted only after proving this product fits.
+                i128::from(prefix.wrapping_mul(u64::from(model.quality_bps)) / SCALED_BASIS_POINTS)
+            },
+        );
+        let latency_penalty = if self.all_latencies_fit {
+            i128::from(u64::from(model.p95_latency_ms).wrapping_mul(self.latency_pen_per_ms))
+        } else {
+            i128::from(model.p95_latency_ms) * i128::from(self.latency_pen_per_ms)
+        };
+        UtilityTerms {
+            quality_adjusted,
+            risk_penalty: self.risk_penalty,
+            cost_microunits,
+            latency_penalty,
+            utility: clamp_i128_to_i64(
+                quality_adjusted
+                    - self.risk_penalty
+                    - i128::from(cost_microunits)
+                    - latency_penalty,
+            ),
+        }
+    }
+}
+
+/// Why one candidate ended where it did.
+///
+/// `measured` and `limit` are the two numbers the gate compared, in that gate's
+/// own unit: basis points for quality and risk, milliseconds for latency, and
+/// the raw masks for capability, region and provider. A caller turns them into a
+/// sentence; the kernel does not carry prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CandidateVerdict {
+    /// Failed a gate before any costing happened.
+    Rejected {
+        /// The first gate it failed. A candidate failing three is reported here
+        /// against one, and which one is a property of the gate order.
+        gate: GateKind,
+        /// What the candidate carried.
+        measured: u64,
+        /// What the request demanded.
+        limit: u64,
+    },
+    /// Priced, and above the request's budget.
+    OverBudget {
+        cost_microunits: u64,
+        limit_microunits: u64,
+    },
+    /// Affordable, but the economics did not clear zero.
+    NonPositiveUtility(UtilityTerms),
+    /// Ranked against the other eligible candidates.
+    Eligible(UtilityTerms),
+}
+
+/// One candidate's place in a decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CandidateExplanation {
+    pub model_id: u32,
+    pub model_index: u16,
+    pub verdict: CandidateVerdict,
+}
+
+/// A decision with a verdict for every candidate that was considered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Explanation {
+    /// The decision itself, produced by the same path `prescribe` uses.
+    pub decision: KernelDecision,
+    /// One entry per catalog candidate, in catalog order. Empty when the request
+    /// was refused at the hard limits and no candidate was ever looked at.
+    pub candidates: Vec<CandidateExplanation>,
+}
+
+impl Explanation {
+    /// The candidates that priced, cleared the budget and cleared zero utility.
+    pub fn eligible(&self) -> impl Iterator<Item = &CandidateExplanation> {
+        self.candidates
+            .iter()
+            .filter(|candidate| matches!(candidate.verdict, CandidateVerdict::Eligible(_)))
+    }
+}
+
+/// The pair of numbers a gate compared, for a candidate that failed it.
+#[inline]
+fn gate_detail(model: &KernelModel, input: &KernelInput, gate: GateKind) -> (u64, u64) {
+    match gate {
+        // Not a comparison: the catalog switched this candidate off.
+        GateKind::Disabled => (0, 1),
+        GateKind::Quality => (
+            u64::from(model.quality_bps),
+            u64::from(input.minimum_quality_bps),
+        ),
+        GateKind::Latency => (
+            u64::from(model.p95_latency_ms),
+            u64::from(input.max_p95_latency_ms),
+        ),
+        GateKind::Capability => (model.capabilities, input.required_capabilities),
+        GateKind::ProviderUnrepresentable => {
+            (u64::from(model.provider_id), u64::from(MAX_PROVIDER_ID))
+        }
+        GateKind::ProviderNotAllowed => (u64::from(model.provider_id), input.allowed_provider_mask),
+        GateKind::Region => (model.region_mask, input.required_region_mask),
+        // Reversed against the others on purpose: the request carries the risk and
+        // the candidate sets the ceiling.
+        GateKind::RiskCeiling => (u64::from(input.risk_bps), u64::from(model.risk_ceiling_bps)),
+    }
+}
+
+impl RejectionHistogram {
+    /// Counts one rejection. Saturating, because the histogram is `u16` and a
+    /// catalog may hold more candidates than that.
+    #[inline(always)]
+    fn bump(&mut self, kind: GateKind) {
+        let slot = match kind {
+            GateKind::Disabled => &mut self.disabled,
+            GateKind::Quality => &mut self.quality,
+            GateKind::Latency => &mut self.latency,
+            GateKind::Capability => &mut self.capability,
+            GateKind::ProviderUnrepresentable | GateKind::ProviderNotAllowed => &mut self.provider,
+            GateKind::Region => &mut self.region,
+            GateKind::RiskCeiling => &mut self.risk_ceiling,
+        };
+        *slot = slot.saturating_add(1);
+    }
+}
+
 impl PolicySnapshot {
     /// Creates a policy snapshot **without validation** (escape hatch).
     ///
@@ -630,6 +905,75 @@ impl PolicySnapshot {
         (decision, trace)
     }
 
+    /// The decision, plus a verdict for every candidate that was considered.
+    ///
+    /// This is the slow path and the only one that allocates: one entry per
+    /// catalog candidate. It runs the same gates in the same order and the same
+    /// arithmetic as [`Self::prescribe`], so a candidate reported eligible here is
+    /// a candidate that was ranked, and a reported utility is the utility that
+    /// ranked it — not a second formula that agrees today.
+    ///
+    /// Use [`Self::prescribe_with_trace`] when counts are enough; that path stays
+    /// allocation-free.
+    pub fn explain(&self, input: KernelInput) -> Explanation {
+        let (decision, _) = self.prescribe_inner(input);
+        let mut candidates = Vec::new();
+
+        // A request refused at the hard limits never reaches the catalog, so no
+        // candidate has a verdict of its own. An empty list says that, where a
+        // list of rejections would invent reasons nobody checked.
+        if matches!(
+            decision.reason,
+            KernelReason::RiskHardLimit | KernelReason::ConfidenceHardLimit
+        ) {
+            return Explanation {
+                decision,
+                candidates,
+            };
+        }
+
+        candidates.reserve(self.models.len());
+        let pricing = Pricing::new(self, &input);
+        for (index, model) in self.models.iter().enumerate() {
+            let verdict = match first_failed_gate(model, &input) {
+                Some(gate) => {
+                    let (measured, limit) = gate_detail(model, &input, gate);
+                    CandidateVerdict::Rejected {
+                        gate,
+                        measured,
+                        limit,
+                    }
+                }
+                None => {
+                    let cost = pricing.cost(model, &input);
+                    if cost > input.budget_limit_microunits {
+                        CandidateVerdict::OverBudget {
+                            cost_microunits: cost,
+                            limit_microunits: input.budget_limit_microunits,
+                        }
+                    } else {
+                        let terms = pricing.terms(model, cost);
+                        if terms.utility <= 0 {
+                            CandidateVerdict::NonPositiveUtility(terms)
+                        } else {
+                            CandidateVerdict::Eligible(terms)
+                        }
+                    }
+                }
+            };
+            candidates.push(CandidateExplanation {
+                model_id: model.model_id,
+                model_index: u16::try_from(index).unwrap_or(u16::MAX),
+                verdict,
+            });
+        }
+
+        Explanation {
+            decision,
+            candidates,
+        }
+    }
+
     /// Validate `input`, then evaluate it with an explainability trace.
     pub fn prescribe_with_trace_checked(
         &self,
@@ -677,31 +1021,7 @@ impl PolicySnapshot {
             return None;
         }
         let model = self.models.iter().find(|m| m.model_id == model_id)?;
-
-        if model.enabled == 0 {
-            return None;
-        }
-        if model.quality_bps < input.minimum_quality_bps {
-            return None;
-        }
-        if input.max_p95_latency_ms > 0 && model.p95_latency_ms > input.max_p95_latency_ms {
-            return None;
-        }
-        if model.capabilities & input.required_capabilities != input.required_capabilities {
-            return None;
-        }
-        if model.provider_id > MAX_PROVIDER_ID {
-            return None;
-        }
-        if input.allowed_provider_mask != ALL_PROVIDERS
-            && input.allowed_provider_mask & (1_u64 << model.provider_id) == 0
-        {
-            return None;
-        }
-        if input.required_region_mask != 0 && model.region_mask & input.required_region_mask == 0 {
-            return None;
-        }
-        if input.risk_bps > model.risk_ceiling_bps {
+        if first_failed_gate(model, &input).is_some() {
             return None;
         }
 
@@ -765,92 +1085,21 @@ impl PolicySnapshot {
         let mut eligible_models = 0_u16;
         let mut rejected = RejectionCounts::default();
 
-        let value = input.business_value_microunits.max(0) as u64;
-        let confidence_bps = u64::from(input.confidence_bps);
-        let quality_prefix = value.checked_mul(confidence_bps).filter(|prefix| {
-            prefix
-                .checked_mul(u64::from(self.max_quality_bps))
-                .is_some()
-        });
-        let risk_penalty = scaled_term_exact(
-            value,
-            u64::from(input.risk_bps),
-            u64::from(self.risk_penalty_multiplier_bps),
-        );
-        let all_costs_fit = self.all_costs_fit_u64(input.input_tokens, input.output_tokens);
-        let all_latencies_fit = u64::from(self.max_p95_latency_ms)
-            .checked_mul(self.latency_penalty_microunits_per_ms)
-            .is_some();
-
-        let check_provider = input.allowed_provider_mask != ALL_PROVIDERS;
-        let check_region = input.required_region_mask != 0;
-        let check_latency = input.max_p95_latency_ms > 0;
-        let latency_pen_per_ms = self.latency_penalty_microunits_per_ms;
+        let pricing = Pricing::new(self, &input);
 
         for (index, model) in self.models.iter().enumerate() {
-            // Fast reject chain — ordered by cheapest check first
-            if model.enabled == 0 {
-                rejected.disabled += 1;
-                continue;
-            }
-            if model.quality_bps < input.minimum_quality_bps {
-                rejected.quality += 1;
-                continue;
-            }
-            if check_latency && model.p95_latency_ms > input.max_p95_latency_ms {
-                rejected.latency += 1;
-                continue;
-            }
-            if model.capabilities & input.required_capabilities != input.required_capabilities {
-                rejected.capability += 1;
-                continue;
-            }
-            // Provider fence: provider_id >= 64 is always unrepresentable in a
-            // 64-bit mask, so reject unconditionally regardless of ALL_PROVIDERS.
-            if model.provider_id > MAX_PROVIDER_ID {
-                rejected.provider += 1;
-                continue;
-            }
-            if check_provider && input.allowed_provider_mask & (1_u64 << model.provider_id) == 0 {
-                rejected.provider += 1;
-                continue;
-            }
-            if check_region && model.region_mask & input.required_region_mask == 0 {
-                rejected.region += 1;
-                continue;
-            }
-            if input.risk_bps > model.risk_ceiling_bps {
-                rejected.risk_ceiling += 1;
+            if let Some(kind) = first_failed_gate(model, &input) {
+                rejected.bump(kind);
                 continue;
             }
 
-            let cost = if all_costs_fit {
-                model_cost_fast(model, input.input_tokens, input.output_tokens)
-            } else {
-                model_cost_reference(model, input.input_tokens, input.output_tokens)
-            };
+            let cost = pricing.cost(model, &input);
             if cost > input.budget_limit_microunits {
                 rejected.budget += 1;
                 continue;
             }
 
-            let quality_adjusted = quality_prefix.map_or_else(
-                || scaled_term_reference(value, confidence_bps, u64::from(model.quality_bps)),
-                |prefix| {
-                    // `quality_prefix` is admitted only after proving this product fits.
-                    i128::from(
-                        prefix.wrapping_mul(u64::from(model.quality_bps)) / SCALED_BASIS_POINTS,
-                    )
-                },
-            );
-            let latency_penalty = if all_latencies_fit {
-                i128::from(u64::from(model.p95_latency_ms).wrapping_mul(latency_pen_per_ms))
-            } else {
-                i128::from(model.p95_latency_ms) * i128::from(latency_pen_per_ms)
-            };
-            let utility = clamp_i128_to_i64(
-                quality_adjusted - risk_penalty - i128::from(cost) - latency_penalty,
-            );
+            let utility = pricing.terms(model, cost).utility;
 
             if utility <= 0 {
                 rejected.utility += 1;
