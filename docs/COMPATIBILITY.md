@@ -9,7 +9,9 @@ release `0.8.0` would have said the opposite of what is true.
 ## What is stable
 
 Everything public in `calybris-core` and `calybris`: types, functions, constants,
-feature flags, the JSON shapes of artifacts, and the digest formats.
+feature flags, the JSON shapes of artifacts, and the digest formats. The digest
+formats are written out byte by byte in [SPECIFICATION.md](SPECIFICATION.md),
+and `tests/specification.rs` runs that document against the implementation.
 
 Also stable, and more important than the API: **the decisions**. The same catalog
 and the same request produce the same decision, the same digest and the same
@@ -25,15 +27,24 @@ traded for a fix.
   [DECISION_SEMANTICS.md](DECISION_SEMANTICS.md)
 - A new variant in an error enum, which is why every error enum is
   `#[non_exhaustive]` — match on them with a `_` arm
+
+There are two kinds of enum here and the difference is deliberate. An **error**
+enum says what went wrong, and a security fix may need to say something new, so
+every one of them is `#[non_exhaustive]`. A **semantics** enum — an action, a
+reason, a gate, a disposition, a verification result — is part of the contract a
+caller matches exhaustively on to be sure it has handled every case. Making
+those `#[non_exhaustive]` would force a `_` arm that silently swallows a case
+the caller has not thought about, which is the opposite of what they are for.
 - Documentation, tests and build metadata
 
 ## What 1.0.x will never contain
 
 - A change to the gate order, the tie-break, the utility formula, or any unit
 - A new variant in `KernelAction`, `KernelReason`, `GateKind`, `CandidateVerdict`,
-  `Disposition` or `SelectionStrategy` — these are the decision contract, and they
-  are exhaustive on purpose, so adding one is a breaking change and this line
-  does not make breaking changes
+  `Disposition`, `SelectionStrategy`, `IdentityField`, `ConservationStatus` or
+  `VerifyResult` — these are the decision and verification contract, and they are
+  exhaustive on purpose, so adding one is a breaking change and this line does not
+  make breaking changes
 - A new field in `KernelInput`, `KernelModel` or `KernelDecision` — callers build
   these with struct literals, so a field is a breaking change, and they are
   hashed, so a field is a digest change
@@ -67,7 +78,7 @@ run it, so it has to work.
 ## Artifacts written by older versions
 
 Digest tags are versioned (`calypol1`, `calyinp1`, `calydcn1`, `calyldg1`,
-`calyout1`, `calysel1`). An artifact written by an earlier release verifies under
+`calyidn1`, `calysel1`, `calyout1`). An artifact written by an earlier release verifies under
 the format it names. Nothing in 1.0.x changes what an existing tag means, and
 1.0.x introduces no new tag: a different format would be a different tag, and
 that is not what this line is for.

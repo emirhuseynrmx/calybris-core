@@ -384,7 +384,10 @@ inventory/capacity freshness, and an external audit.
 
 | Doc | Contents |
 |-----|----------|
-| [docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md) | Decision API, units, identities, policy comparison and its limits |
+| [docs/SPECIFICATION.md](docs/SPECIFICATION.md) | Every digest layout, byte by byte — what a second implementation would be written against |
+| [docs/INVARIANTS.md](docs/INVARIANTS.md) | Every property the crate promises, with the test that fails when it stops being true |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | What 1.0.x may and may never contain, and the defects that will be documented rather than fixed |
+| [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) | Decision API, units, identities, policy comparison and its limits |
 | [docs/AGENT_BUDGET.md](docs/AGENT_BUDGET.md) | Shared budget, reservations, corrections, lifecycle report, support boundary |
 | [docs/ADAPTERS.md](docs/ADAPTERS.md) | Every reference mapping with its commands and code |
 | [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) | Module map, audit commands, external review checklist |
@@ -395,8 +398,6 @@ inventory/capacity freshness, and an external audit.
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Throughput provenance and reproduction |
 | [docs/MIRI.md](docs/MIRI.md) | UB detection scope in CI |
 | [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |
-| [docs/TRUST_RELEASE_0.5.7.md](docs/TRUST_RELEASE_0.5.7.md) | Production trust boundary and CALY-PROOF v1 compatibility |
-| [docs/MIGRATING_0.5.5_TO_0.5.7.md](docs/MIGRATING_0.5.5_TO_0.5.7.md) | Fail-closed persisted-ledger migration and rollback |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting, supported versions |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, test gate, PR expectations |
 
