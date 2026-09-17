@@ -65,9 +65,17 @@ slow path and the only one that allocates.
 The kernel decided and forgot. `outcome::Outcome` gives the downstream half a
 shape: whether a recommendation was applied, abandoned or still running, what it
 actually cost, whether a person overrode it, and corrections as revisions that
-supersede rather than overwrite. It binds by decision digest rather than by
-sequence, so the same request re-run under a different policy cannot inherit an
-outcome that was not about it.
+supersede rather than overwrite.
+
+It binds through `DecisionIdentity`, which carries the **policy digest, the input
+digest, the decision digest and the request sequence** together. A decision
+digest alone identifies a decision but not the world that produced it: a policy
+whose risk limit moved, or a request whose latency cap moved, can both produce a
+byte-identical decision, and a record bound to the decision alone would pass as
+evidence about either one. `tests/outcome_contract.rs` demonstrates exactly that
+— two tests that only mean anything while the two policies, and the two requests,
+decide identically. `validate_against` checks all four and names the first that
+disagrees.
 
 **The kernel does not learn from these.** It stores no history and no decision
 changes because of a record.
@@ -75,10 +83,43 @@ changes because of a record.
 `Selection` carries the part that cannot be added later. A learner reading a
 decision log only ever observes the action that was taken, and estimating the
 others is honest only when the probability of each choice was written down at the
-time — which is unrecoverable afterwards. Validation refuses the two shapes that
-would quietly poison such an analysis: a deterministic strategy claiming it might
-have chosen otherwise, and an observed choice recording no chance of happening.
-`Applied` with nothing measured is refused for the same reason.
+time — which is unrecoverable afterwards. So the propensity is an `Option`, and
+which of the three states is legal depends on how the choice was made:
+
+| Strategy | Propensity |
+|---|---|
+| `MaximiseUtility` | exactly 10,000 — it is deterministic |
+| `Explore` | a stated probability in 1..=10,000 |
+| `Human` | absent, because none exists |
+
+Absent means *not causally evaluable*, and a record carrying it belongs outside
+an off-policy estimate rather than defaulted into one. A person's reasons are not
+a distribution, and a number there would make the record look usable when it is
+not.
+
+The disposition rules are the mirror of the same idea. `Applied` requires a
+measurement, because asserting that something happened while recording nothing is
+the shape a learner would later read as a silent success. `Abandoned` forbids one,
+because nothing ran and a zero would read as a free success. `InFlight` cannot
+record success or failure, because the work has not finished. And a rejection
+admits only `Abandoned`: there was nothing to carry out. An outcome naming a model
+the policy does not contain is refused too.
+
+### What else 1.0.0 closes
+
+Everything here exists because a frozen release has to be checkable by someone
+who was not here when it was written.
+
+| | |
+|---|---|
+| **`docs/SPECIFICATION.md`** | All seven digest layouts field by field — widths, endianness, sort keys, presence bytes, enum discriminants, units, ceilings, and what is deliberately not hashed. `tests/specification.rs` transcribes that document back into code and compares it against the implementation, so the two cannot quietly part company. |
+| **`docs/INVARIANTS.md`** | Every property the crate promises, with the test that fails when it stops being true, under stable `CAL-Innn` identifiers. `tests/invariants.rs` reads the file and refuses to pass if a row names a test that does not exist. |
+| **Golden outcome vectors** | `tests/fixtures/calybris_outcome_v1.json` pins seven cases across the axes that carry format risk — including a human selection with no propensity, the only pinned value with an absent optional field. Asserted from Rust, from Python, and from C. |
+| **`calybris-ffi`** | A stable C ABI over the decision path, for callers that are neither Rust nor Python. A C program compiled against the header reproduces the same pinned digests: one set of bytes, three callers. |
+| **Torn-write and corruption tests** | `tests/crash_injection.rs` produces every truncation and every single-bit corruption of a real WAL and a real snapshot — about nine thousand damaged files — and checks that recovery never reports state that was not durably written. |
+| **Fuzz harness** | Six coverage-guided targets over the decoders and the kernel, seeded from real documents, with a proptest mirror of the same properties that runs on every platform. |
+| **Cross-architecture determinism** | The pinned vectors run under `cross` on aarch64, i686 and **s390x**. The layouts are declared little-endian, and a big-endian host is the only way to find out whether the code says so or merely inherits it. |
+| **Release provenance** | On a clean checkout the stamped source digest **is** the git tree SHA, so anyone can recompute it with `git rev-parse HEAD^{tree}`. `cargo package` twice from the same commit must produce the same bytes. Both are CI gates. |
 
 ### The Python side gets both
 

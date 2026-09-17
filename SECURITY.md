@@ -50,7 +50,10 @@ a fork is the supported answer to a need this repository will not meet.
 
 ## Security Properties (OSS)
 
-- `#![forbid(unsafe_code)]` in project code
+- `#![forbid(unsafe_code)]` in `calybris-core`, so the kernel cannot contain
+  `unsafe` at all. The isolated `calybris-ffi` crate contains the `unsafe`
+  required for C interop and nothing else; keeping it in its own crate is what
+  makes that claim checkable.
 - Integer-only kernel hot path (no `f64` in prescribe)
 - Version-tagged canonical SHA-256 digests
 - Hash-chained WAL with optional HMAC-SHA256 (`subtle` constant-time compare)

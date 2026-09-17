@@ -91,9 +91,24 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
           cargo test --locked -p calybris-core --all-targets --all-features
+          # SECURITY.md asks a reviewer to run this, so a release must not be
+          # the thing that breaks it.
+          cargo test --locked -p calybris-core --no-default-features
           cargo test --locked -p calybris-core-python
+          # Named explicitly rather than relying on --workspace, because the
+          # crates above are named explicitly too and a new member would
+          # otherwise be silently ungated.
+          cargo test --locked -p calybris-ffi --all-targets
           cargo test --locked --release --test production_torture --features full -- --ignored --nocapture --test-threads=1
           cargo package --locked
+
+      # The Rust tests above use Rust's idea of the C struct layouts. Freezing
+      # an ABI without compiling a C program against the header would be
+      # freezing a contract nothing has read.
+      - name: C ABI gate
+        run: |
+          python scripts/check_c_abi.py
+          python scripts/check_c_abi.py --release
 
       - name: Build and test installed release wheel
         run: |

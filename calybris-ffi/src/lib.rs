@@ -31,7 +31,7 @@ use std::ptr;
 
 use calybris_core::digest::{decision_digest, digest_to_hex, input_digest, policy_digest};
 use calybris_core::kernel::{
-    KernelAction, KernelDecision, KernelInput, KernelModel, PolicySnapshot,
+    KernelAction, KernelDecision, KernelInput, KernelModel, PolicySnapshot, TrustPolicyError,
 };
 use calybris_core::verify::{verify_decision, VerifyResult};
 
@@ -58,6 +58,12 @@ pub const CALYBRIS_ERR_BUFFER_TOO_SMALL: c_int = -4;
 pub const CALYBRIS_ERR_UNKNOWN_VARIANT: c_int = -5;
 /// A panic was caught at the boundary. This is a defect; please report it.
 pub const CALYBRIS_ERR_PANIC: c_int = -6;
+/// The catalog held more candidates than a `u16` index can address.
+pub const CALYBRIS_ERR_CATALOG_TOO_LARGE: c_int = -7;
+/// A candidate used model id 0, which is reserved.
+pub const CALYBRIS_ERR_RESERVED_MODEL_ID: c_int = -8;
+/// A candidate's `enabled` was neither 0 nor 1.
+pub const CALYBRIS_ERR_INVALID_ENABLED_FLAG: c_int = -9;
 
 // --- C-visible structures --------------------------------------------------
 
@@ -146,7 +152,10 @@ impl From<CalybrisModel> for KernelModel {
             provider_id: model.provider_id,
             quality_bps: model.quality_bps,
             risk_ceiling_bps: model.risk_ceiling_bps,
-            enabled: u8::from(model.enabled != 0),
+            // Verbatim, not coerced. `try_new_trusted` refuses anything
+            // outside 0..=1, and coercing here would make the C path accept a
+            // catalog Python refuses.
+            enabled: model.enabled,
             p95_latency_ms: model.p95_latency_ms,
             capabilities: model.capabilities,
             region_mask: model.region_mask,
@@ -301,10 +310,17 @@ pub unsafe extern "C" fn calybris_policy_new(
     out: *mut *mut CalybrisPolicy,
 ) -> c_int {
     guard(|| {
-        if config.is_null() || out.is_null() {
+        // Cleared before any other check. A caller passing a variable that
+        // already holds a pointer must not be left holding it after a failure,
+        // and that is exactly what happens if the config check comes first.
+        if out.is_null() {
             return CALYBRIS_ERR_NULL;
         }
         *out = ptr::null_mut();
+
+        if config.is_null() {
+            return CALYBRIS_ERR_NULL;
+        }
         if models.is_null() && model_count != 0 {
             return CALYBRIS_ERR_NULL;
         }
@@ -319,7 +335,13 @@ pub unsafe extern "C" fn calybris_policy_new(
                 .collect()
         };
 
-        match PolicySnapshot::try_new(
+        // The trusted constructor, the same one the Python binding uses. It
+        // sorts the catalog by model_id and refuses a reserved id or an
+        // out-of-range enabled flag — so a C caller and a Python caller handed
+        // the same candidates in a different order get the same policy digest
+        // and the same selected_model_index. The legacy `try_new` does none of
+        // that, and using it here would have made the ABI agree with nothing.
+        match PolicySnapshot::try_new_trusted(
             config.policy_epoch,
             config.catalog_epoch,
             config.hard_risk_limit_bps,
@@ -332,6 +354,9 @@ pub unsafe extern "C" fn calybris_policy_new(
                 *out = Box::into_raw(Box::new(CalybrisPolicy { inner }));
                 CALYBRIS_OK
             }
+            Err(TrustPolicyError::CatalogTooLarge { .. }) => CALYBRIS_ERR_CATALOG_TOO_LARGE,
+            Err(TrustPolicyError::ReservedModelId) => CALYBRIS_ERR_RESERVED_MODEL_ID,
+            Err(TrustPolicyError::InvalidEnabledFlag { .. }) => CALYBRIS_ERR_INVALID_ENABLED_FLAG,
             Err(_) => CALYBRIS_ERR_INVALID_POLICY,
         }
     })
@@ -412,10 +437,17 @@ pub unsafe extern "C" fn calybris_verify(
     valid: *mut u8,
 ) -> c_int {
     guard(|| {
-        if policy.is_null() || input.is_null() || decision.is_null() || valid.is_null() {
+        // Same rule as `calybris_policy_new`: the out-parameter is cleared
+        // before anything can fail, so a caller who ignores the status code
+        // cannot read a stale 1 left over from an earlier call.
+        if valid.is_null() {
             return CALYBRIS_ERR_NULL;
         }
         *valid = 0;
+
+        if policy.is_null() || input.is_null() || decision.is_null() {
+            return CALYBRIS_ERR_NULL;
+        }
         let Some(rebuilt) = decision_from_c(&*decision) else {
             return CALYBRIS_ERR_UNKNOWN_VARIANT;
         };
@@ -748,6 +780,184 @@ mod tests {
             assert_eq!(decision.action, KernelAction::Reject as u8);
 
             calybris_policy_free(handle);
+        }
+    }
+
+    /// The out-parameter must be cleared before anything can fail.
+    ///
+    /// A caller holding `int valid = 1` from an earlier call and ignoring the
+    /// status code would otherwise read the stale 1 as a successful
+    /// verification. The header promises `*valid` is 0 on every failing path,
+    /// and for a while it was not.
+    #[test]
+    fn a_failed_verification_clears_valid_before_it_fails() {
+        unsafe {
+            let handle = policy();
+            let request = input();
+            let mut decision = std::mem::zeroed::<CalybrisDecision>();
+            assert_eq!(
+                calybris_decide(handle, &request, &mut decision),
+                CALYBRIS_OK
+            );
+
+            // Each failing argument in turn, from a caller-set 1.
+            let mut valid = 1_u8;
+            assert_eq!(
+                calybris_verify(ptr::null(), &request, &decision, &mut valid),
+                CALYBRIS_ERR_NULL,
+            );
+            assert_eq!(valid, 0, "a null policy left valid set");
+
+            valid = 1;
+            assert_eq!(
+                calybris_verify(handle, ptr::null(), &decision, &mut valid),
+                CALYBRIS_ERR_NULL,
+            );
+            assert_eq!(valid, 0, "a null input left valid set");
+
+            valid = 1;
+            assert_eq!(
+                calybris_verify(handle, &request, ptr::null(), &mut valid),
+                CALYBRIS_ERR_NULL,
+            );
+            assert_eq!(valid, 0, "a null decision left valid set");
+
+            valid = 1;
+            let mut refused = input();
+            refused.risk_bps = 60_000;
+            assert_eq!(
+                calybris_verify(handle, &refused, &decision, &mut valid),
+                CALYBRIS_ERR_INVALID_INPUT,
+            );
+            assert_eq!(valid, 0, "a refused request left valid set");
+
+            calybris_policy_free(handle);
+        }
+    }
+
+    /// The same rule for the policy handle: a failure must not leave a caller
+    /// holding whatever pointer their variable had before the call.
+    #[test]
+    fn a_failed_construction_clears_the_handle_before_it_fails() {
+        unsafe {
+            let handle = policy();
+            let catalog = models();
+
+            // A stale but real pointer, which is the dangerous case: a caller
+            // who ignores the status and frees it would free it twice.
+            let mut out = handle;
+            assert_eq!(
+                calybris_policy_new(ptr::null(), catalog.as_ptr(), catalog.len(), &mut out),
+                CALYBRIS_ERR_NULL,
+            );
+            assert!(out.is_null(), "a null config left a stale handle");
+
+            let mut out = handle;
+            assert_eq!(
+                calybris_policy_new(&config(), ptr::null(), 2, &mut out),
+                CALYBRIS_ERR_NULL,
+            );
+            assert!(out.is_null(), "a null catalog left a stale handle");
+
+            // And a refused policy, not only a null argument.
+            let mut reserved = models();
+            reserved[0].model_id = 0;
+            let mut out = handle;
+            assert_eq!(
+                calybris_policy_new(&config(), reserved.as_ptr(), reserved.len(), &mut out),
+                CALYBRIS_ERR_RESERVED_MODEL_ID,
+            );
+            assert!(out.is_null(), "a refused policy left a stale handle");
+
+            calybris_policy_free(handle);
+        }
+    }
+
+    /// The reason the trusted constructor matters: the catalog is canonicalised,
+    /// so the order a caller happens to pass candidates in cannot change the
+    /// policy digest or the selected index.
+    ///
+    /// Without it a C caller and a Python caller handed the same candidates in a
+    /// different order would disagree, which would make the ABI agree with
+    /// nothing.
+    #[test]
+    fn catalog_order_does_not_change_the_policy() {
+        unsafe {
+            let sorted = models();
+            let mut reversed = models();
+            reversed.reverse();
+
+            let mut a = ptr::null_mut();
+            let mut b = ptr::null_mut();
+            assert_eq!(
+                calybris_policy_new(&config(), sorted.as_ptr(), sorted.len(), &mut a),
+                CALYBRIS_OK,
+            );
+            assert_eq!(
+                calybris_policy_new(&config(), reversed.as_ptr(), reversed.len(), &mut b),
+                CALYBRIS_OK,
+            );
+
+            let mut first = [0_i8; CALYBRIS_DIGEST_HEX_LEN + 1];
+            let mut second = [0_i8; CALYBRIS_DIGEST_HEX_LEN + 1];
+            assert_eq!(
+                calybris_policy_digest_hex(a, first.as_mut_ptr(), first.len()),
+                CALYBRIS_OK,
+            );
+            assert_eq!(
+                calybris_policy_digest_hex(b, second.as_mut_ptr(), second.len()),
+                CALYBRIS_OK,
+            );
+            assert_eq!(first, second, "catalog order changed the policy digest");
+
+            // And the decision, including the index into the canonical catalog.
+            let request = input();
+            let mut one = std::mem::zeroed::<CalybrisDecision>();
+            let mut two = std::mem::zeroed::<CalybrisDecision>();
+            assert_eq!(calybris_decide(a, &request, &mut one), CALYBRIS_OK);
+            assert_eq!(calybris_decide(b, &request, &mut two), CALYBRIS_OK);
+            assert_eq!(one.selected_model_id, two.selected_model_id);
+            assert_eq!(one.selected_model_index, two.selected_model_index);
+
+            calybris_policy_free(a);
+            calybris_policy_free(b);
+        }
+    }
+
+    /// An enabled flag of 2 is refused rather than coerced to 1.
+    ///
+    /// The conversion used to normalise it with `!= 0`, which made the C path
+    /// accept a catalog the Python binding refuses. Two callers of the same
+    /// contract must not disagree about what a valid catalog is.
+    #[test]
+    fn an_enabled_flag_outside_zero_and_one_is_refused() {
+        unsafe {
+            let mut catalog = models();
+            catalog[1].enabled = 2;
+
+            let mut out = ptr::null_mut();
+            assert_eq!(
+                calybris_policy_new(&config(), catalog.as_ptr(), catalog.len(), &mut out),
+                CALYBRIS_ERR_INVALID_ENABLED_FLAG,
+            );
+            assert!(out.is_null());
+        }
+    }
+
+    /// Model id 0 is reserved, and the C path must say so specifically rather
+    /// than reporting a generic invalid policy.
+    #[test]
+    fn the_reserved_model_id_is_refused_by_name() {
+        unsafe {
+            let mut catalog = models();
+            catalog[0].model_id = 0;
+
+            let mut out = ptr::null_mut();
+            assert_eq!(
+                calybris_policy_new(&config(), catalog.as_ptr(), catalog.len(), &mut out),
+                CALYBRIS_ERR_RESERVED_MODEL_ID,
+            );
+            assert!(out.is_null());
         }
     }
 

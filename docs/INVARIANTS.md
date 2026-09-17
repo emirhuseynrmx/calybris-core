@@ -96,6 +96,9 @@ prefix and every single-bit flip of a real WAL and a real snapshot. The property
 is never that recovery succeeds — a damaged file should fail — but that it never
 reports state that was not durably written.
 
+These simulate the files a torn write leaves behind. They do not kill a process
+mid-fsync; that would test the operating system rather than this crate.
+
 | ID | Invariant | Guarded by |
 |---|---|---|
 | CAL-I059 | A WAL truncated at any byte never yields an entry nobody wrote, and the trusted anchor is satisfied only when nothing was lost | `crash_injection::a_wal_truncated_at_every_byte_never_yields_an_entry_nobody_wrote` |
@@ -153,11 +156,28 @@ that disagrees with the library; `scripts/check_c_abi.py` compiles
 | CAL-I084 | Every null is refused rather than dereferenced | `calybris-ffi::every_null_is_refused_rather_than_dereferenced` |
 | CAL-I085 | An empty catalog never yields a handle alongside an error | `calybris-ffi::an_empty_catalog_builds_and_rejects_everything` |
 | CAL-I086 | The ABI version and crate version are reported, so a caller can refuse a mismatch | `calybris-ffi::the_abi_version_and_crate_version_are_reported` |
+| CAL-I087 | A failed verification clears `*valid` before it can fail, so a caller ignoring the status cannot read a stale 1 | `calybris-ffi::a_failed_verification_clears_valid_before_it_fails` |
+| CAL-I088 | A failed construction clears the handle before it can fail, so a caller is never left holding a stale pointer | `calybris-ffi::a_failed_construction_clears_the_handle_before_it_fails` |
+| CAL-I089 | Catalog order does not change the policy digest or the selected index, so a C caller and a Python caller agree | `calybris-ffi::catalog_order_does_not_change_the_policy` |
+| CAL-I090 | An `enabled` flag outside 0..=1 is refused rather than coerced, so the same catalog is valid or invalid in every language | `calybris-ffi::an_enabled_flag_outside_zero_and_one_is_refused` |
+| CAL-I091 | The reserved model id is refused by name rather than as a generic invalid policy | `calybris-ffi::the_reserved_model_id_is_refused_by_name` |
 
 A C program compiled against the header asserts the same three digests the Rust
 and Python golden tests pin — one set of bytes, three callers. That is checked by
 `scripts/check_c_abi.py` rather than by `cargo test`, so it carries no CAL-I of
 its own; the `c-abi` CI job is where it runs.
+
+## The release artifact
+
+A source archive that does not build is not a release. The manifest builder skips
+whatever fails validation without saying so, which is how thirty-one tracked
+files went missing at once — including the whole `calybris-ffi` crate that
+`Cargo.toml` named as a workspace member.
+
+| ID | Invariant | Guarded by |
+|---|---|---|
+| CAL-I092 | Every workspace member ships its manifest, parsed from Cargo.toml rather than listed | `scripts/tests/test_release_contract::test_every_workspace_member_ships_its_manifest` |
+| CAL-I093 | The source archive omits nothing tracked, so a silent exclusion becomes a failure | `scripts/tests/test_release_contract::test_the_source_archive_omits_nothing_tracked` |
 
 ## The API itself
 

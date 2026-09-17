@@ -44,7 +44,7 @@ one action plus an audit bundle that replays to the same answer.
 catalog + policy + request  ->  decision + audit bundle
 ```
 
-Integer-only Rust hot path. No hosted dependency. No `unsafe` in project code.
+Integer-only Rust hot path. No hosted dependency. No `unsafe` in the kernel.
 
 ## What is this?
 
@@ -352,7 +352,12 @@ keyed audited WAL, suffix-truncation detection, contended budgets, and a
 
 ## Security posture
 
-- `#![forbid(unsafe_code)]` — no `unsafe` in project code.
+- `#![forbid(unsafe_code)]` in `calybris-core` — the kernel cannot contain
+  `unsafe`, and the compiler enforces it rather than a review convention.
+  The one exception is `calybris-ffi`, which exists to be a C boundary and
+  therefore handles raw pointers; it is a separate crate for exactly that
+  reason, so the unsafe is confined to a few hundred reviewable lines instead
+  of being available everywhere.
 - Fail-closed audit boundaries: `verified_audit_bundle` / `append_verified_audited`
   refuse to emit or log a decision that does not replay exactly.
 - Tamper-evident WAL: SHA-256 hash chain, optional HMAC-SHA256 with constant-time

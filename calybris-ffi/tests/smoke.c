@@ -128,12 +128,33 @@ int main(void) {
          (long long)decision.expected_utility_microunits);
 
   /* Deciding twice must give the same answer. This is the whole point of the
-   * kernel, and it has to hold across the boundary too. */
+   * kernel, and it has to hold across the boundary too.
+   *
+   * Compared field by field rather than with memcmp over the struct: repr(C)
+   * fixes the field offsets but says nothing about what is in the padding
+   * between them, and a padding byte that happened to differ would fail here
+   * for no reason a reader could act on. The digest comparison further down is
+   * the stronger check anyway. */
   calybris_decision again;
   memset(&again, 0, sizeof(again));
   status = calybris_decide(policy, &input, &again);
   CHECK(status == CALYBRIS_OK, "second decide returned %d", status);
-  CHECK(memcmp(&decision, &again, sizeof(decision)) == 0,
+  CHECK(decision.request_sequence == again.request_sequence &&
+            decision.action == again.action &&
+            decision.reason == again.reason &&
+            decision.selected_model_id == again.selected_model_id &&
+            decision.selected_model_index == again.selected_model_index &&
+            decision.estimated_cost_microunits ==
+                again.estimated_cost_microunits &&
+            decision.expected_utility_microunits ==
+                again.expected_utility_microunits &&
+            decision.counterfactual_model_id == again.counterfactual_model_id &&
+            decision.counterfactual_utility_microunits ==
+                again.counterfactual_utility_microunits &&
+            decision.evaluated_models == again.evaluated_models &&
+            decision.eligible_models == again.eligible_models &&
+            decision.policy_epoch == again.policy_epoch &&
+            decision.catalog_epoch == again.catalog_epoch,
         "two identical calls produced different decisions");
 
   /* Digests. 65 bytes: 64 hex characters and a NUL. */

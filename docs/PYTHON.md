@@ -6,7 +6,7 @@
 |--|------------------------|------------------------------------------|
 | **Role** | Decision kernel + proofs | Convenience wrappers over PyO3 |
 | **Runtime integrity** | Production | Production-capable core binding; same Rust implementation |
-| **API stability** | Stable (crates.io) | Pre-1.0; pin minor versions |
+| **API stability** | Stable (crates.io) | `calybris` stable as of 1.0.0; `calybris_commerce` is a preview and may change |
 | **Who evaluates** | Rust `prescribe` | Same Rust code — Python never re-implements logic |
 | **Security surfaces** | Decisions, proofs, receipts, provenance, state, WAL | Same surfaces exposed through PyO3 |
 

@@ -51,11 +51,13 @@ fn every_invariant_names_a_test_that_exists() {
     let mut missing = Vec::new();
 
     for (id, file, test) in registry_entries() {
-        // An integration test, or a sibling crate's own unit tests. Both are
-        // places an invariant legitimately lives.
+        // Three places an invariant legitimately lives: an integration test, a
+        // sibling crate's own unit tests, or a Python test — the release
+        // contract is Python, and its invariants are no less binding for it.
         let candidates = [
             tests_dir.join(format!("{file}.rs")),
             repo().join(&file).join("src/lib.rs"),
+            repo().join(format!("{file}.py")),
         ];
 
         let found = candidates.iter().find_map(|path| {
@@ -65,11 +67,19 @@ fn every_invariant_names_a_test_that_exists() {
         });
 
         let Some((path, source)) = found else {
-            missing.push(format!("{id}: no tests/{file}.rs and no {file}/src/lib.rs"));
+            missing.push(format!(
+                "{id}: none of tests/{file}.rs, {file}/src/lib.rs or {file}.py"
+            ));
             continue;
         };
-        if !source.contains(&format!("fn {test}(")) {
-            missing.push(format!("{id}: {} has no fn {test}", path.display()));
+
+        let declaration = if path.extension().is_some_and(|e| e == "py") {
+            format!("def {test}(")
+        } else {
+            format!("fn {test}(")
+        };
+        if !source.contains(&declaration) {
+            missing.push(format!("{id}: {} has no {declaration}", path.display()));
         }
     }
 

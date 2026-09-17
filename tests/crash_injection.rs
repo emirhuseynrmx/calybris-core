@@ -1,4 +1,11 @@
-//! Kill the process at every byte, then recover, and check nothing was invented.
+//! Torn writes and corruption at every byte boundary, then recovery.
+//!
+//! To be exact about what this does and does not do: it writes a healthy WAL and
+//! a healthy snapshot, then produces every truncation and single-bit corruption
+//! of them and puts recovery through each. It does not SIGKILL a process in the
+//! middle of an fsync. That would be a better test of the operating system; this
+//! is a test of what the reader does with the files such a crash leaves behind,
+//! which is the part this crate is responsible for.
 //!
 //! A crash does not politely stop between records. It stops mid-write, mid-line,
 //! mid-number — so the interesting cases are not "the last entry is missing" but

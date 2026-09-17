@@ -40,6 +40,9 @@ extern "C" {
 #define CALYBRIS_ERR_BUFFER_TOO_SMALL (-4)
 #define CALYBRIS_ERR_UNKNOWN_VARIANT (-5)
 #define CALYBRIS_ERR_PANIC (-6)
+#define CALYBRIS_ERR_CATALOG_TOO_LARGE (-7)
+#define CALYBRIS_ERR_RESERVED_MODEL_ID (-8)
+#define CALYBRIS_ERR_INVALID_ENABLED_FLAG (-9)
 
 /* --- actions and reasons ------------------------------------------------ */
 
@@ -65,7 +68,18 @@ extern "C" {
 /* --- structures -------------------------------------------------------- */
 
 /* One candidate. Costs are microunits per million tokens; proportions are
- * basis points, where 10000 is 100%. `enabled` is non-zero for enabled. */
+ * basis points, where 10000 is 100%.
+ *
+ * `enabled` must be exactly 0 or 1. Anything else is CALYBRIS_ERR_INVALID_ENABLED_FLAG,
+ * not coerced to 1 — the same catalog must be valid or invalid whichever
+ * language presents it.
+ *
+ * `model_id` 0 is reserved: CALYBRIS_ERR_RESERVED_MODEL_ID.
+ *
+ * The catalog is canonicalised on construction: candidates are sorted by
+ * model_id, so the order they are passed in does not affect the policy digest
+ * or selected_model_index. Two callers handing over the same candidates get the
+ * same policy. */
 typedef struct {
   uint32_t model_id;
   uint16_t provider_id;
@@ -137,8 +151,15 @@ uint32_t calybris_abi_version(void);
 const char *calybris_version(void);
 
 /* Builds a policy. On success *out holds a handle to free with
- * calybris_policy_free; on failure *out is set to NULL. `models` may be NULL
- * only when model_count is zero. */
+ * calybris_policy_free. `models` may be NULL only when model_count is zero.
+ *
+ * *out is set to NULL before anything can fail, so a variable that already held
+ * a pointer never keeps it after an error. The one exception is a NULL `out`
+ * itself, which returns CALYBRIS_ERR_NULL and writes nothing.
+ *
+ * Failures: CALYBRIS_ERR_NULL, CALYBRIS_ERR_RESERVED_MODEL_ID,
+ * CALYBRIS_ERR_INVALID_ENABLED_FLAG, CALYBRIS_ERR_CATALOG_TOO_LARGE, or
+ * CALYBRIS_ERR_INVALID_POLICY for anything else the kernel refuses. */
 int calybris_policy_new(const calybris_policy_config *config,
                         const calybris_model *models, size_t model_count,
                         calybris_policy **out);
@@ -154,8 +175,12 @@ int calybris_policy_model_count(const calybris_policy *policy, size_t *out);
 int calybris_decide(const calybris_policy *policy, const calybris_input *input,
                     calybris_decision *out);
 
-/* Replays a decision. *valid is set to 1 only when the replay matches exactly,
- * and to 0 otherwise — including when the call fails. */
+/* Replays a decision. *valid is set to 1 only when the replay matches exactly.
+ *
+ * *valid is cleared to 0 before anything can fail, so a caller who ignores the
+ * status code cannot read a stale 1 left from an earlier call. The one exception
+ * is a NULL `valid` itself, which returns CALYBRIS_ERR_NULL and writes
+ * nothing. */
 int calybris_verify(const calybris_policy *policy, const calybris_input *input,
                     const calybris_decision *decision, uint8_t *valid);
 

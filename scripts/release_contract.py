@@ -20,12 +20,17 @@ import tomllib
 TAG_PATTERN = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 SOURCE_ROOT_FILES = {
     ".codecov.yml",
+    ".deepsource.toml",
+    # Governs how the fuzz corpus is checked out: without it the binary seed is
+    # line-ending translated on Windows and stops being the bytes it was.
+    ".gitattributes",
     ".gitignore",
     "Cargo.lock",
     "Cargo.toml",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "LICENSE",
+    "README-crates.md",
     "README.md",
     "RELEASING.md",
     "SECURITY.md",
@@ -38,8 +43,14 @@ SOURCE_ROOTS = {
     "assets",
     "benches",
     "bindings",
+    # The C ABI crate is a workspace member. A source archive that names it in
+    # Cargo.toml without shipping it does not build.
+    "calybris-ffi",
     "docs",
     "examples",
+    # Not a workspace member, but the seeds are part of the test corpus and the
+    # targets are what a reviewer reruns.
+    "fuzz",
     "proptest-regressions",
     "python",
     "scripts",
@@ -73,18 +84,39 @@ SOURCE_DENIED_SUFFIXES = {
 }
 SOURCE_ALLOWED_SUFFIXES = {
     ".json",
+    # One WAL seed, which is newline-delimited JSON.
+    ".jsonl",
     ".lock",
     ".md",
     ".pdf",
     ".png",
     ".py",
     ".pyi",
+    # Proptest writes its pinned counterexamples here. Dropping them loses the
+    # inputs that once failed, which is the only reason the file exists.
+    ".proptest-regressions",
     ".rs",
     ".toml",
     ".typ",
     ".txt",
     ".typed",
     ".yml",
+}
+# Files whose whole name is the allowlist, because they have no extension.
+SOURCE_ALLOWED_NAMES = {
+    ".gitignore",
+}
+# Suffixes allowed only under a particular prefix. A C source file belongs to
+# the C ABI crate and a raw fuzz seed belongs to the corpus; allowing either
+# anywhere would let a stray binary into `docs/`, which is what the rest of this
+# allowlist exists to prevent.
+SOURCE_SCOPED_SUFFIXES = {
+    # The header is part of the frozen contract, and smoke.c is the only test
+    # that checks the header against the library.
+    ".c": ("calybris-ffi/",),
+    ".h": ("calybris-ffi/",),
+    # One seed, for the target that reads raw integers rather than JSON.
+    ".bin": ("fuzz/seeds/",),
 }
 SOURCE_REQUIRED_FILES = {
     "Cargo.toml",
@@ -93,6 +125,10 @@ SOURCE_REQUIRED_FILES = {
     "bindings/python/Cargo.toml",
     "bindings/python/build.rs",
     "bindings/python/src/lib.rs",
+    "calybris-ffi/Cargo.toml",
+    "calybris-ffi/src/lib.rs",
+    "calybris-ffi/include/calybris.h",
+    "calybris-ffi/tests/smoke.c",
     "python/calybris/__init__.py",
     "python/calybris/_core.pyi",
     "scripts/release_contract.py",
@@ -204,9 +240,83 @@ def _validate_source_name(name: str) -> PurePosixPath:
         raise SystemExit(f"internal document in source archive: {name!r}")
     if path.parts[0] in SOURCE_ROOT_FILES and len(path.parts) == 1:
         return path
-    if path.parts[0] not in SOURCE_ROOTS or path.suffix.lower() not in SOURCE_ALLOWED_SUFFIXES:
+    if path.parts[0] not in SOURCE_ROOTS:
+        raise SystemExit(f"unexpected source archive path: {name!r}")
+    if path.name in SOURCE_ALLOWED_NAMES:
+        return path
+    suffix = path.suffix.lower()
+    scopes = SOURCE_SCOPED_SUFFIXES.get(suffix)
+    if scopes is not None:
+        if not name.startswith(scopes):
+            # Keeps the generic phrase, because a caller matching on the class
+            # of failure should not have to know about scoping, and adds the
+            # reason, because a caller fixing it does.
+            raise SystemExit(
+                f'unexpected source archive path: {name!r} '
+                f"({suffix} is only allowed under {' or '.join(scopes)})"
+            )
+        return path
+    if suffix not in SOURCE_ALLOWED_SUFFIXES:
         raise SystemExit(f"unexpected source archive path: {name!r}")
     return path
+
+
+def workspace_members(root: Path) -> list[str]:
+    """Every path in `[workspace] members`, as written in the root Cargo.toml.
+
+    Parsed rather than listed, so that adding a crate cannot silently leave it
+    out of the source archive — which is exactly what happened to calybris-ffi.
+    """
+    text = (root / "Cargo.toml").read_text(encoding="utf-8")
+    block = re.search(r"^\[workspace\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    if block is None:
+        raise SystemExit("the root Cargo.toml declares no [workspace]")
+    members = re.search(r"members\s*=\s*\[(.*?)\]", block.group(1), re.S)
+    if members is None:
+        raise SystemExit("the [workspace] table declares no members")
+    found = re.findall(r'"([^"]+)"', members.group(1))
+    if not found:
+        raise SystemExit("the [workspace] members list is empty")
+    return found
+
+
+def source_manifest_omissions(root: Path) -> list[tuple[str, str]]:
+    """Tracked files the manifest would leave out, and why.
+
+    `source_file_manifest` skips anything that fails validation without saying
+    so, which is how thirty-one files went missing from a release archive at
+    once. This reports them instead, so a test can refuse.
+
+    Returns an empty list when git is unavailable; a machine without git cannot
+    answer the question, and guessing would be worse than declining.
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    if listed.returncode != 0:
+        return []
+
+    shipped = {name for _, name in source_file_manifest(root)}
+    omissions: list[tuple[str, str]] = []
+    for name in sorted(listed.stdout.split()):
+        if name in shipped:
+            continue
+        if name.startswith(SOURCE_INTERNAL_PREFIXES):
+            continue  # deliberately withheld, and the prefix names it
+        try:
+            _validate_source_name(name)
+        except SystemExit as reason:
+            omissions.append((name, str(reason)))
+        else:
+            omissions.append((name, "not reached by any allowlisted root"))
+    return omissions
 
 
 def source_file_manifest(root: Path) -> list[tuple[Path, str]]:

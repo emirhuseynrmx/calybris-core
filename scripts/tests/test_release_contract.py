@@ -97,3 +97,35 @@ def test_provenance_rejects_untracked_files(
     # skipcq: BAN-B101
     # skipcq: BAN-B101
     assert ("git", "status", "--porcelain=v1", "--untracked-files=all") in commands
+
+
+def test_every_workspace_member_ships_its_manifest() -> None:
+    """A source archive that names a member without shipping it does not build.
+
+    This is what went wrong once: Cargo.toml listed calybris-ffi as a workspace
+    member and the archive did not contain the directory, so `cargo test
+    --workspace` on an unpacked release failed. Parsed from Cargo.toml rather
+    than listed here, so adding a crate cannot reintroduce it.
+    """
+    root = Path(__file__).parents[2]
+    shipped = {name for _, name in release_contract.source_file_manifest(root)}
+
+    for member in release_contract.workspace_members(root):
+        manifest = "Cargo.toml" if member == "." else f"{member}/Cargo.toml"
+        assert manifest in shipped, (
+            f"{member} is a workspace member but {manifest} is not in the "
+            f"source archive, so `cargo test --workspace` would fail on it"
+        )
+
+
+def test_the_source_archive_omits_nothing_tracked() -> None:
+    """The manifest builder skips what fails validation without saying so.
+
+    That silence is how thirty-one files went missing at once. A tracked file is
+    either shipped or deliberately withheld by a rule that names it; anything
+    else is an omission, and this is where it surfaces.
+    """
+    omissions = release_contract.source_manifest_omissions(Path(__file__).parents[2])
+    assert omissions == [], "the source archive would omit tracked files:\n  " + "\n  ".join(
+        f"{name}: {reason}" for name, reason in omissions
+    )
