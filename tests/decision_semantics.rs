@@ -1,4 +1,4 @@
-//! The semantics 0.8.0 freezes.
+//! The semantics 1.0.0 freezes.
 //!
 //! Every assertion here is a promise the crate is making to whatever is built on
 //! top of it after development stops. They are written as tests rather than as

@@ -62,20 +62,20 @@ selects by the rules you wrote, and a wrong rule produces a wrong decision you
 can at least see. And it proves the *integrity of the trail*, not the truth of
 your inputs.
 
-## In this release — 0.6.0
+## In this release — 1.0.0
 
-A typed decision surface on the kernel that was already there, and a way to ask
-what a policy change would have done.
+Everything here is something the crate could not gain once it stopped changing.
 
 | | |
 |---|---|
-| **`DecisionEngine`** | One already-priced job in, one selected candidate plus a replay-verified audit bundle out. No new selection algorithm: a fixed quote is mapped onto the native cost rate, so the kernel prices it without a second pricing path. |
-| **`compare_policies`** | Replay identical frozen requests through two policies and count what changed. Both policies are identified in the result by native digest and epoch, so a comparison whose stored detail was capped still says which two produced it. |
-| **`AgentBudget.lifecycle_report()`** | Balance, unresolved work and its next action, corrections, denials and reservation accuracy — read under one lock, so the parts cannot disagree with each other. |
+| **`explain()`** | One row per candidate in the catalog: which gate turned it away, what was measured against what limit, and for the ones that survived, the terms that add up to the utility the kernel ranked on. It runs the same evaluation `prescribe` does, so it cannot become a second opinion about the decision. |
+| **`Outcome`** | What happened after a decision — applied, abandoned or still running — bound to the policy, the input and the decision together, with the selection probability that an off-policy estimate needs and that cannot be recovered afterwards. The kernel does not read these back; it defines the shape so that two callers write the same one. |
+| **Frozen semantics** | Gate order, tie-break, units, ceilings and digest layouts are written down in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and pinned by `tests/decision_semantics.rs`, and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says what a 1.0.x may and may not contain. |
 
-0.5.8 and 0.5.9 were never published, so this is the whole distance from 0.5.7.
-Units, identities and the exact limits of the rejection trace are in
-[docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md); the full list is in the
+`PolicySnapshot::new`, deprecated since 0.3.9, is gone: shipping it in a 1.0.0
+would have made it permanent. Every public error enum is now `#[non_exhaustive]`
+so a security fix can add a variant; the enums that carry decision semantics are
+exhaustive for the opposite reason. The full list is in the
 [CHANGELOG](CHANGELOG.md).
 
 ## When to use / when not to
@@ -300,8 +300,8 @@ third party can verify a decision trail without running your engine.
 | Layer | Status | Notes |
 |-------|--------|-------|
 | **`calybris-core` (Rust)** | **Stable** | crates.io: this is the contract |
-| **`calybris` (Python)** | **Production-capable / pre-1.0 API** | Decisions, policy comparison, shared budget, signed policy provenance, state proofs, receipts, keyed WAL, anchors and replay |
-| **`calybris_commerce` (Python)** | Experimental / pre-1.0 | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
+| **`calybris` (Python)** | **Production-capable / stable API** | Decisions, policy comparison, shared budget, signed policy provenance, state proofs, receipts, keyed WAL, anchors and replay |
+| **`calybris_commerce` (Python)** | Experimental | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
 
 Rust owns correctness and replay semantics. The core Python package exposes the
 production trust boundary and is tested as an installed abi3 wheel. The Python
@@ -316,7 +316,7 @@ production path and the CALY-PROOF v1 compatibility boundary.
 # Rust (stable surface)
 cargo add calybris-core
 
-# Python (production-capable core binding; pre-1.0 API)
+# Python (production-capable core binding; stable API)
 pip install calybris
 ```
 

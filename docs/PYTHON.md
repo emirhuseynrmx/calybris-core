@@ -11,8 +11,9 @@
 | **Security surfaces** | Decisions, proofs, receipts, provenance, state, WAL | Same surfaces exposed through PyO3 |
 
 **Mental model:** Python is a first-class integration surface over the Rust
-trust boundary, not a second implementation. The wheel remains pre-1.0 for API
-evolution, so pin `calybris==0.5.7` in production.
+trust boundary, not a second implementation. The API is stable as of 1.0.0;
+pin `calybris==1.0.0` in production anyway, so that a rebuild is a decision
+rather than a surprise.
 
 Production exceptions share one stable base:
 

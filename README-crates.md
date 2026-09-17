@@ -47,7 +47,7 @@ your inputs.
 
 ```toml
 [dependencies]
-calybris-core = "0.6"
+calybris-core = "1.0"
 ```
 
 ```rust
@@ -162,7 +162,7 @@ truth.
 | `persistence` | Atomic snapshots and WAL-verified generation checkpoints |
 | `async_wal` / `instrument` | Tokio WAL *(feature `async`)*, tracing spans *(feature `observability`)* |
 
-## 0.6.0
+## 1.0.0
 
 This release adds a typed decision surface over the same kernel, published
 separately as the `calybris` Python package: a fixed-quote adapter, a bounded

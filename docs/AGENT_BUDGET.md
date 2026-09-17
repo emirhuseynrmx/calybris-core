@@ -1,4 +1,4 @@
-# AgentBudget (0.5.8)
+# AgentBudget
 
 Use one shared `AgentBudget` to reserve spending capacity before starting a paid
 call. The operation may be an LLM request or another priced tool. The Rust
@@ -17,7 +17,7 @@ run = AgentBudget(100_000_000)  # 1 USD = 100 cents * 1,000,000 microcents
 For an immediately runnable example without credentials:
 
 ```console
-pip install calybris==0.5.8
+pip install calybris==1.0.0
 python examples/agent_budget.py
 ```
 
