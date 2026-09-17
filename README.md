@@ -304,11 +304,11 @@ third party can verify a decision trail without running your engine.
 | **`calybris_commerce` (Python)** | Experimental | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
 
 Rust owns correctness and replay semantics. The core Python package exposes the
-production trust boundary and is tested as an installed abi3 wheel. The Python
-API remains pre-1.0, so pin minor versions even though its runtime integrity
-guarantees match the Rust core. See the
-[0.5.7 trust-release migration](docs/TRUST_RELEASE_0.5.7.md) for the canonical
-production path and the CALY-PROOF v1 compatibility boundary.
+production trust boundary and is tested as an installed abi3 wheel. Its runtime
+integrity guarantees match the Rust core, and as of 1.0.0 its API is stable —
+pin the exact version anyway, so that a rebuild is a decision rather than a
+surprise. [docs/PYTHON.md](docs/PYTHON.md) covers the production path and the
+CALY-PROOF v1 compatibility boundary.
 
 ## Install
 

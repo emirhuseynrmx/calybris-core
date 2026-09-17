@@ -160,7 +160,7 @@ this section is the whole distance from 0.5.7.
   adapter maps a fixed quote onto the native cost rate as exactly one million
   input units and zero output units, so the native estimated cost is the quote.
   Suppliers, carriers, venues and models are the same call with a different
-  catalog. See [docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md).
+  catalog.
 - `DecisionEngine.verify` recomputes the entire result from the caller's own
   catalog, policy and request rather than trusting a self-declared flag, and the
   catalog digest (`calybris.catalog.v1`) is kept distinct from the native policy,
