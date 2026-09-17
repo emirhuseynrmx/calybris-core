@@ -116,6 +116,7 @@ pub fn issue_certificate(
 
 /// Why a certificate failed verification.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CertificateError {
     #[error("unknown certificate schema: {0}")]
     UnknownSchema(String),
@@ -176,6 +177,7 @@ pub fn verify_certificate(
 /// [`verify_certificate`] intentionally verifies only policy/input/decision
 /// replay evidence.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CertificateScopedError {
     #[error(transparent)]
     Certificate(#[from] CertificateError),

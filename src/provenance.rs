@@ -44,6 +44,7 @@ pub struct SignedPolicy {
 
 /// Why a signed policy failed verification.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProvenanceError {
     #[error("policy digest mismatch: artifact signs {signed}, snapshot digests to {actual}")]
     PolicyDigestMismatch { signed: String, actual: String },

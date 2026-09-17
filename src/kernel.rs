@@ -94,6 +94,7 @@ pub struct KernelInput {
 
 /// Input boundary validation errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum InputError {
     #[error("{field} must be <= {max}, got {value}")]
     OutOfRangeBps {
@@ -351,6 +352,7 @@ pub const MAX_RISK_PENALTY_MULTIPLIER_BPS: u16 = 50_000;
 
 /// Policy catalog validation errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PolicyError {
     #[error("model catalog is empty")]
     EmptyCatalog,
@@ -370,6 +372,7 @@ pub enum PolicyError {
 
 /// Additional trust-boundary validation errors for canonical policy construction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TrustPolicyError {
     #[error("policy validation failed: {0}")]
     Policy(#[from] PolicyError),
@@ -711,31 +714,6 @@ impl PolicySnapshot {
             max_output_cost,
             models: Arc::from(models),
         }
-    }
-
-    /// Creates a new policy snapshot from a model catalog (alias for [`new_unchecked`](Self::new_unchecked)).
-    #[deprecated(
-        since = "0.3.9",
-        note = "use PolicySnapshot::try_new for validated snapshots or new_unchecked for tests"
-    )]
-    pub fn new(
-        policy_epoch: u64,
-        catalog_epoch: u64,
-        hard_risk_limit_bps: u16,
-        minimum_confidence_bps: u16,
-        risk_penalty_multiplier_bps: u16,
-        latency_penalty_microunits_per_ms: u64,
-        models: Vec<KernelModel>,
-    ) -> Self {
-        Self::new_unchecked(
-            policy_epoch,
-            catalog_epoch,
-            hard_risk_limit_bps,
-            minimum_confidence_bps,
-            risk_penalty_multiplier_bps,
-            latency_penalty_microunits_per_ms,
-            models,
-        )
     }
 
     /// Returns the model catalog.

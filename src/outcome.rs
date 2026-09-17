@@ -68,6 +68,7 @@ pub struct Selection {
 
 /// Rejected because a record that cannot be trusted is worse than no record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum OutcomeError {
     /// A probability outside 1..=10,000. Zero is refused as well: an event that
     /// was observed cannot have had no chance of happening.

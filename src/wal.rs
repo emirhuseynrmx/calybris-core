@@ -63,6 +63,7 @@ pub const WAL_ANCHOR_SCHEMA: &str = "calybris.wal-anchor.v1";
 
 /// WAL error types.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum WalError {
     #[error("WAL I/O error: {0}")]
     Io(#[from] std::io::Error),

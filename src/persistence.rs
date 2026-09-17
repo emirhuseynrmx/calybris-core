@@ -50,6 +50,7 @@ pub struct CoordinatedCheckpoint {
 
 /// Persistence error types.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PersistenceError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

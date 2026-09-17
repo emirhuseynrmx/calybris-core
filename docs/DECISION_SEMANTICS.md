@@ -2,7 +2,7 @@
 
 What the kernel promises, in the units it promises it in.
 
-This is the contract 0.8.0 freezes. Everything here is pinned by
+This is the contract 1.0.0 freezes. Everything here is pinned by
 `tests/decision_semantics.rs`, because a contract that only exists in prose drifts
 without failing anything.
 
@@ -123,6 +123,6 @@ replayable, which is the property the whole crate exists to hold.
 
 ## What is frozen
 
-The items above, the digest formats, and the replay behaviour. 0.8.0 is the last
+The items above, the digest formats, and the replay behaviour. 1.0.0 is the last
 release that adds features to them. Critical corrections may still ship; see
 `SECURITY.md` for what that covers and for how long.

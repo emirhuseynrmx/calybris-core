@@ -9,7 +9,7 @@ Subject: `[SECURITY] Calybris Core — <brief description>`
 |-----------|--------|
 | Acknowledgment | 7 days |
 | Severity assessment | 30 days |
-| Fix for a critical defect in 0.8.x | best effort, no committed date |
+| Fix for a critical defect in 1.0.x | best effort, no committed date |
 
 These are the targets of one person maintaining a project that has stopped taking
 features. They are deliberately slower than the ones this file used to state,
@@ -30,13 +30,13 @@ Please include: affected version, reproduction steps, impact on invariants I1–
 
 ## Supported Versions
 
-0.8.0 is the last release that adds features. Development continues in a separate
+1.0.0 is the last release that adds features. Development continues in a separate
 product built on this core, not in this repository.
 
 | Version | Supported |
 |---------|-----------|
-| 0.8.x   | Critical security and verification defects only |
-| < 0.8   | No |
+| 1.0.x   | Critical security and verification defects only |
+| < 1.0   | No |
 
 "Critical" means a defect that lets a decision, a receipt or a WAL be forged,
 replayed incorrectly, or verified as valid when it is not. Anything that would

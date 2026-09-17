@@ -76,6 +76,7 @@ pub struct DecisionReceipt {
 
 /// Why receipt verification failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ReceiptError {
     #[error("unknown receipt schema: {0}")]
     UnknownSchema(String),

@@ -5,10 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.0] - 2026-09-17
+## [1.0.0] - 2026-09-17
 
 The last feature release of this core, and everything in it is something the
 crate could not gain once it stopped changing.
+
+### Why 1.0.0 and not 0.8.0
+
+The number is a commitment, not a boast. `0.x` means *expect breaking changes*,
+and there are none left to expect: the public API is stable and a change that
+broke it would be a 2.0 that is not coming. A frozen `0.8.0` would have said the
+opposite of what is true.
+
+Calling it 1.0.0 also closes the window in which breaking changes are free, so
+two things happened before the number moved.
+
+`PolicySnapshot::new` is gone. It had been deprecated since 0.3.9 and had no
+caller left in this repository; shipping it in 1.0.0 would have made it permanent.
+
+Every public error enum is now `#[non_exhaustive]`, so a security fix that needs a
+new way to refuse an input can ship as 1.0.x instead of forcing a major version.
+The decision enums — `KernelAction`, `KernelReason`, `GateKind`,
+`CandidateVerdict`, `Disposition`, `SelectionStrategy` — are deliberately left
+exhaustive: a new variant there would change the decision contract, which is
+exactly what this release promises not to do. Error paths flex; the semantics do
+not.
+
+`docs/COMPATIBILITY.md` states what 1.0.x may contain, what it never will, and
+what happens to a defect that would require changing a digest format: it gets
+documented with a workaround rather than fixed, because a correction that
+invalidates every artifact ever written against the format costs more than the
+defect.
 
 ### The gate chain and the pricing each have one definition
 
@@ -93,8 +120,8 @@ refused at policy construction rather than silently at decision time.
 
 ### Maintenance
 
-`SECURITY.md` now states targets a frozen project can hold, rather than the 48
-hours and 30 days it promised before. 0.8.x takes critical security and
+`SECURITY.md` states targets a frozen project can hold, rather than the 48
+hours and 30 days it promised before. 1.0.x takes critical security and
 verification fixes; anything requiring a semantics or digest change will be
 documented rather than shipped, because correcting it would invalidate every
 artifact written against the current format.
@@ -103,7 +130,7 @@ The licence does not expire when maintenance does. Apache-2.0, unchanged.
 
 ### Versions
 
-`calybris-core` and `calybris` are both 0.8.0. 0.6.1 was crates.io only and left
+`calybris-core` and `calybris` are both 1.0.0. 0.6.1 was crates.io only and left
 PyPI a release behind; this release ends that split.
 
 ## [0.6.1] - 2026-09-08

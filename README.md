@@ -17,13 +17,18 @@
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
 
-> **0.8.0 is the last feature release of this core.**
+> **1.0.0 is the last feature release of this core.**
 >
-> The engine is complete for what it was built to do, and its decision semantics,
-> digest formats and replay behaviour are frozen — documented in
-> [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and pinned by
-> `tests/decision_semantics.rs`. Critical security and verification defects may
-> still ship as 0.8.x; see [SECURITY.md](SECURITY.md) for what that covers.
+> The version number is the promise, not a boast: the public API is stable, and
+> anything that would break it would be a 2.0 that is not coming. A frozen `0.x`
+> would have been a contradiction — `0.x` means *expect breaking changes*, and
+> there are none left to expect.
+>
+> The decision semantics, digest formats and replay behaviour are frozen too,
+> documented in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and
+> pinned by `tests/decision_semantics.rs`. Critical security and verification
+> defects may still ship as 1.0.x; see [SECURITY.md](SECURITY.md) and
+> [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for exactly what that covers.
 >
 > Work continues above this core, in a separate commercial product. That product
 > does not change what is here, and nothing here is held back for it: a frozen

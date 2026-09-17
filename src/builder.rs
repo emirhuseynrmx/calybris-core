@@ -217,6 +217,7 @@ impl ModelBuilder {
 
 /// Errors from [`PolicyBuilder::build`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum BuildError {
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
@@ -232,6 +233,7 @@ pub enum BuildError {
 /// translating reserved identifiers or noncanonical flags into unrelated
 /// legacy policy errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TrustedBuildError {
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),

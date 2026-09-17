@@ -52,6 +52,7 @@ impl Default for EngineConfig {
 
 /// Validation errors for [`EngineConfig`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("{field} = {value} exceeds max {max}")]
     OutOfRange {
