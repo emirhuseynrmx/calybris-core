@@ -9,7 +9,11 @@ release `0.8.0` would have said the opposite of what is true.
 ## What is stable
 
 Everything public in `calybris-core` and `calybris`: types, functions, constants,
-feature flags, the JSON shapes of artifacts, and the digest formats. The digest
+feature flags, the JSON shapes of artifacts, and the digest formats. `calybris-ffi`
+is covered too: `CALYBRIS_ABI_VERSION`, every `#[repr(C)]` layout, the status
+codes and the function signatures. Its struct layouts are a separate frozen thing
+from the digest layouts, and a change to either would need a new version number
+this line does not issue. The digest
 formats are written out byte by byte in [SPECIFICATION.md](SPECIFICATION.md),
 and `tests/specification.rs` runs that document against the implementation.
 
@@ -73,7 +77,8 @@ is what pinning `Cargo.lock` and publishing a source archive is for.
 | `loom-model` | **no** | test-only dependency switch, not part of the API |
 
 `--no-default-features` is supported and tested. `SECURITY.md` asks a reviewer to
-run it, so it has to work.
+run it, so it has to work — which is why every example that needs `serde` or
+`provenance` declares it in `required-features` rather than relying on a default.
 
 ## Artifacts written by older versions
 

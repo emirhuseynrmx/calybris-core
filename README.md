@@ -301,6 +301,7 @@ third party can verify a decision trail without running your engine.
 |-------|--------|-------|
 | **`calybris-core` (Rust)** | **Stable** | crates.io: this is the contract |
 | **`calybris` (Python)** | **Production-capable / stable API** | Decisions, policy comparison, shared budget, signed policy provenance, state proofs, receipts, keyed WAL, anchors and replay |
+| **`calybris-ffi` (C)** | **Stable ABI** | The decision path over a stable C ABI, for callers that are neither Rust nor Python. Adds no behaviour; a C caller decides the same way and recomputes the same digests. See [calybris-ffi/README.md](calybris-ffi/README.md). |
 | **`calybris_commerce` (Python)** | Experimental | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
 
 Rust owns correctness and replay semantics. The core Python package exposes the
@@ -386,6 +387,7 @@ inventory/capacity freshness, and an external audit.
 |-----|----------|
 | [docs/SPECIFICATION.md](docs/SPECIFICATION.md) | Every digest layout, byte by byte — what a second implementation would be written against |
 | [docs/INVARIANTS.md](docs/INVARIANTS.md) | Every property the crate promises, with the test that fails when it stops being true |
+| [fuzz/README.md](fuzz/README.md) | The fuzz targets, what would count as a finding in each, and why they only run on Linux |
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | What 1.0.x may and may never contain, and the defects that will be documented rather than fixed |
 | [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) | Decision API, units, identities, policy comparison and its limits |
 | [docs/AGENT_BUDGET.md](docs/AGENT_BUDGET.md) | Shared budget, reservations, corrections, lifecycle report, support boundary |
