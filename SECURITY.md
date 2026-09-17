@@ -7,9 +7,14 @@ Subject: `[SECURITY] Calybris Core — <brief description>`
 
 | Milestone | Target |
 |-----------|--------|
-| Acknowledgment | 48 hours |
-| Severity assessment | 7 days |
-| Fix or mitigation plan | 30 days (critical), 90 days (medium) |
+| Acknowledgment | 7 days |
+| Severity assessment | 30 days |
+| Fix for a critical defect in 0.8.x | best effort, no committed date |
+
+These are the targets of one person maintaining a project that has stopped taking
+features. They are deliberately slower than the ones this file used to state,
+which were 48 hours and 30 days: a frozen project cannot keep them, and a
+security promise that is not kept is worse than one that was never made.
 
 Please include: affected version, reproduction steps, impact on invariants I1–I10 (see `docs/SECURITY_INVARIANTS.md`), and suggested fix if any.
 
@@ -25,11 +30,23 @@ Please include: affected version, reproduction steps, impact on invariants I1–
 
 ## Supported Versions
 
+0.8.0 is the last release that adds features. Development continues in a separate
+product built on this core, not in this repository.
+
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | Security fixes |
-| 0.4.x   | Best effort |
-| < 0.4   | No |
+| 0.8.x   | Critical security and verification defects only |
+| < 0.8   | No |
+
+"Critical" means a defect that lets a decision, a receipt or a WAL be forged,
+replayed incorrectly, or verified as valid when it is not. Anything that would
+require changing the decision semantics or a digest format will not ship: those
+are frozen, and correcting them would invalidate every artifact written against
+them. Such a defect would be documented here with a description and a workaround
+rather than silently fixed.
+
+The licence does not expire when maintenance does. Apache-2.0 permits a fork, and
+a fork is the supported answer to a need this repository will not meet.
 
 ## Security Properties (OSS)
 

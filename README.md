@@ -17,6 +17,21 @@
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
 
+> **0.8.0 is the last feature release of this core.**
+>
+> The engine is complete for what it was built to do, and its decision semantics,
+> digest formats and replay behaviour are frozen — documented in
+> [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and pinned by
+> `tests/decision_semantics.rs`. Critical security and verification defects may
+> still ship as 0.8.x; see [SECURITY.md](SECURITY.md) for what that covers.
+>
+> Work continues above this core, in a separate commercial product. That product
+> does not change what is here, and nothing here is held back for it: a frozen
+> engine that has been deliberately weakened would be worth less to everyone,
+> including its author.
+>
+> Apache-2.0, unchanged. Fork it.
+
 Given a frozen catalog, a policy snapshot, and a typed request, Calybris returns
 one action plus an audit bundle that replays to the same answer.
 

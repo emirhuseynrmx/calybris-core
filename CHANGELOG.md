@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-17
+
+The last feature release of this core, and everything in it is something the
+crate could not gain once it stopped changing.
+
+### The gate chain and the pricing each have one definition
+
+Both were written twice — once in the prescribe loop, once in
+`utility_for_model` — and an explanation surface would have made it three. An
+ordered predicate chain that exists in two places agrees until one of them is
+edited. `first_failed_gate` returns a field-less `GateKind`, so the hot loop pays
+for a discriminant rather than for measured values, and `Pricing` holds the
+loop-invariant half of the economic calculation. Behaviour is unchanged: the
+golden and conformance vectors pin the decision digests and still pass.
+
+### Per-candidate explanation
+
+`PolicySnapshot::explain` reports a verdict for every candidate: the gate it
+failed with the two numbers that gate compared, or the terms behind its utility.
+Until now the trace held counts, so a caller could say "three candidates failed
+on latency" but not "candidate A failed on latency at 900 ms against a 300 ms
+cap" — which is the sentence anyone actually needs. It shares the gates and the
+arithmetic with `prescribe`, and `tests/explain_agreement.rs` holds them to it,
+including a property test that they never disagree on any request.
+
+`prescribe_with_trace` is unchanged and remains allocation-free; `explain` is the
+slow path and the only one that allocates.
+
+### Outcomes, and how a choice was made
+
+The kernel decided and forgot. `outcome::Outcome` gives the downstream half a
+shape: whether a recommendation was applied, abandoned or still running, what it
+actually cost, whether a person overrode it, and corrections as revisions that
+supersede rather than overwrite. It binds by decision digest rather than by
+sequence, so the same request re-run under a different policy cannot inherit an
+outcome that was not about it.
+
+**The kernel does not learn from these.** It stores no history and no decision
+changes because of a record.
+
+`Selection` carries the part that cannot be added later. A learner reading a
+decision log only ever observes the action that was taken, and estimating the
+others is honest only when the probability of each choice was written down at the
+time — which is unrecoverable afterwards. Validation refuses the two shapes that
+would quietly poison such an analysis: a deterministic strategy claiming it might
+have chosen otherwise, and an observed choice recording no chance of happening.
+`Applied` with nothing measured is refused for the same reason.
+
+### Frozen semantics
+
+`docs/DECISION_SEMANTICS.md` states the units, the ceilings, the gate order, the
+tie-break, and the difference between the request's risk and the candidate's risk
+ceiling — the last of which is the field most likely to be mislabelled as a
+supplier's failure probability, which it is not. `tests/decision_semantics.rs`
+pins every claim in it.
+
+Two ceilings worth naming here: latency is `u32` milliseconds and so stops a
+little under 49.7 days, and `provider_id` is capped at 63 by the `u64` mask,
+refused at policy construction rather than silently at decision time.
+
+### Maintenance
+
+`SECURITY.md` now states targets a frozen project can hold, rather than the 48
+hours and 30 days it promised before. 0.8.x takes critical security and
+verification fixes; anything requiring a semantics or digest change will be
+documented rather than shipped, because correcting it would invalidate every
+artifact written against the current format.
+
+The licence does not expire when maintenance does. Apache-2.0, unchanged.
+
+### Versions
+
+`calybris-core` and `calybris` are both 0.8.0. 0.6.1 was crates.io only and left
+PyPI a release behind; this release ends that split.
+
 ## [0.6.1] - 2026-09-08
 
 No code change, and **crates.io only**. `calybris-core` 0.6.1 behaves exactly as
