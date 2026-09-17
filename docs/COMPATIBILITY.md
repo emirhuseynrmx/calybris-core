@@ -83,6 +83,18 @@ the format it names. Nothing in 1.0.x changes what an existing tag means, and
 1.0.x introduces no new tag: a different format would be a different tag, and
 that is not what this line is for.
 
+This is not only a promise. `tests/fixtures/caly_proof_v1.json` and
+`caly_proof_conformance_v1.json` were written during 0.5.5 and have never been
+re-pinned since — `git log` on either file shows one commit. Today's code
+reproduces them byte for byte (CAL-I025 through CAL-I028 in
+[INVARIANTS.md](INVARIANTS.md)), which is the same thing as saying a 0.5-era
+artifact still verifies here. If a release ever needs to edit one of those
+files, that is the release that broke compatibility, and the fixture is the
+evidence rather than the obstacle.
+
+`calyidn1`, `calysel1` and `calyout1` are new in 1.0.0, so they have no history
+to be compatible with. `calybris_outcome_v1.json` is where theirs starts.
+
 ## If you need something this will not do
 
 Fork it. Apache-2.0 does not expire when maintenance does, and a fork is the
