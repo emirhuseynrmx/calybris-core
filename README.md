@@ -19,10 +19,10 @@ the decision verifiable afterwards.**
 
 > **1.0.0 is the last feature release of this core.**
 >
-> The version number is the promise, not a boast: the public API is stable, and
-> anything that would break it would be a 2.0 that is not coming. A frozen `0.x`
-> would have been a contradiction — `0.x` means *expect breaking changes*, and
-> there are none left to expect.
+> The version number is the promise, not a boast. `0.x` means *expect breaking
+> changes*, and there are none left to expect, so a frozen `0.x` would have said
+> the opposite of what is true. 1.0.0 closes the current feature line; releases
+> after it are reserved for correctness, security and compatibility work.
 >
 > The decision semantics, digest formats and replay behaviour are frozen too,
 > documented in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and

@@ -534,10 +534,13 @@ class Observation:
 class Outcome:
     """One decision, what was done about it, and what came back.
 
-    Bound to the decision by digest, so the same request re-run under a different
-    policy cannot inherit an outcome that was not about it.
+    Bound to the policy, the input and the decision together: a decision digest
+    alone would let an outcome logged before a price change pass as one logged
+    after, and these records exist to support causal claims.
     """
 
+    policy_digest: str
+    input_digest: str
     decision_digest: str
     request_sequence: int
     observed_at_micros: int
@@ -545,24 +548,41 @@ class Outcome:
     disposition: str
     strategy: str
     acted_model_id: int
-    propensity_bps: int
+    propensity_bps: int | None
     observation: Observation
     digest: str
 
     @staticmethod
     def applied(
+        snapshot: PolicySnapshot,
+        input: KernelInput,
         decision: KernelDecision,
         observed_at_micros: int,
         observation: Observation,
     ) -> Outcome: ...
     @staticmethod
+    def abandoned(
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        observed_at_micros: int,
+    ) -> Outcome: ...
+    @staticmethod
     def chosen_otherwise(
+        snapshot: PolicySnapshot,
+        input: KernelInput,
         decision: KernelDecision,
         observed_at_micros: int,
         observation: Observation,
         acted_model_id: int,
-        propensity_bps: int,
+        propensity_bps: int | None = None,
         human: bool = False,
     ) -> Outcome: ...
     def validate(self) -> None: ...
+    def validate_against(
+        self,
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+    ) -> None: ...
     def follows(self, decision: KernelDecision) -> bool: ...

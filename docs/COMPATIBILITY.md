@@ -32,8 +32,8 @@ traded for a fix.
 - A change to the gate order, the tie-break, the utility formula, or any unit
 - A new variant in `KernelAction`, `KernelReason`, `GateKind`, `CandidateVerdict`,
   `Disposition` or `SelectionStrategy` — these are the decision contract, and they
-  are exhaustive on purpose so that adding one is impossible without a major
-  version nobody is going to publish
+  are exhaustive on purpose, so adding one is a breaking change and this line
+  does not make breaking changes
 - A new field in `KernelInput`, `KernelModel` or `KernelDecision` — callers build
   these with struct literals, so a field is a breaking change, and they are
   hashed, so a field is a digest change
@@ -68,9 +68,9 @@ run it, so it has to work.
 
 Digest tags are versioned (`calypol1`, `calyinp1`, `calydcn1`, `calyldg1`,
 `calyout1`, `calysel1`). An artifact written by an earlier release verifies under
-the format it names. Nothing in 1.0.x changes what an existing tag means; a
-hypothetical new format would take a new tag, and would arrive with a major
-version that is not planned.
+the format it names. Nothing in 1.0.x changes what an existing tag means, and
+1.0.x introduces no new tag: a different format would be a different tag, and
+that is not what this line is for.
 
 ## If you need something this will not do
 

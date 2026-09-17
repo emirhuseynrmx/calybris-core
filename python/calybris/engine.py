@@ -79,6 +79,20 @@ class CalybrisEngine:
             raise InputValidationError(str(exc)) from exc
         return decision, DecisionTrace.model_validate(dict(trace))
 
+    def explain(self, request: _core.KernelInput) -> list[_core.CandidateExplanation]:
+        """Evaluate ``request`` and return one row per candidate in the catalog.
+
+        Every candidate is reported, eligible or not: which gate turned it away,
+        what was measured against what limit, and for the ones that survived, the
+        terms that add up to the utility the kernel ranked on. The rows come from
+        the same evaluation that produced the decision, so nothing here is a
+        second opinion about it.
+        """
+        try:
+            return self._policy.explain(request)
+        except ValueError as exc:
+            raise InputValidationError(str(exc)) from exc
+
     def utility_for_model(
         self,
         request: _core.KernelInput,

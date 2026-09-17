@@ -13,9 +13,9 @@ crate could not gain once it stopped changing.
 ### Why 1.0.0 and not 0.8.0
 
 The number is a commitment, not a boast. `0.x` means *expect breaking changes*,
-and there are none left to expect: the public API is stable and a change that
-broke it would be a 2.0 that is not coming. A frozen `0.8.0` would have said the
-opposite of what is true.
+and there are none left to expect: the public API is stable, and this release
+closes the feature line rather than pausing it. A frozen `0.8.0` would have said
+the opposite of what is true.
 
 Calling it 1.0.0 also closes the window in which breaking changes are free, so
 two things happened before the number moved.

@@ -112,10 +112,12 @@ pub fn certify_snapshot(
     let conservation_balanced =
         conservation_status_for_snapshot(snapshot) == ConservationStatus::Balanced;
     let totals = snapshot_totals(snapshot);
+    // Any failure to total the ledger is reported as not representable. A
+    // certificate that says less is recoverable; a panic in a library is not, and
+    // this is the one place a future variant could reach one.
     let (total_initial, total_committed, totals_representable) = match totals {
         Ok((initial, committed)) => (initial, committed, true),
-        Err(ConservationStatus::AggregateOverflow) => (0, 0, false),
-        Err(other) => unreachable!("snapshot_totals only returns AggregateOverflow: {other}"),
+        Err(_) => (0, 0, false),
     };
     FinancialCertificate {
         snapshot_version: snapshot.version,

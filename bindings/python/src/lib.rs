@@ -1047,7 +1047,11 @@ fn conservation_to_dict(py: Python<'_>, status: ConservationStatus) -> PyResult<
 /// string and a set of optional fields, because a caller filtering a list on
 /// `status == "rejected"` reads better than one matching on a tag, and the fields
 /// that do not apply are `None` rather than zero.
-#[pyclass(name = "CandidateExplanation", module = "calybris._core")]
+#[pyclass(
+    name = "CandidateExplanation",
+    module = "calybris._core",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 struct PyCandidateExplanation {
     /// The candidate this describes.
@@ -1160,7 +1164,7 @@ impl From<calybris_core_rs::kernel::CandidateExplanation> for PyCandidateExplana
 ///
 /// Every field is optional because a pipeline learns them at different times, and
 /// an absent measurement must never be readable as a zero.
-#[pyclass(name = "Observation", module = "calybris._core")]
+#[pyclass(name = "Observation", module = "calybris._core", from_py_object)]
 #[derive(Clone, Default)]
 struct PyObservation {
     #[pyo3(get, set)]
@@ -1216,7 +1220,7 @@ impl From<PyObservation> for Observation {
 /// do without: only the taken action has an observed outcome, and estimating the
 /// others is honest only when the probability of each choice was recorded at the
 /// time. `validate()` refuses the shapes that would quietly poison that analysis.
-#[pyclass(name = "Outcome", module = "calybris._core")]
+#[pyclass(name = "Outcome", module = "calybris._core", skip_from_py_object)]
 #[derive(Clone)]
 struct PyOutcome {
     inner: Outcome,
@@ -1225,33 +1229,78 @@ struct PyOutcome {
 #[pymethods]
 impl PyOutcome {
     /// The ordinary case: the kernel ranked, the caller followed, work completed.
+    ///
+    /// The snapshot and the input are required, not optional: the record binds to
+    /// the world that produced the decision, and neither can be recovered from the
+    /// decision alone.
     #[staticmethod]
     fn applied(
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
         decision: &PyKernelDecision,
         observed_at_micros: u64,
         observation: PyObservation,
     ) -> Self {
         Self {
-            inner: Outcome::applied(&decision.inner, observed_at_micros, observation.into()),
+            inner: Outcome::applied(
+                &snapshot.inner,
+                &KernelInput::from(input),
+                &decision.inner,
+                observed_at_micros,
+                observation.into(),
+            ),
+        }
+    }
+
+    /// A record for a recommendation nobody acted on.
+    ///
+    /// It takes no observation, because there is nothing to have measured.
+    #[staticmethod]
+    fn abandoned(
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+        observed_at_micros: u64,
+    ) -> Self {
+        Self {
+            inner: Outcome::abandoned(
+                &snapshot.inner,
+                &KernelInput::from(input),
+                &decision.inner,
+                observed_at_micros,
+            ),
         }
     }
 
     /// A record for a candidate other than the ranked winner.
     ///
     /// `propensity_bps` is the probability, in basis points, with which the
-    /// caller's mechanism would have made this choice. It is refused at zero: an
-    /// observed choice cannot have had no chance of happening.
+    /// caller's mechanism would have made this choice. It is refused at zero — an
+    /// observed choice cannot have had no chance of happening — and it must be
+    /// `None` when `human` is set, because a person's reasons are not a
+    /// distribution and a number there would make the record look causally usable
+    /// when it is not.
     #[staticmethod]
-    #[pyo3(signature = (decision, observed_at_micros, observation, acted_model_id, propensity_bps, human=false))]
+    #[pyo3(signature = (snapshot, input, decision, observed_at_micros, observation, acted_model_id, propensity_bps=None, human=false))]
+    #[allow(clippy::too_many_arguments)]
     fn chosen_otherwise(
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
         decision: &PyKernelDecision,
         observed_at_micros: u64,
         observation: PyObservation,
         acted_model_id: u32,
-        propensity_bps: u16,
+        propensity_bps: Option<u16>,
         human: bool,
     ) -> PyResult<Self> {
-        let mut inner = Outcome::applied(&decision.inner, observed_at_micros, observation.into());
+        let rust_input = KernelInput::from(input);
+        let mut inner = Outcome::applied(
+            &snapshot.inner,
+            &rust_input,
+            &decision.inner,
+            observed_at_micros,
+            observation.into(),
+        );
         inner.selection = Selection {
             strategy: if human {
                 SelectionStrategy::Human
@@ -1262,19 +1311,31 @@ impl PyOutcome {
             propensity_bps,
         };
         inner
-            .validate()
+            .validate_against(&snapshot.inner, &rust_input, &decision.inner)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 
+    /// The policy and catalog in force when the decision was made, as hex.
+    #[getter]
+    fn policy_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&self.inner.identity.policy_digest)
+    }
+
+    /// The request as it was asked, as hex.
+    #[getter]
+    fn input_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&self.inner.identity.input_digest)
+    }
+
     #[getter]
     fn decision_digest(&self) -> String {
-        calybris_core_rs::digest::digest_to_hex(&self.inner.decision_digest)
+        calybris_core_rs::digest::digest_to_hex(&self.inner.identity.decision_digest)
     }
 
     #[getter]
     fn request_sequence(&self) -> u64 {
-        self.inner.request_sequence
+        self.inner.identity.request_sequence
     }
 
     #[getter]
@@ -1334,8 +1395,11 @@ impl PyOutcome {
         self.inner.selection.acted_model_id
     }
 
+    /// `None` for a human choice, where no probability exists to record. A record
+    /// carrying `None` belongs outside an off-policy estimate, not defaulted into
+    /// one.
     #[getter]
-    fn propensity_bps(&self) -> u16 {
+    fn propensity_bps(&self) -> Option<u16> {
         self.inner.selection.propensity_bps
     }
 
@@ -1360,13 +1424,35 @@ impl PyOutcome {
     }
 
     /// Raises `ValueError` on a record a later analysis would misread.
+    ///
+    /// This checks the record against itself. `validate_against` is the stronger
+    /// check, and the one to use wherever the decision is still on hand.
     fn validate(&self) -> PyResult<()> {
         self.inner
             .validate()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
-    /// Whether this record describes `decision`.
+    /// Everything `validate` checks, plus everything that needs the decision: the
+    /// three digests and the sequence number agree, a rejection was not acted on,
+    /// the ranked winner is what `maximise_utility` acted on, and the acted-on
+    /// model is in this policy's catalog.
+    fn validate_against(
+        &self,
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+    ) -> PyResult<()> {
+        self.inner
+            .validate_against(&snapshot.inner, &KernelInput::from(input), &decision.inner)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// The cheap check: does this record name the same decision?
+    ///
+    /// Compares the decision digest and the sequence number only, for scanning a
+    /// log where the policy and input are not at hand. Use `validate_against` to
+    /// establish that the record is actually valid for that decision.
     fn follows(&self, decision: &PyKernelDecision) -> bool {
         self.inner.follows(&decision.inner)
     }
