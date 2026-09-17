@@ -53,10 +53,10 @@ pub mod finance;
 pub mod instrument;
 /// Allocation-free prescriptive decision kernel.
 pub mod kernel;
-/// Snapshot persistence and crash recovery.
-#[cfg(feature = "serde")]
 /// Decision outcomes: what happened after a decision, and how it was chosen.
 pub mod outcome;
+/// Snapshot persistence and crash recovery.
+#[cfg(feature = "serde")]
 pub mod persistence;
 
 pub mod proof;

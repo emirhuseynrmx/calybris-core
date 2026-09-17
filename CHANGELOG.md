@@ -53,6 +53,32 @@ would quietly poison such an analysis: a deterministic strategy claiming it migh
 have chosen otherwise, and an observed choice recording no chance of happening.
 `Applied` with nothing measured is refused for the same reason.
 
+### The Python side gets both
+
+`PolicySnapshot.explain` returns a list of `CandidateExplanation`, each carrying a
+`status`, the gate that refused it with the two numbers that gate compared, and
+the terms behind its utility. `Outcome`, `Observation` and the selection fields
+are exposed with the same validation the Rust side applies, so a record written
+from Python is a record the Rust side would have accepted.
+
+This is not a convenience. The engine is Rust and anything that learns from these
+records will be Python, and a record shape that exists on only one side of that
+line is a record nobody writes.
+
+The Python enums are strings — `eligible`, `rejected`, `over_budget`,
+`non_positive_utility` for a verdict; `applied`, `abandoned`, `in_flight` for a
+disposition; `maximise_utility`, `explore`, `human` for a strategy — because
+filtering a list on a string reads better than matching on a tag, and an unknown
+one is refused rather than coerced. Fields that do not apply are `None`, never
+zero.
+
+### Fixed before the freeze
+
+`persistence` lost its `serde` feature gate while `outcome` was being added to
+`lib.rs`, which broke `--no-default-features` — the command `SECURITY.md` tells
+an external reviewer to run first. It is gated again, and all three feature
+combinations build and test clean.
+
 ### Frozen semantics
 
 `docs/DECISION_SEMANTICS.md` states the units, the ceilings, the gate order, the
