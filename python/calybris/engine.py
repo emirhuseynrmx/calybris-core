@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from calybris import _core
 from calybris.errors import InputValidationError, VerificationError
 from calybris.types import AuditBundle, Decision, DecisionTrace, ProofEnvelope, VerifyResult
+
+if TYPE_CHECKING:  # `_core` is only named in annotations, and the package __init__
+    # imports this module before it binds `_core`. The same reasoning as in
+    # decisions.py: postponed annotations mean the name is never evaluated, so a
+    # run-time import would only close a calybris -> engine -> calybris loop.
+    from calybris import _core
 
 
 class CalybrisEngine:

@@ -126,6 +126,7 @@ def test_the_source_archive_omits_nothing_tracked() -> None:
     else is an omission, and this is where it surfaces.
     """
     omissions = release_contract.source_manifest_omissions(Path(__file__).parents[2])
-    assert omissions == [], "the source archive would omit tracked files:\n  " + "\n  ".join(
-        f"{name}: {reason}" for name, reason in omissions
-    )  # skipcq: BAN-B101
+    # The report is built first so the assertion is one line: the suppression
+    # applies to the line an assert starts on, not the line it ends on.
+    report = "\n  ".join(f"{name}: {reason}" for name, reason in omissions)
+    assert omissions == [], f"the source archive would omit:\n  {report}"  # skipcq: BAN-B101
