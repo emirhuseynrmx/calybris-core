@@ -1,0 +1,21 @@
+{
+  "version": 9223372036854775817,
+  "tenants": [
+    {
+      "tenant_id": "acme",
+      "initial_microcents": 1000000,
+      "remaining_microcents": 300000,
+      "reserved_microcents": 0,
+      "committed_microcents": 700000
+    },
+    {
+      "tenant_id": "globex",
+      "initial_microcents": 4000000,
+      "remaining_microcents": 4000000,
+      "reserved_microcents": 0,
+      "committed_microcents": 0
+    }
+  ],
+  "active_reservations": 0,
+  "wal_high_watermark": 4
+}

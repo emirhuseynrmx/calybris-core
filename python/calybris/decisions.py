@@ -203,6 +203,16 @@ class DecisionEngine:
             proof=self._engine.verified_audit_bundle(native, raw),
         )
 
+    def explain(self, request: DecisionRequest) -> list[_core.CandidateExplanation]:
+        """Return one row per candidate: why it was turned away, or what it scored.
+
+        The rows come from the same kernel evaluation :meth:`decide` runs, so they
+        cannot disagree with the decision. ``model_id`` on each row is the
+        ``candidate_id`` this adapter was built with.
+        """
+        request = DecisionRequest.model_validate(request.model_dump())
+        return self._engine.explain(_native_input(request))
+
     def verify(self, request: DecisionRequest, result: DecisionResult) -> bool:
         """Recompute and compare the entire result using this trusted engine/input."""
         return self.decide(request) == result

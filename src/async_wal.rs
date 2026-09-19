@@ -27,6 +27,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Async WAL error types.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AsyncWalError {
     #[error("WAL I/O error: {0}")]
     Io(#[from] std::io::Error),

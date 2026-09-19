@@ -15,6 +15,7 @@ from typing import Any, Literal
 ALL_PROVIDERS: int
 ALL_REGIONS: int
 MICROCENTS_PER_CENT: int
+FULL_PROBABILITY_BPS: int
 BUILD_COMMIT_SHA: str
 BUILD_TREE_SHA: str
 BUILD_SOURCE_DIGEST: str
@@ -186,6 +187,7 @@ class PolicySnapshot:
     @property
     def latency_penalty_microunits_per_ms(self) -> int: ...
     def prescribe(self, input: KernelInput) -> KernelDecision: ...
+    def explain(self, input: KernelInput) -> list[CandidateExplanation]: ...
     def prescribe_with_trace(
         self, input: KernelInput
     ) -> tuple[KernelDecision, dict[str, Any]]: ...
@@ -492,3 +494,97 @@ def plan_recovery(
 ) -> dict[str, Any]: ...
 
 def public_key_from_signing_key(signing_key_bytes: bytes) -> bytes: ...
+
+class CandidateExplanation:
+    """One candidate's place in a decision.
+
+    ``status`` is one of ``eligible``, ``rejected``, ``over_budget`` or
+    ``non_positive_utility``. The fields that do not apply to a status are
+    ``None`` rather than zero, because an absent number and a zero are different
+    facts.
+    """
+
+    model_id: int
+    model_index: int
+    status: str
+    gate: str | None
+    measured: int | None
+    limit: int | None
+    cost_microunits: int | None
+    quality_adjusted: int | None
+    risk_penalty: int | None
+    latency_penalty: int | None
+    utility: int | None
+
+class Observation:
+    """What was measured after a decision was acted on."""
+
+    realized_cost_microunits: int | None
+    realized_latency_ms: int | None
+    succeeded: bool | None
+
+    def __init__(
+        self,
+        realized_cost_microunits: int | None = None,
+        realized_latency_ms: int | None = None,
+        succeeded: bool | None = None,
+    ) -> None: ...
+    def is_empty(self) -> bool: ...
+
+class Outcome:
+    """One decision, what was done about it, and what came back.
+
+    Bound to the policy, the input and the decision together: a decision digest
+    alone would let an outcome logged before a price change pass as one logged
+    after, and these records exist to support causal claims.
+    """
+
+    policy_digest: str
+    input_digest: str
+    decision_digest: str
+    identity_digest: str
+    selection_digest: str
+    request_sequence: int
+    observed_at_micros: int
+    revision: int
+    disposition: str
+    strategy: str
+    acted_model_id: int
+    propensity_bps: int | None
+    observation: Observation
+    digest: str
+
+    @staticmethod
+    def applied(
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        observed_at_micros: int,
+        observation: Observation,
+    ) -> Outcome: ...
+    @staticmethod
+    def abandoned(
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        observed_at_micros: int,
+    ) -> Outcome: ...
+    @staticmethod
+    def chosen_otherwise(
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+        observed_at_micros: int,
+        observation: Observation,
+        acted_model_id: int,
+        propensity_bps: int | None = None,
+        human: bool = False,
+    ) -> Outcome: ...
+    def validate(self) -> None: ...
+    def validate_against(
+        self,
+        snapshot: PolicySnapshot,
+        input: KernelInput,
+        decision: KernelDecision,
+    ) -> None: ...
+    def follows(self, decision: KernelDecision) -> bool: ...

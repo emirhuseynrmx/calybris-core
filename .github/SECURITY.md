@@ -13,6 +13,10 @@ See [SECURITY.md](../SECURITY.md) in the repository root for the full policy.
 
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | Security fixes |
-| 0.4.x   | Best effort |
-| < 0.4   | No |
+| 1.x (latest) | Yes |
+| < 1.0   | No |
+
+Security fixes land in the latest 1.x release. See the root
+[SECURITY.md](../SECURITY.md) for what a fix may and may not change, and
+[docs/COMPATIBILITY.md](../docs/COMPATIBILITY.md) for the rules every 1.x release
+follows.

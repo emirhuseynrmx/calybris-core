@@ -12,6 +12,7 @@ pub const PROOF_ENVELOPE_VERSION: u16 = 1;
 
 /// Structural validation failure for a supposedly complete proof envelope.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProofEnvelopeValidationError {
     #[error("unsupported proof envelope version: {0}")]
     ProofVersion(u16),

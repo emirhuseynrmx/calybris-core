@@ -24,6 +24,7 @@ pub enum VerifyResult {
 
 /// Error decoding a hex-encoded digest from an [`AuditBundle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DigestDecodeError {
     /// A non-hex character was found.
     InvalidHexCharacter { digit: u8, index: usize },
@@ -97,6 +98,7 @@ pub const AUDIT_CREATED_BY: &str = "calybris";
 
 /// Canonical metadata or digest-shape violation in a persisted audit artifact.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum AuditBundleValidationError {
     #[error("unsupported audit schema_version: {0}")]
     SchemaVersion(String),

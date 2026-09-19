@@ -244,3 +244,204 @@ jobs:
           python bindings/python/examples/orion_market.py
           python bindings/python/examples/swiftbite_routing.py
           python bindings/python/examples/novamart_benchmark.py --orders 1000
+
+  fuzz:
+    name: Fuzz targets (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Every target is built, so a target that stops compiling fails here even
+      # if its short run finds nothing.
+      - name: Build every target
+        run: |
+          for target in snapshot_decode receipt_decode wal_decode \
+                        outcome_decode policy_decode kernel_decide; do
+            cargo fuzz build "$target"
+          done
+
+      # Seeded from fuzz/seeds, because an unseeded run spends its whole budget
+      # rediscovering the document format. tests/fuzz_seeds.rs checks that each
+      # seed really decodes as its target expects.
+      - name: Seed the corpora
+        run: |
+          for dir in fuzz/seeds/*/; do
+            target=$(basename "$dir")
+            mkdir -p "fuzz/corpus/$target"
+            cp "$dir"* "fuzz/corpus/$target/"
+          done
+
+      - name: Run each target
+        run: |
+          for target in snapshot_decode receipt_decode wal_decode \
+                        outcome_decode policy_decode kernel_decide; do
+            cargo fuzz run "$target" -- -max_total_time=60 -print_final_stats=1
+          done
+
+      - name: Keep any crash for inspection
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  determinism:
+    name: Determinism (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The layouts are declared little-endian. A big-endian host is the
+          # only way to find out whether the code says so or merely inherits it.
+          - name: s390x (big-endian)
+            target: s390x-unknown-linux-gnu
+          - name: aarch64
+            target: aarch64-unknown-linux-gnu
+          - name: i686 (32-bit)
+            target: i686-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      # The pinned vectors are the determinism claim: these tests assert exact
+      # hex, so passing on another architecture is the same statement as
+      # "the digests do not depend on the machine".
+      # `full` rather than --all-features: the one feature outside it is
+      # loom-model, a test-only switch whose `generator` dependency has no
+      # s390x or i686 support and has nothing to do with digests.
+      #
+      # The WAL lock directory falls back to $HOME, which the cross container
+      # does not let a test write, so it is pointed at /tmp explicitly.
+      - name: Digest and semantics vectors
+        env:
+          CROSS_CONTAINER_OPTS: -e CALYBRIS_WAL_LOCK_DIR=/tmp/calybris-wal-locks
+        run: |
+          cross test --target ${{ matrix.target }} --features full \
+            --test specification \
+            --test golden_caly_proof \
+            --test golden_outcome \
+            --test conformance_caly_proof \
+            --test conformance_proof_surfaces \
+            --test decision_semantics \
+            --test outcome_contract
+
+  reproducible:
+    name: Reproducible package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.85.0
+
+      # `cargo package` twice from the same commit must produce the same bytes.
+      # If it does not, the published artifact is not a function of the source,
+      # and nobody downstream can check that what is on crates.io is what is in
+      # this repository.
+      - name: Package twice and compare
+        run: |
+          cargo package --locked --allow-dirty --no-verify
+          mkdir -p /tmp/first
+          cp target/package/*.crate /tmp/first/
+          first=$(sha256sum /tmp/first/*.crate | cut -d' ' -f1)
+
+          rm -rf target/package
+          cargo package --locked --allow-dirty --no-verify
+          second=$(sha256sum target/package/*.crate | cut -d' ' -f1)
+
+          echo "first  $first"
+          echo "second $second"
+          if [ "$first" != "$second" ]; then
+            echo "::error::cargo package is not reproducible from the same source"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      # The wheel stamps a source digest derived from the git tree. Two builds of
+      # the same tree must stamp the same one, or the provenance field is
+      # decoration. Rebuilt from scratch, so nothing is carried over in cache.
+      - name: The stamped source digest is a function of the source
+        run: |
+          # Wheels go outside the checkout. Inside it they are untracked files,
+          # and the second build would see the first wheel and stamp itself
+          # dirty — which would be the check failing on its own output.
+          python -m pip install --quiet maturin
+          python -m maturin build --release --out "$RUNNER_TEMP/first"
+          # With dependencies: importing calybris._core runs the package
+          # __init__, which needs pydantic.
+          python -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/first/*.whl
+          first=$(python -c "import calybris._core as c; print(c.BUILD_SOURCE_DIGEST)")
+
+          rm -rf target/release/build
+          python -m maturin build --release --out "$RUNNER_TEMP/second"
+          python -m pip install --quiet --force-reinstall --no-deps "$RUNNER_TEMP"/second/*.whl
+          second=$(python -c "import calybris._core as c; print(c.BUILD_SOURCE_DIGEST)")
+
+          echo "first  $first"
+          echo "second $second"
+          if [ "$first" != "$second" ]; then
+            echo "::error::the stamped source digest is not stable across builds"
+            exit 1
+          fi
+          if [ -z "$first" ]; then
+            echo "::error::no source digest was stamped at all"
+            exit 1
+          fi
+
+      # A clean checkout must report itself clean. If this ever says dirty, the
+      # dirty flag is not measuring anything and a release build's identity
+      # check would pass on a modified tree.
+      - name: A clean checkout stamps clean
+        run: |
+          dirty=$(python -c "import calybris._core as c; print(c.BUILD_DIRTY)" 2>/dev/null || echo unknown)
+          echo "dirty: $dirty"
+          if [ "$dirty" = "True" ]; then
+            echo "::error::a clean checkout was stamped dirty"
+            exit 1
+          fi
+
+  c-abi:
+    name: C ABI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.85.0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      # The Rust tests use Rust's idea of the struct layouts, so a header that
+      # declared a field in the wrong order or width would pass all of them. A C
+      # compiler reading the header would not, which is what this is for.
+      - name: Compile and run smoke.c against the static library
+        run: python scripts/check_c_abi.py
+
+      - name: The same check against an optimised build
+        run: python scripts/check_c_abi.py --release

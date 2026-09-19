@@ -3,7 +3,12 @@ use calybris_core_rs::budget::{
 };
 use calybris_core_rs::finance::{certify_ledger, prove_conservation, MICROCENTS_PER_CENT};
 use calybris_core_rs::kernel::{
-    KernelDecision, KernelInput, KernelModel, PolicySnapshot, ALL_PROVIDERS, ALL_REGIONS,
+    CandidateVerdict, KernelDecision, KernelInput, KernelModel, PolicySnapshot, ALL_PROVIDERS,
+    ALL_REGIONS,
+};
+use calybris_core_rs::outcome::{
+    identity_digest, outcome_digest, selection_digest, Disposition, Observation, Outcome,
+    Selection, SelectionStrategy, FULL_PROBABILITY_BPS,
 };
 use calybris_core_rs::proof::seal;
 use calybris_core_rs::verify::{
@@ -560,6 +565,26 @@ impl PyPolicySnapshot {
         Ok((decision.into(), decision_trace_to_dict(py, &trace)?))
     }
 
+    /// A verdict for every candidate, in catalog order.
+    ///
+    /// The slow path, and the only one that allocates. It runs the same gates and
+    /// the same arithmetic as `prescribe`, so a candidate reported eligible here
+    /// is one that was ranked. Returns an empty list when the request was refused
+    /// at the hard limits and no candidate was ever examined.
+    fn explain(&self, input: PyKernelInput) -> PyResult<Vec<PyCandidateExplanation>> {
+        let rust_input = KernelInput::from(input);
+        rust_input
+            .validate()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(self
+            .inner
+            .explain(rust_input)
+            .candidates
+            .into_iter()
+            .map(PyCandidateExplanation::from)
+            .collect())
+    }
+
     fn utility_for_model(&self, input: PyKernelInput, model_id: u32) -> PyResult<Option<i64>> {
         let rust_input = validate_input(input)?;
         Ok(self.inner.utility_for_model(rust_input, model_id))
@@ -1016,6 +1041,449 @@ fn conservation_to_dict(py: Python<'_>, status: ConservationStatus) -> PyResult<
     Ok(d)
 }
 
+/// One candidate's place in a decision, flattened for Python.
+///
+/// The Rust side models this as an enum of four shapes. Python gets a `status`
+/// string and a set of optional fields, because a caller filtering a list on
+/// `status == "rejected"` reads better than one matching on a tag, and the fields
+/// that do not apply are `None` rather than zero.
+#[pyclass(
+    name = "CandidateExplanation",
+    module = "calybris._core",
+    skip_from_py_object
+)]
+#[derive(Clone)]
+struct PyCandidateExplanation {
+    /// The candidate this describes.
+    #[pyo3(get)]
+    model_id: u32,
+    /// Its position in the catalog.
+    #[pyo3(get)]
+    model_index: u16,
+    /// One of `eligible`, `rejected`, `over_budget`, `non_positive_utility`.
+    #[pyo3(get)]
+    status: String,
+    /// Which gate refused it, when `status == "rejected"`.
+    #[pyo3(get)]
+    gate: Option<String>,
+    /// What the candidate carried, in the gate's own unit.
+    #[pyo3(get)]
+    measured: Option<u64>,
+    /// What the request demanded, in the same unit.
+    #[pyo3(get)]
+    limit: Option<u64>,
+    /// What it costs for this request. Present once it has been priced.
+    #[pyo3(get)]
+    cost_microunits: Option<u64>,
+    /// Business value scaled by confidence and quality.
+    #[pyo3(get)]
+    quality_adjusted: Option<i128>,
+    /// Charged from the request's risk.
+    #[pyo3(get)]
+    risk_penalty: Option<i128>,
+    /// Charged from the candidate's p95 latency.
+    #[pyo3(get)]
+    latency_penalty: Option<i128>,
+    /// The total the kernel ranks on.
+    #[pyo3(get)]
+    utility: Option<i64>,
+}
+
+#[pymethods]
+impl PyCandidateExplanation {
+    fn __repr__(&self) -> String {
+        match (&self.gate, self.utility) {
+            (Some(gate), _) => format!(
+                "CandidateExplanation(model_id={}, rejected on {}, measured={:?}, limit={:?})",
+                self.model_id, gate, self.measured, self.limit
+            ),
+            (None, Some(utility)) => format!(
+                "CandidateExplanation(model_id={}, {}, utility={})",
+                self.model_id, self.status, utility
+            ),
+            _ => format!(
+                "CandidateExplanation(model_id={}, {})",
+                self.model_id, self.status
+            ),
+        }
+    }
+}
+
+impl From<calybris_core_rs::kernel::CandidateExplanation> for PyCandidateExplanation {
+    fn from(candidate: calybris_core_rs::kernel::CandidateExplanation) -> Self {
+        let (model_id, model_index) = (candidate.model_id, candidate.model_index);
+        // Each row starts with only the status its verdict names, so no field
+        // is a placeholder waiting to be overwritten.
+        let row = |status: &str| Self {
+            model_id,
+            model_index,
+            status: status.to_owned(),
+            gate: None,
+            measured: None,
+            limit: None,
+            cost_microunits: None,
+            quality_adjusted: None,
+            risk_penalty: None,
+            latency_penalty: None,
+            utility: None,
+        };
+        let priced = |status: &str, terms: calybris_core_rs::kernel::UtilityTerms| Self {
+            cost_microunits: Some(terms.cost_microunits),
+            quality_adjusted: Some(terms.quality_adjusted),
+            risk_penalty: Some(terms.risk_penalty),
+            latency_penalty: Some(terms.latency_penalty),
+            utility: Some(terms.utility),
+            ..row(status)
+        };
+
+        match candidate.verdict {
+            CandidateVerdict::Rejected {
+                gate,
+                measured,
+                limit,
+            } => Self {
+                gate: Some(format!("{gate:?}")),
+                measured: Some(measured),
+                limit: Some(limit),
+                ..row("rejected")
+            },
+            CandidateVerdict::OverBudget {
+                cost_microunits,
+                limit_microunits,
+            } => Self {
+                cost_microunits: Some(cost_microunits),
+                limit: Some(limit_microunits),
+                ..row("over_budget")
+            },
+            CandidateVerdict::NonPositiveUtility(terms) => priced("non_positive_utility", terms),
+            CandidateVerdict::Eligible(terms) => priced("eligible", terms),
+        }
+    }
+}
+
+/// What was measured after a decision was acted on.
+///
+/// Every field is optional because a pipeline learns them at different times, and
+/// an absent measurement must never be readable as a zero.
+#[pyclass(name = "Observation", module = "calybris._core", from_py_object)]
+#[derive(Clone, Default)]
+struct PyObservation {
+    #[pyo3(get, set)]
+    realized_cost_microunits: Option<u64>,
+    #[pyo3(get, set)]
+    realized_latency_ms: Option<u32>,
+    #[pyo3(get, set)]
+    succeeded: Option<bool>,
+}
+
+#[pymethods]
+impl PyObservation {
+    #[new]
+    #[pyo3(signature = (realized_cost_microunits=None, realized_latency_ms=None, succeeded=None))]
+    fn new(
+        realized_cost_microunits: Option<u64>,
+        realized_latency_ms: Option<u32>,
+        succeeded: Option<bool>,
+    ) -> Self {
+        Self {
+            realized_cost_microunits,
+            realized_latency_ms,
+            succeeded,
+        }
+    }
+
+    /// Whether anything at all was measured.
+    fn is_empty(&self) -> bool {
+        Observation::from(self.clone()).is_empty()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Observation(cost={:?}, latency_ms={:?}, succeeded={:?})",
+            self.realized_cost_microunits, self.realized_latency_ms, self.succeeded
+        )
+    }
+}
+
+impl From<PyObservation> for Observation {
+    fn from(observation: PyObservation) -> Self {
+        Self {
+            realized_cost_microunits: observation.realized_cost_microunits,
+            realized_latency_ms: observation.realized_latency_ms,
+            succeeded: observation.succeeded,
+        }
+    }
+}
+
+/// One decision, what was done about it, and what came back.
+///
+/// The `strategy` and `propensity_bps` fields are the ones a later learner cannot
+/// do without: only the taken action has an observed outcome, and estimating the
+/// others is honest only when the probability of each choice was recorded at the
+/// time. `validate()` refuses the shapes that would quietly poison that analysis.
+#[pyclass(name = "Outcome", module = "calybris._core", skip_from_py_object)]
+#[derive(Clone)]
+struct PyOutcome {
+    inner: Outcome,
+}
+
+#[pymethods]
+impl PyOutcome {
+    /// The ordinary case: the kernel ranked, the caller followed, work completed.
+    ///
+    /// The snapshot and the input are required, not optional: the record binds to
+    /// the world that produced the decision, and neither can be recovered from the
+    /// decision alone.
+    #[staticmethod]
+    fn applied(
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+        observed_at_micros: u64,
+        observation: PyObservation,
+    ) -> Self {
+        Self {
+            inner: Outcome::applied(
+                &snapshot.inner,
+                &KernelInput::from(input),
+                &decision.inner,
+                observed_at_micros,
+                observation.into(),
+            ),
+        }
+    }
+
+    /// A record for a recommendation nobody acted on.
+    ///
+    /// It takes no observation, because there is nothing to have measured.
+    #[staticmethod]
+    fn abandoned(
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+        observed_at_micros: u64,
+    ) -> Self {
+        Self {
+            inner: Outcome::abandoned(
+                &snapshot.inner,
+                &KernelInput::from(input),
+                &decision.inner,
+                observed_at_micros,
+            ),
+        }
+    }
+
+    /// A record for a candidate other than the ranked winner.
+    ///
+    /// `propensity_bps` is the probability, in basis points, with which the
+    /// caller's mechanism would have made this choice. It is refused at zero — an
+    /// observed choice cannot have had no chance of happening — and it must be
+    /// `None` when `human` is set, because a person's reasons are not a
+    /// distribution and a number there would make the record look causally usable
+    /// when it is not.
+    #[staticmethod]
+    #[pyo3(signature = (snapshot, input, decision, observed_at_micros, observation, acted_model_id, propensity_bps=None, human=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn chosen_otherwise(
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+        observed_at_micros: u64,
+        observation: PyObservation,
+        acted_model_id: u32,
+        propensity_bps: Option<u16>,
+        human: bool,
+    ) -> PyResult<Self> {
+        let rust_input = KernelInput::from(input);
+        let mut inner = Outcome::applied(
+            &snapshot.inner,
+            &rust_input,
+            &decision.inner,
+            observed_at_micros,
+            observation.into(),
+        );
+        inner.selection = Selection {
+            strategy: if human {
+                SelectionStrategy::Human
+            } else {
+                SelectionStrategy::Explore
+            },
+            acted_model_id,
+            propensity_bps,
+        };
+        inner
+            .validate_against(&snapshot.inner, &rust_input, &decision.inner)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// The policy and catalog in force when the decision was made, as hex.
+    #[getter]
+    fn policy_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&self.inner.identity.policy_digest)
+    }
+
+    /// The request as it was asked, as hex.
+    #[getter]
+    fn input_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&self.inner.identity.input_digest)
+    }
+
+    #[getter]
+    fn decision_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&self.inner.identity.decision_digest)
+    }
+
+    /// The whole decision identity as one digest: policy, input, decision and
+    /// sequence folded together.
+    #[getter]
+    fn identity_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&identity_digest(&self.inner.identity))
+    }
+
+    /// How the acted-on candidate was chosen, as one digest. Distinct for an
+    /// absent propensity and a recorded one.
+    #[getter]
+    fn selection_digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&selection_digest(&self.inner.selection))
+    }
+
+    #[getter]
+    fn request_sequence(&self) -> u64 {
+        self.inner.identity.request_sequence
+    }
+
+    #[getter]
+    fn observed_at_micros(&self) -> u64 {
+        self.inner.observed_at_micros
+    }
+
+    #[getter]
+    fn revision(&self) -> u32 {
+        self.inner.revision
+    }
+
+    #[setter]
+    fn set_revision(&mut self, revision: u32) {
+        self.inner.revision = revision;
+    }
+
+    /// `applied`, `abandoned` or `in_flight`.
+    #[getter]
+    fn disposition(&self) -> String {
+        match self.inner.disposition {
+            Disposition::Applied => "applied",
+            Disposition::Abandoned => "abandoned",
+            Disposition::InFlight => "in_flight",
+        }
+        .to_string()
+    }
+
+    #[setter]
+    fn set_disposition(&mut self, disposition: &str) -> PyResult<()> {
+        self.inner.disposition = match disposition {
+            "applied" => Disposition::Applied,
+            "abandoned" => Disposition::Abandoned,
+            "in_flight" => Disposition::InFlight,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "disposition must be applied, abandoned or in_flight, got {other}"
+                )))
+            }
+        };
+        Ok(())
+    }
+
+    /// `maximise_utility`, `explore` or `human`.
+    #[getter]
+    fn strategy(&self) -> String {
+        match self.inner.selection.strategy {
+            SelectionStrategy::MaximiseUtility => "maximise_utility",
+            SelectionStrategy::Explore => "explore",
+            SelectionStrategy::Human => "human",
+        }
+        .to_string()
+    }
+
+    #[getter]
+    fn acted_model_id(&self) -> u32 {
+        self.inner.selection.acted_model_id
+    }
+
+    /// `None` for a human choice, where no probability exists to record. A record
+    /// carrying `None` belongs outside an off-policy estimate, not defaulted into
+    /// one.
+    #[getter]
+    fn propensity_bps(&self) -> Option<u16> {
+        self.inner.selection.propensity_bps
+    }
+
+    #[getter]
+    fn observation(&self) -> PyObservation {
+        PyObservation {
+            realized_cost_microunits: self.inner.observation.realized_cost_microunits,
+            realized_latency_ms: self.inner.observation.realized_latency_ms,
+            succeeded: self.inner.observation.succeeded,
+        }
+    }
+
+    #[setter]
+    fn set_observation(&mut self, observation: PyObservation) {
+        self.inner.observation = observation.into();
+    }
+
+    /// Canonical digest of the whole record, as hex.
+    #[getter]
+    fn digest(&self) -> String {
+        calybris_core_rs::digest::digest_to_hex(&outcome_digest(&self.inner))
+    }
+
+    /// Raises `ValueError` on a record a later analysis would misread.
+    ///
+    /// This checks the record against itself. `validate_against` is the stronger
+    /// check, and the one to use wherever the decision is still on hand.
+    fn validate(&self) -> PyResult<()> {
+        self.inner
+            .validate()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// Everything `validate` checks, plus everything that needs the decision: the
+    /// three digests and the sequence number agree, a rejection was not acted on,
+    /// the ranked winner is what `maximise_utility` acted on, and the acted-on
+    /// model is in this policy's catalog.
+    fn validate_against(
+        &self,
+        snapshot: &PyPolicySnapshot,
+        input: PyKernelInput,
+        decision: &PyKernelDecision,
+    ) -> PyResult<()> {
+        self.inner
+            .validate_against(&snapshot.inner, &KernelInput::from(input), &decision.inner)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// The cheap check: does this record name the same decision?
+    ///
+    /// Compares the decision digest and the sequence number only, for scanning a
+    /// log where the policy and input are not at hand. Use `validate_against` to
+    /// establish that the record is actually valid for that decision.
+    fn follows(&self, decision: &PyKernelDecision) -> bool {
+        self.inner.follows(&decision.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Outcome(seq={}, {}, acted={}, strategy={}, revision={})",
+            self.request_sequence(),
+            self.disposition(),
+            self.acted_model_id(),
+            self.strategy(),
+            self.revision()
+        )
+    }
+}
+
 #[pymodule]
 #[pyo3(name = "_core")]
 // skipcq: RS-R1000
@@ -1026,12 +1494,16 @@ fn calybris_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKernelDecision>()?;
     m.add_class::<PyPolicySnapshot>()?;
     m.add_class::<PyBudgetEngine>()?;
+    m.add_class::<PyCandidateExplanation>()?;
+    m.add_class::<PyObservation>()?;
+    m.add_class::<PyOutcome>()?;
     production::register(m)?;
 
     // Mask helpers
     m.add("ALL_PROVIDERS", ALL_PROVIDERS)?;
     m.add("ALL_REGIONS", ALL_REGIONS)?;
     m.add("MICROCENTS_PER_CENT", MICROCENTS_PER_CENT)?;
+    m.add("FULL_PROBABILITY_BPS", FULL_PROBABILITY_BPS)?;
     m.add("BUILD_COMMIT_SHA", env!("CALYBRIS_BUILD_COMMIT"))?;
     m.add("BUILD_TREE_SHA", env!("CALYBRIS_BUILD_TREE"))?;
     m.add("BUILD_SOURCE_DIGEST", env!("CALYBRIS_BUILD_SOURCE_DIGEST"))?;

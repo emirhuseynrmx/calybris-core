@@ -1,0 +1,3 @@
+# The fuzz corpus is byte-exact input. Line-ending translation would change
+# what the fuzzer is seeded with, and would corrupt the binary seed outright.
+fuzz/seeds/** -text

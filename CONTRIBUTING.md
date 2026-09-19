@@ -17,7 +17,11 @@ cargo clippy -- -D warnings
 1. **All tests pass**: `cargo test`
 2. **No clippy warnings**: `cargo clippy -- -D warnings`
 3. **Formatted**: `cargo fmt --check`
-4. **No unsafe**: The crate uses `#![forbid(unsafe_code)]` — this is non-negotiable
+4. **No unsafe in the kernel**: `calybris-core` uses
+   `#![forbid(unsafe_code)]` — this is non-negotiable. `calybris-ffi` is the
+   only exception, because a C ABI cannot be written without raw pointers;
+   anything `unsafe` belongs there, behind an `extern "C"` entry point that
+   catches panics, and nowhere else
 
 ## What We're Looking For
 

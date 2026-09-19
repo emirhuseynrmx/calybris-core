@@ -1,0 +1,24 @@
+[package]
+name = "calybris-ffi"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Stable C ABI for the Calybris deterministic decision kernel"
+repository = "https://github.com/emirhuseynrmx/calybris-core"
+readme = "README.md"
+keywords = ["ffi", "decision", "deterministic", "audit"]
+categories = ["external-ffi-bindings"]
+
+[lib]
+name = "calybris_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+calybris-core = { path = "..", version = "1.0.0", default-features = false }
+
+[lints.clippy]
+# Every entry point is `extern "C"` over raw pointers; the unsafety is the
+# interface, not an oversight.
+missing_safety_doc = "deny"
+undocumented_unsafe_blocks = "allow"

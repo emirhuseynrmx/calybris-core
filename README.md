@@ -17,6 +17,21 @@
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
 
+> **1.0.0: the API and the formats are stable.**
+>
+> The version number is the promise, not a boast. `0.x` means *expect breaking
+> changes*; from 1.0.0 on there are none to expect within 1.x. The public API,
+> the decision semantics, the digest formats and the replay behaviour are
+> documented in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md),
+> specified byte by byte in [docs/SPECIFICATION.md](docs/SPECIFICATION.md), and
+> pinned by tests. A decision made under 1.0.0 replays identically under every
+> later 1.x.
+>
+> Development continues. New capabilities arrive in 1.x releases as additions;
+> anything that would break a caller or change a digest waits for a major
+> version. [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says exactly what a 1.x
+> release may and may not change.
+
 Given a frozen catalog, a policy snapshot, and a typed request, Calybris returns
 one action plus an audit bundle that replays to the same answer.
 
@@ -24,7 +39,7 @@ one action plus an audit bundle that replays to the same answer.
 catalog + policy + request  ->  decision + audit bundle
 ```
 
-Integer-only Rust hot path. No hosted dependency. No `unsafe` in project code.
+Integer-only Rust hot path. No hosted dependency. No `unsafe` in the kernel.
 
 ## What is this?
 
@@ -42,20 +57,20 @@ selects by the rules you wrote, and a wrong rule produces a wrong decision you
 can at least see. And it proves the *integrity of the trail*, not the truth of
 your inputs.
 
-## In this release — 0.6.0
+## In this release — 1.0.0
 
-A typed decision surface on the kernel that was already there, and a way to ask
-what a policy change would have done.
+Everything here is something the crate had to settle before it could promise not to break it.
 
 | | |
 |---|---|
-| **`DecisionEngine`** | One already-priced job in, one selected candidate plus a replay-verified audit bundle out. No new selection algorithm: a fixed quote is mapped onto the native cost rate, so the kernel prices it without a second pricing path. |
-| **`compare_policies`** | Replay identical frozen requests through two policies and count what changed. Both policies are identified in the result by native digest and epoch, so a comparison whose stored detail was capped still says which two produced it. |
-| **`AgentBudget.lifecycle_report()`** | Balance, unresolved work and its next action, corrections, denials and reservation accuracy — read under one lock, so the parts cannot disagree with each other. |
+| **`explain()`** | One row per candidate in the catalog: which gate turned it away, what was measured against what limit, and for the ones that survived, the terms that add up to the utility the kernel ranked on. It runs the same evaluation `prescribe` does, so it cannot become a second opinion about the decision. |
+| **`Outcome`** | What happened after a decision — applied, abandoned or still running — bound to the policy, the input and the decision together, with the selection probability that an off-policy estimate needs and that cannot be recovered afterwards. The kernel does not read these back; it defines the shape so that two callers write the same one. |
+| **Frozen semantics** | Gate order, tie-break, units, ceilings and digest layouts are written down in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and pinned by `tests/decision_semantics.rs`, and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says what a 1.0.x may and may not contain. |
 
-0.5.8 and 0.5.9 were never published, so this is the whole distance from 0.5.7.
-Units, identities and the exact limits of the rejection trace are in
-[docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md); the full list is in the
+`PolicySnapshot::new`, deprecated since 0.3.9, is gone: shipping it in a 1.0.0
+would have made it permanent. Every public error enum is now `#[non_exhaustive]`
+so a security fix can add a variant; the enums that carry decision semantics are
+exhaustive for the opposite reason. The full list is in the
 [CHANGELOG](CHANGELOG.md).
 
 ## When to use / when not to
@@ -280,15 +295,16 @@ third party can verify a decision trail without running your engine.
 | Layer | Status | Notes |
 |-------|--------|-------|
 | **`calybris-core` (Rust)** | **Stable** | crates.io: this is the contract |
-| **`calybris` (Python)** | **Production-capable / pre-1.0 API** | Decisions, policy comparison, shared budget, signed policy provenance, state proofs, receipts, keyed WAL, anchors and replay |
-| **`calybris_commerce` (Python)** | Experimental / pre-1.0 | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
+| **`calybris` (Python)** | **Production-capable / stable API** | Decisions, policy comparison, shared budget, signed policy provenance, state proofs, receipts, keyed WAL, anchors and replay |
+| **`calybris-ffi` (C)** | **Stable ABI** | The decision path over a stable C ABI, for callers that are neither Rust nor Python. Adds no behaviour; a C caller decides the same way and recomputes the same digests. See [calybris-ffi/README.md](calybris-ffi/README.md). |
+| **`calybris_commerce` (Python)** | Experimental | Thicker **adapter** (orders, suppliers, batch routing), still calls the same Rust kernel; API may change |
 
 Rust owns correctness and replay semantics. The core Python package exposes the
-production trust boundary and is tested as an installed abi3 wheel. The Python
-API remains pre-1.0, so pin minor versions even though its runtime integrity
-guarantees match the Rust core. See the
-[0.5.7 trust-release migration](docs/TRUST_RELEASE_0.5.7.md) for the canonical
-production path and the CALY-PROOF v1 compatibility boundary.
+production trust boundary and is tested as an installed abi3 wheel. Its runtime
+integrity guarantees match the Rust core, and as of 1.0.0 its API is stable —
+pin the exact version anyway, so that a rebuild is a decision rather than a
+surprise. [docs/PYTHON.md](docs/PYTHON.md) covers the production path and the
+CALY-PROOF v1 compatibility boundary.
 
 ## Install
 
@@ -296,7 +312,7 @@ production path and the CALY-PROOF v1 compatibility boundary.
 # Rust (stable surface)
 cargo add calybris-core
 
-# Python (production-capable core binding; pre-1.0 API)
+# Python (production-capable core binding; stable API)
 pip install calybris
 ```
 
@@ -331,7 +347,12 @@ keyed audited WAL, suffix-truncation detection, contended budgets, and a
 
 ## Security posture
 
-- `#![forbid(unsafe_code)]` — no `unsafe` in project code.
+- `#![forbid(unsafe_code)]` in `calybris-core` — the kernel cannot contain
+  `unsafe`, and the compiler enforces it rather than a review convention.
+  The one exception is `calybris-ffi`, which exists to be a C boundary and
+  therefore handles raw pointers; it is a separate crate for exactly that
+  reason, so the unsafe is confined to a few hundred reviewable lines instead
+  of being available everywhere.
 - Fail-closed audit boundaries: `verified_audit_bundle` / `append_verified_audited`
   refuse to emit or log a decision that does not replay exactly.
 - Tamper-evident WAL: SHA-256 hash chain, optional HMAC-SHA256 with constant-time
@@ -364,7 +385,11 @@ inventory/capacity freshness, and an external audit.
 
 | Doc | Contents |
 |-----|----------|
-| [docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md) | Decision API, units, identities, policy comparison and its limits |
+| [docs/SPECIFICATION.md](docs/SPECIFICATION.md) | Every digest layout, byte by byte — what a second implementation would be written against |
+| [docs/INVARIANTS.md](docs/INVARIANTS.md) | Every property the crate promises, with the test that fails when it stops being true |
+| [fuzz/README.md](fuzz/README.md) | The fuzz targets, what would count as a finding in each, and why they only run on Linux |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | What 1.0.x may and may never contain, and the defects that will be documented rather than fixed |
+| [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) | Decision API, units, identities, policy comparison and its limits |
 | [docs/AGENT_BUDGET.md](docs/AGENT_BUDGET.md) | Shared budget, reservations, corrections, lifecycle report, support boundary |
 | [docs/ADAPTERS.md](docs/ADAPTERS.md) | Every reference mapping with its commands and code |
 | [docs/AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md) | Module map, audit commands, external review checklist |
@@ -375,8 +400,6 @@ inventory/capacity freshness, and an external audit.
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Throughput provenance and reproduction |
 | [docs/MIRI.md](docs/MIRI.md) | UB detection scope in CI |
 | [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |
-| [docs/TRUST_RELEASE_0.5.7.md](docs/TRUST_RELEASE_0.5.7.md) | Production trust boundary and CALY-PROOF v1 compatibility |
-| [docs/MIGRATING_0.5.5_TO_0.5.7.md](docs/MIGRATING_0.5.5_TO_0.5.7.md) | Fail-closed persisted-ledger migration and rollback |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting, supported versions |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, test gate, PR expectations |
 

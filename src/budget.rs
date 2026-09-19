@@ -63,6 +63,7 @@ pub enum TopUpResult {
 
 /// Invalid configuration supplied at a budget-engine trust boundary.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum BudgetConfigurationError {
     #[error("{field} must be >= 0, got {value}")]
     NegativeAmount { field: &'static str, value: i64 },
@@ -287,6 +288,7 @@ impl std::error::Error for ConservationStatus {}
 
 /// Error restoring engine state from a [`BudgetSnapshot`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RestoreError {
     #[error("cannot restore snapshot with {count} active reservations")]
     ActiveReservations { count: usize },
@@ -311,6 +313,7 @@ pub enum RestoreError {
 
 /// Error migrating a pre-0.5.7 snapshot into the recovery-aware format.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum LegacySnapshotMigrationError {
     #[error("snapshot is already recovery-aware")]
     AlreadyRecoveryAware,
@@ -322,6 +325,7 @@ pub enum LegacySnapshotMigrationError {
 
 /// Precise format and ledger errors for recovery-aware restores.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RecoverySnapshotError {
     #[error("legacy snapshot requires explicit migration with a trusted allocator fence")]
     LegacySnapshotRequiresMigration,
@@ -333,6 +337,7 @@ pub enum RecoverySnapshotError {
 
 /// Snapshot allocator errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SnapshotAllocatorError {
     #[error("reservation allocator exhausted")]
     AllocatorExhausted,

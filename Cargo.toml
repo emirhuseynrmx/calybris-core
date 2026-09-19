@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "0.6.1"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -26,8 +26,11 @@ exclude = [
 ]
 
 [workspace]
-members = [".", "bindings/python"]
+members = [".", "bindings/python", "calybris-ffi"]
 default-members = ["."]
+# The fuzz crate needs nightly and libFuzzer, so it stays out of the workspace
+# and out of every ordinary `cargo test` and `cargo build`.
+exclude = ["fuzz"]
 resolver = "2"
 
 [lints.rust]
@@ -62,6 +65,9 @@ loom = { version = "0.7", features = ["checkpoint"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
+# tests/specification.rs rebuilds every digest layout by hand, so it needs the
+# same hash the crate uses rather than the crate's own digest functions.
+sha2 = "0.11"
 criterion = { version = "5.0.1", package = "codspeed-criterion-compat", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt", "macros", "fs", "io-util", "sync"] }
 
@@ -79,6 +85,16 @@ required-features = ["wal", "provenance"]
 name = "gen_conformance_vectors"
 path = "examples/gen_conformance_vectors.rs"
 required-features = ["wal"]
+
+[[example]]
+name = "gen_outcome_vectors"
+path = "examples/gen_outcome_vectors.rs"
+required-features = ["serde"]
+
+[[example]]
+name = "gen_fuzz_seeds"
+path = "examples/gen_fuzz_seeds.rs"
+required-features = ["wal", "provenance"]
 
 [[example]]
 name = "gen_proof_surface_vectors"

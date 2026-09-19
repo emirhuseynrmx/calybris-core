@@ -7,9 +7,13 @@ Subject: `[SECURITY] Calybris Core — <brief description>`
 
 | Milestone | Target |
 |-----------|--------|
-| Acknowledgment | 48 hours |
-| Severity assessment | 7 days |
-| Fix or mitigation plan | 30 days (critical), 90 days (medium) |
+| Acknowledgment | 7 days |
+| Severity assessment | 30 days |
+| Fix for a critical defect | the next 1.x patch release |
+
+These are the targets of one person maintaining the project, set to what can
+actually be kept: a security promise that is not kept is worse than one that was
+never made.
 
 Please include: affected version, reproduction steps, impact on invariants I1–I10 (see `docs/SECURITY_INVARIANTS.md`), and suggested fix if any.
 
@@ -25,15 +29,27 @@ Please include: affected version, reproduction steps, impact on invariants I1–
 
 ## Supported Versions
 
+Security fixes land in the latest 1.x release.
+
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | Security fixes |
-| 0.4.x   | Best effort |
-| < 0.4   | No |
+| 1.x (latest) | Yes |
+| < 1.0   | No |
+
+"Critical" means a defect that lets a decision, a receipt or a WAL be forged,
+replayed incorrectly, or verified as valid when it is not. Anything that would
+require changing the decision semantics or a digest format will not ship: those
+are frozen, and correcting them would invalidate every artifact written against
+them. Such a defect would be documented here with a description and a workaround
+rather than silently fixed.
+
 
 ## Security Properties (OSS)
 
-- `#![forbid(unsafe_code)]` in project code
+- `#![forbid(unsafe_code)]` in `calybris-core`, so the kernel cannot contain
+  `unsafe` at all. The isolated `calybris-ffi` crate contains the `unsafe`
+  required for C interop and nothing else; keeping it in its own crate is what
+  makes that claim checkable.
 - Integer-only kernel hot path (no `f64` in prescribe)
 - Version-tagged canonical SHA-256 digests
 - Hash-chained WAL with optional HMAC-SHA256 (`subtle` constant-time compare)

@@ -81,6 +81,7 @@ pub struct StateChain {
 
 /// State-chain mutation errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum StateAdvanceError {
     #[error("state trajectory step counter exhausted")]
     StepOverflow,
@@ -165,6 +166,7 @@ pub fn stateful_audit_bundle(
 
 /// Why a trajectory failed verification.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TrajectoryError {
     #[error("step {found} does not continue from step {expected}")]
     NonMonotonicStep { expected: u64, found: u64 },

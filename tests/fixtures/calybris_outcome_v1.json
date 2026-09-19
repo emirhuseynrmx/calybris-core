@@ -1,0 +1,75 @@
+{
+  "spec": "calybris.outcome.v1",
+  "comment": "Pinned outcome, selection and identity digests. A failure here means the format changed, which needs a new tag (calyout2), never a re-pinned value.",
+  "tags": {
+    "identity": "calyidn1",
+    "selection": "calysel1",
+    "outcome": "calyout1"
+  },
+  "policy_digest_hex": "d3f12aa201a164f2668d3a4055710bc895a2345acb0b89cf39a91f35f6d7c173",
+  "cases": [
+    {
+      "label": "followed-applied-fully-measured",
+      "request_sequence": 42,
+      "input_digest_hex": "ccb29ca46a0533292092a00258e6ea6220befbe4f4071e81a57f18b85689c31e",
+      "decision_digest_hex": "55cc31eba5dcf8c2d5702723feaebb359b754019154980dd4fef54b70cd1a554",
+      "identity_digest_hex": "f59916be70553cd4addb0da4a07ef2348f869992ee9f7494e8c7523f00e4c67c",
+      "selection_digest_hex": "6f18f1ddda0bc2d62fb92fe5de0f2adc78cd8b5cf2e1c71ec2a5634a9c78a708",
+      "outcome_digest_hex": "363772c0d988b22a8565cfeb80986a123708550862f4bc9508522062cc84d7b3"
+    },
+    {
+      "label": "followed-abandoned",
+      "request_sequence": 42,
+      "input_digest_hex": "ccb29ca46a0533292092a00258e6ea6220befbe4f4071e81a57f18b85689c31e",
+      "decision_digest_hex": "55cc31eba5dcf8c2d5702723feaebb359b754019154980dd4fef54b70cd1a554",
+      "identity_digest_hex": "f59916be70553cd4addb0da4a07ef2348f869992ee9f7494e8c7523f00e4c67c",
+      "selection_digest_hex": "6f18f1ddda0bc2d62fb92fe5de0f2adc78cd8b5cf2e1c71ec2a5634a9c78a708",
+      "outcome_digest_hex": "fe695945f2d1187316f35e48114cbdfead6fc32f34657fe75f7777ddf5233321"
+    },
+    {
+      "label": "followed-in-flight-partial",
+      "request_sequence": 42,
+      "input_digest_hex": "ccb29ca46a0533292092a00258e6ea6220befbe4f4071e81a57f18b85689c31e",
+      "decision_digest_hex": "55cc31eba5dcf8c2d5702723feaebb359b754019154980dd4fef54b70cd1a554",
+      "identity_digest_hex": "f59916be70553cd4addb0da4a07ef2348f869992ee9f7494e8c7523f00e4c67c",
+      "selection_digest_hex": "6f18f1ddda0bc2d62fb92fe5de0f2adc78cd8b5cf2e1c71ec2a5634a9c78a708",
+      "outcome_digest_hex": "8845cf7d497cf4338371b4e4e79ba50fe1a864d08fb852f0d33924b194ebd292"
+    },
+    {
+      "label": "explored-one-basis-point",
+      "request_sequence": 42,
+      "input_digest_hex": "ccb29ca46a0533292092a00258e6ea6220befbe4f4071e81a57f18b85689c31e",
+      "decision_digest_hex": "55cc31eba5dcf8c2d5702723feaebb359b754019154980dd4fef54b70cd1a554",
+      "identity_digest_hex": "f59916be70553cd4addb0da4a07ef2348f869992ee9f7494e8c7523f00e4c67c",
+      "selection_digest_hex": "6c4d30c44e717615b3e3110e7b03d17a399be122c3e359913eacb8d87a4ebdb0",
+      "outcome_digest_hex": "e3a0555b05c9763d29ea5dd6152a5c94cfe6c939b45ba581a7f697399bfb8a94"
+    },
+    {
+      "label": "human-no-propensity",
+      "request_sequence": 42,
+      "input_digest_hex": "ccb29ca46a0533292092a00258e6ea6220befbe4f4071e81a57f18b85689c31e",
+      "decision_digest_hex": "55cc31eba5dcf8c2d5702723feaebb359b754019154980dd4fef54b70cd1a554",
+      "identity_digest_hex": "f59916be70553cd4addb0da4a07ef2348f869992ee9f7494e8c7523f00e4c67c",
+      "selection_digest_hex": "41854e7c87bed961e2477cd04f53af36b4394ec7870d13db97a7cd983be6c354",
+      "outcome_digest_hex": "ddf32098800485ed7fa068ed65868c37732269659f7d1d540cb061227ece5b4f"
+    },
+    {
+      "label": "zero-measurements-revision-seven",
+      "request_sequence": 42,
+      "input_digest_hex": "ccb29ca46a0533292092a00258e6ea6220befbe4f4071e81a57f18b85689c31e",
+      "decision_digest_hex": "55cc31eba5dcf8c2d5702723feaebb359b754019154980dd4fef54b70cd1a554",
+      "identity_digest_hex": "f59916be70553cd4addb0da4a07ef2348f869992ee9f7494e8c7523f00e4c67c",
+      "selection_digest_hex": "6f18f1ddda0bc2d62fb92fe5de0f2adc78cd8b5cf2e1c71ec2a5634a9c78a708",
+      "outcome_digest_hex": "35532e90d6effe0261a2ed0b20d2402109aca32985a2322a1227cf87618bf83a"
+    },
+    {
+      "label": "rejection-abandoned",
+      "request_sequence": 43,
+      "input_digest_hex": "7ff615f78c9edef375248462b8fe637bebb9c72e4b8e8a64aee7352f8c85d3c7",
+      "decision_digest_hex": "bd4bc7f030af013375980ac7f73f8bfd5037394c9231080a9e73a7bd27b4407a",
+      "identity_digest_hex": "1c9cb379da0d3d653f2f7888146ed9748ca1670e4f9f9ff284c4566ea4d175b6",
+      "selection_digest_hex": "f06b0211efedf983849e67e0b02fbf6f8f4dc6b4e774a189f98c0248c35e045b",
+      "outcome_digest_hex": "1523ac0abc8838bd3f7a509f7d3705ab997a7f9c7c63a1e0f88393217d81812c"
+    }
+  ]
+}

@@ -5,6 +5,173 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-09-17
+
+The release that makes the API and the formats stable. Everything in it is
+something the crate had to settle before it could promise not to break it.
+
+### Why 1.0.0 and not 0.8.0
+
+The number is a commitment, not a boast. `0.x` means *expect breaking changes*,
+and from here there are none to expect within 1.x: the public API is stable,
+and anything that would break it waits for a major version. A `0.8.0` would have
+said the opposite of what is true.
+
+Calling it 1.0.0 also closes the window in which breaking changes are free, so
+two things happened before the number moved.
+
+`PolicySnapshot::new` is gone. It had been deprecated since 0.3.9 and had no
+caller left in this repository; shipping it in 1.0.0 would have made it permanent.
+
+Every public error enum is now `#[non_exhaustive]`, so a security fix that needs a
+new way to refuse an input can ship as 1.0.x instead of forcing a major version.
+The decision enums — `KernelAction`, `KernelReason`, `GateKind`,
+`CandidateVerdict`, `Disposition`, `SelectionStrategy` — are deliberately left
+exhaustive: a new variant there would change the decision contract, which is
+exactly what this release promises not to do. Error paths flex; the semantics do
+not.
+
+`docs/COMPATIBILITY.md` states what 1.0.x may contain, what it never will, and
+what happens to a defect that would require changing a digest format: it gets
+documented with a workaround rather than fixed, because a correction that
+invalidates every artifact ever written against the format costs more than the
+defect.
+
+### The gate chain and the pricing each have one definition
+
+Both were written twice — once in the prescribe loop, once in
+`utility_for_model` — and an explanation surface would have made it three. An
+ordered predicate chain that exists in two places agrees until one of them is
+edited. `first_failed_gate` returns a field-less `GateKind`, so the hot loop pays
+for a discriminant rather than for measured values, and `Pricing` holds the
+loop-invariant half of the economic calculation. Behaviour is unchanged: the
+golden and conformance vectors pin the decision digests and still pass.
+
+### Per-candidate explanation
+
+`PolicySnapshot::explain` reports a verdict for every candidate: the gate it
+failed with the two numbers that gate compared, or the terms behind its utility.
+Until now the trace held counts, so a caller could say "three candidates failed
+on latency" but not "candidate A failed on latency at 900 ms against a 300 ms
+cap" — which is the sentence anyone actually needs. It shares the gates and the
+arithmetic with `prescribe`, and `tests/explain_agreement.rs` holds them to it,
+including a property test that they never disagree on any request.
+
+`prescribe_with_trace` is unchanged and remains allocation-free; `explain` is the
+slow path and the only one that allocates.
+
+### Outcomes, and how a choice was made
+
+The kernel decided and forgot. `outcome::Outcome` gives the downstream half a
+shape: whether a recommendation was applied, abandoned or still running, what it
+actually cost, whether a person overrode it, and corrections as revisions that
+supersede rather than overwrite.
+
+It binds through `DecisionIdentity`, which carries the **policy digest, the input
+digest, the decision digest and the request sequence** together. A decision
+digest alone identifies a decision but not the world that produced it: a policy
+whose risk limit moved, or a request whose latency cap moved, can both produce a
+byte-identical decision, and a record bound to the decision alone would pass as
+evidence about either one. `tests/outcome_contract.rs` demonstrates exactly that
+— two tests that only mean anything while the two policies, and the two requests,
+decide identically. `validate_against` checks all four and names the first that
+disagrees.
+
+**The kernel does not learn from these.** It stores no history and no decision
+changes because of a record.
+
+`Selection` carries the part that cannot be added later. A learner reading a
+decision log only ever observes the action that was taken, and estimating the
+others is honest only when the probability of each choice was written down at the
+time — which is unrecoverable afterwards. So the propensity is an `Option`, and
+which of the three states is legal depends on how the choice was made:
+
+| Strategy | Propensity |
+|---|---|
+| `MaximiseUtility` | exactly 10,000 — it is deterministic |
+| `Explore` | a stated probability in 1..=10,000 |
+| `Human` | absent, because none exists |
+
+Absent means *not causally evaluable*, and a record carrying it belongs outside
+an off-policy estimate rather than defaulted into one. A person's reasons are not
+a distribution, and a number there would make the record look usable when it is
+not.
+
+The disposition rules are the mirror of the same idea. `Applied` requires a
+measurement, because asserting that something happened while recording nothing is
+the shape a learner would later read as a silent success. `Abandoned` forbids one,
+because nothing ran and a zero would read as a free success. `InFlight` cannot
+record success or failure, because the work has not finished. And a rejection
+admits only `Abandoned`: there was nothing to carry out. An outcome naming a model
+the policy does not contain is refused too.
+
+### What else 1.0.0 closes
+
+Everything here exists because a stable release has to be checkable by someone
+who was not here when it was written.
+
+| | |
+|---|---|
+| **`docs/SPECIFICATION.md`** | All seven digest layouts field by field — widths, endianness, sort keys, presence bytes, enum discriminants, units, ceilings, and what is deliberately not hashed. `tests/specification.rs` transcribes that document back into code and compares it against the implementation, so the two cannot quietly part company. |
+| **`docs/INVARIANTS.md`** | Every property the crate promises, with the test that fails when it stops being true, under stable `CAL-Innn` identifiers. `tests/invariants.rs` reads the file and refuses to pass if a row names a test that does not exist. |
+| **Golden outcome vectors** | `tests/fixtures/calybris_outcome_v1.json` pins seven cases across the axes that carry format risk — including a human selection with no propensity, the only pinned value with an absent optional field. Asserted from Rust, from Python, and from C. |
+| **`calybris-ffi`** | A stable C ABI over the decision path, for callers that are neither Rust nor Python. A C program compiled against the header reproduces the same pinned digests: one set of bytes, three callers. |
+| **Torn-write and corruption tests** | `tests/crash_injection.rs` produces every truncation and every single-bit corruption of a real WAL and a real snapshot — about nine thousand damaged files — and checks that recovery never reports state that was not durably written. |
+| **Fuzz harness** | Six coverage-guided targets over the decoders and the kernel, seeded from real documents, with a proptest mirror of the same properties that runs on every platform. |
+| **Cross-architecture determinism** | The pinned vectors run under `cross` on aarch64, i686 and **s390x**. The layouts are declared little-endian, and a big-endian host is the only way to find out whether the code says so or merely inherits it. |
+| **Release provenance** | On a clean checkout the stamped source digest **is** the git tree SHA, so anyone can recompute it with `git rev-parse HEAD^{tree}`. `cargo package` twice from the same commit must produce the same bytes. Both are CI gates. |
+
+### The Python side gets both
+
+`PolicySnapshot.explain` returns a list of `CandidateExplanation`, each carrying a
+`status`, the gate that refused it with the two numbers that gate compared, and
+the terms behind its utility. `Outcome`, `Observation` and the selection fields
+are exposed with the same validation the Rust side applies, so a record written
+from Python is a record the Rust side would have accepted.
+
+This is not a convenience. The engine is Rust and anything that learns from these
+records will be Python, and a record shape that exists on only one side of that
+line is a record nobody writes.
+
+The Python enums are strings — `eligible`, `rejected`, `over_budget`,
+`non_positive_utility` for a verdict; `applied`, `abandoned`, `in_flight` for a
+disposition; `maximise_utility`, `explore`, `human` for a strategy — because
+filtering a list on a string reads better than matching on a tag, and an unknown
+one is refused rather than coerced. Fields that do not apply are `None`, never
+zero.
+
+### Fixed before the freeze
+
+`persistence` lost its `serde` feature gate while `outcome` was being added to
+`lib.rs`, which broke `--no-default-features` — the command `SECURITY.md` tells
+an external reviewer to run first. It is gated again, and all three feature
+combinations build and test clean.
+
+### Frozen semantics
+
+`docs/DECISION_SEMANTICS.md` states the units, the ceilings, the gate order, the
+tie-break, and the difference between the request's risk and the candidate's risk
+ceiling — the last of which is the field most likely to be mislabelled as a
+supplier's failure probability, which it is not. `tests/decision_semantics.rs`
+pins every claim in it.
+
+Two ceilings worth naming here: latency is `u32` milliseconds and so stops a
+little under 49.7 days, and `provider_id` is capped at 63 by the `u64` mask,
+refused at policy construction rather than silently at decision time.
+
+### Maintenance
+
+`SECURITY.md` states response targets one maintainer can actually hold. Within
+1.x, a defect that would require a semantics or digest change cannot be fixed in
+place, because correcting it would invalidate every artifact written against the
+current format; it is documented with a workaround, and the fix waits for a major
+version. Apache-2.0, unchanged.
+
+### Versions
+
+`calybris-core` and `calybris` are both 1.0.0. 0.6.1 was crates.io only and left
+PyPI a release behind; this release ends that split.
+
 ## [0.6.1] - 2026-09-08
 
 No code change, and **crates.io only**. `calybris-core` 0.6.1 behaves exactly as
@@ -32,7 +199,7 @@ this section is the whole distance from 0.5.7.
   adapter maps a fixed quote onto the native cost rate as exactly one million
   input units and zero output units, so the native estimated cost is the quote.
   Suppliers, carriers, venues and models are the same call with a different
-  catalog. See [docs/DECISIONS_0.6.0.md](docs/DECISIONS_0.6.0.md).
+  catalog.
 - `DecisionEngine.verify` recomputes the entire result from the caller's own
   catalog, policy and request rather than trusting a self-declared flag, and the
   catalog digest (`calybris.catalog.v1`) is kept distinct from the native policy,

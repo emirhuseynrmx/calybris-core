@@ -52,9 +52,17 @@ Snapshots take the checkpoint gate exclusively and are linearizable against rese
 
 **Tests:** `conservation_invariant`, `aggressive_mixed_ops_maintain_conservation` (proptest), `random_ops_maintain_conservation`, `concurrent_reserve_never_overspends`, `failed_overrun_does_not_create_budget`, `restore_from_snapshot_roundtrip`, `restore_rejects_ghost_reserved`, `restore_rejects_unbalanced_snapshot`, `ensure_tenant_rejects_negative_budget`, `exposure_limit_blocks_reserve`, `exposure_limit_holds_under_concurrent_reserve`, Loom (`tests/budget_loom.rs`, 8 scenarios).
 
-## I7 — No unsafe in project code
+## I7 — No unsafe in the kernel
 
-**Invariant:** `#![forbid(unsafe_code)]` on crate root.
+**Invariant:** `#![forbid(unsafe_code)]` on the `calybris-core` crate root, so
+the decision kernel, the digests, the ledger and the WAL cannot contain
+`unsafe` — the compiler refuses, rather than a reviewer noticing.
+
+**Scope:** `calybris-ffi` is the one crate that does contain `unsafe`, because a
+C ABI means raw pointers. That is why it is a separate crate: the unsafe is
+confined to a boundary whose entire job is to be that boundary, every entry
+point catches panics rather than unwinding into C, and no other crate can reach
+it. `#![forbid(unsafe_code)]` still holds everywhere the decisions are made.
 
 **Code:** `src/lib.rs`.
 
