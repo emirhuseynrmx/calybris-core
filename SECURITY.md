@@ -9,12 +9,11 @@ Subject: `[SECURITY] Calybris Core — <brief description>`
 |-----------|--------|
 | Acknowledgment | 7 days |
 | Severity assessment | 30 days |
-| Fix for a critical defect in 1.0.x | best effort, no committed date |
+| Fix for a critical defect | the next 1.x patch release |
 
-These are the targets of one person maintaining a project that has stopped taking
-features. They are deliberately slower than the ones this file used to state,
-which were 48 hours and 30 days: a frozen project cannot keep them, and a
-security promise that is not kept is worse than one that was never made.
+These are the targets of one person maintaining the project, set to what can
+actually be kept: a security promise that is not kept is worse than one that was
+never made.
 
 Please include: affected version, reproduction steps, impact on invariants I1–I10 (see `docs/SECURITY_INVARIANTS.md`), and suggested fix if any.
 
@@ -30,12 +29,11 @@ Please include: affected version, reproduction steps, impact on invariants I1–
 
 ## Supported Versions
 
-1.0.0 is the last release that adds features. Development continues in a separate
-product built on this core, not in this repository.
+Security fixes land in the latest 1.x release.
 
 | Version | Supported |
 |---------|-----------|
-| 1.0.x   | Critical security and verification defects only |
+| 1.x (latest) | Yes |
 | < 1.0   | No |
 
 "Critical" means a defect that lets a decision, a receipt or a WAL be forged,
@@ -45,8 +43,6 @@ are frozen, and correcting them would invalidate every artifact written against
 them. Such a defect would be documented here with a description and a workaround
 rather than silently fixed.
 
-The licence does not expire when maintenance does. Apache-2.0 permits a fork, and
-a fork is the supported answer to a need this repository will not meet.
 
 ## Security Properties (OSS)
 

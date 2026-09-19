@@ -164,7 +164,7 @@ truth.
 
 ## In this release — 1.0.0
 
-Everything here is something the crate could not gain once it stopped changing.
+Everything here is something the crate had to settle before it could promise not to break it.
 
 | | |
 |---|---|

@@ -7,15 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-09-17
 
-The last feature release of this core, and everything in it is something the
-crate could not gain once it stopped changing.
+The release that makes the API and the formats stable. Everything in it is
+something the crate had to settle before it could promise not to break it.
 
 ### Why 1.0.0 and not 0.8.0
 
 The number is a commitment, not a boast. `0.x` means *expect breaking changes*,
-and there are none left to expect: the public API is stable, and this release
-closes the feature line rather than pausing it. A frozen `0.8.0` would have said
-the opposite of what is true.
+and from here there are none to expect within 1.x: the public API is stable,
+and anything that would break it waits for a major version. A `0.8.0` would have
+said the opposite of what is true.
 
 Calling it 1.0.0 also closes the window in which breaking changes are free, so
 two things happened before the number moved.
@@ -107,7 +107,7 @@ the policy does not contain is refused too.
 
 ### What else 1.0.0 closes
 
-Everything here exists because a frozen release has to be checkable by someone
+Everything here exists because a stable release has to be checkable by someone
 who was not here when it was written.
 
 | | |
@@ -161,13 +161,11 @@ refused at policy construction rather than silently at decision time.
 
 ### Maintenance
 
-`SECURITY.md` states targets a frozen project can hold, rather than the 48
-hours and 30 days it promised before. 1.0.x takes critical security and
-verification fixes; anything requiring a semantics or digest change will be
-documented rather than shipped, because correcting it would invalidate every
-artifact written against the current format.
-
-The licence does not expire when maintenance does. Apache-2.0, unchanged.
+`SECURITY.md` states response targets one maintainer can actually hold. Within
+1.x, a defect that would require a semantics or digest change cannot be fixed in
+place, because correcting it would invalidate every artifact written against the
+current format; it is documented with a workaround, and the fix waits for a major
+version. Apache-2.0, unchanged.
 
 ### Versions
 

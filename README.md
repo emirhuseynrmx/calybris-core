@@ -17,25 +17,20 @@
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
 
-> **1.0.0 is the last feature release of this core.**
+> **1.0.0: the API and the formats are stable.**
 >
 > The version number is the promise, not a boast. `0.x` means *expect breaking
-> changes*, and there are none left to expect, so a frozen `0.x` would have said
-> the opposite of what is true. 1.0.0 closes the current feature line; releases
-> after it are reserved for correctness, security and compatibility work.
+> changes*; from 1.0.0 on there are none to expect within 1.x. The public API,
+> the decision semantics, the digest formats and the replay behaviour are
+> documented in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md),
+> specified byte by byte in [docs/SPECIFICATION.md](docs/SPECIFICATION.md), and
+> pinned by tests. A decision made under 1.0.0 replays identically under every
+> later 1.x.
 >
-> The decision semantics, digest formats and replay behaviour are frozen too,
-> documented in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and
-> pinned by `tests/decision_semantics.rs`. Critical security and verification
-> defects may still ship as 1.0.x; see [SECURITY.md](SECURITY.md) and
-> [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for exactly what that covers.
->
-> Work continues above this core, in a separate commercial product. That product
-> does not change what is here, and nothing here is held back for it: a frozen
-> engine that has been deliberately weakened would be worth less to everyone,
-> including its author.
->
-> Apache-2.0, unchanged. Fork it.
+> Development continues. New capabilities arrive in 1.x releases as additions;
+> anything that would break a caller or change a digest waits for a major
+> version. [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says exactly what a 1.x
+> release may and may not change.
 
 Given a frozen catalog, a policy snapshot, and a typed request, Calybris returns
 one action plus an audit bundle that replays to the same answer.
@@ -64,7 +59,7 @@ your inputs.
 
 ## In this release — 1.0.0
 
-Everything here is something the crate could not gain once it stopped changing.
+Everything here is something the crate had to settle before it could promise not to break it.
 
 | | |
 |---|---|

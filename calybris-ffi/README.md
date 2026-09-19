@@ -84,5 +84,5 @@ machine with no C compiler. CI runs it on Linux and Windows.
 
 This crate tracks `calybris-core`, and
 [docs/COMPATIBILITY.md](../docs/COMPATIBILITY.md) applies to it: the ABI is
-frozen, and a change to any layout here would need `CALYBRIS_ABI_VERSION` 2,
-which is not planned.
+stable across 1.x. New functions can be added; a change to any existing layout
+would need `CALYBRIS_ABI_VERSION` 2 and a major release.
