@@ -24,14 +24,14 @@ two things happened before the number moved.
 caller left in this repository; shipping it in 1.0.0 would have made it permanent.
 
 Every public error enum is now `#[non_exhaustive]`, so a security fix that needs a
-new way to refuse an input can ship as 1.0.x instead of forcing a major version.
+new way to refuse an input can ship in a 1.x release instead of forcing a major version.
 The decision enums — `KernelAction`, `KernelReason`, `GateKind`,
 `CandidateVerdict`, `Disposition`, `SelectionStrategy` — are deliberately left
 exhaustive: a new variant there would change the decision contract, which is
 exactly what this release promises not to do. Error paths flex; the semantics do
 not.
 
-`docs/COMPATIBILITY.md` states what 1.0.x may contain, what it never will, and
+`docs/COMPATIBILITY.md` states what a 1.x release may contain, what it never changes, and
 what happens to a defect that would require changing a digest format: it gets
 documented with a workaround rather than fixed, because a correction that
 invalidates every artifact ever written against the format costs more than the

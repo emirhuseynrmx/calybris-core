@@ -4,10 +4,10 @@ Every digest in this crate is a SHA-256 over a fixed byte layout, not over JSON.
 This document is that layout, field by field, so that a second implementation can
 produce the same 32 bytes without reading the Rust.
 
-The layouts are frozen. [COMPATIBILITY.md](COMPATIBILITY.md) says what that
-means for 1.0.x; the short version is that a change here would invalidate every
-artifact ever written, so a defect in one of these is documented rather than
-fixed.
+The layouts are stable across 1.x. [COMPATIBILITY.md](COMPATIBILITY.md) says
+what that means; the short version is that a change here would invalidate every
+artifact ever written, so a defect in one of these is documented with a
+workaround, and the fix waits for a major version.
 
 ## Conventions
 

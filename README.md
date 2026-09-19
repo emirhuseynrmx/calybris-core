@@ -65,7 +65,7 @@ Everything here is something the crate had to settle before it could promise not
 |---|---|
 | **`explain()`** | One row per candidate in the catalog: which gate turned it away, what was measured against what limit, and for the ones that survived, the terms that add up to the utility the kernel ranked on. It runs the same evaluation `prescribe` does, so it cannot become a second opinion about the decision. |
 | **`Outcome`** | What happened after a decision — applied, abandoned or still running — bound to the policy, the input and the decision together, with the selection probability that an off-policy estimate needs and that cannot be recovered afterwards. The kernel does not read these back; it defines the shape so that two callers write the same one. |
-| **Frozen semantics** | Gate order, tie-break, units, ceilings and digest layouts are written down in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) and pinned by `tests/decision_semantics.rs`, and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says what a 1.0.x may and may not contain. |
+| **Stable semantics** | Gate order, tie-break, units, ceilings and digest layouts are written down in [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md), specified byte by byte in [docs/SPECIFICATION.md](docs/SPECIFICATION.md) and pinned by tests, and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says what a 1.x release may and may not change. |
 
 `PolicySnapshot::new`, deprecated since 0.3.9, is gone: shipping it in a 1.0.0
 would have made it permanent. Every public error enum is now `#[non_exhaustive]`
@@ -388,7 +388,7 @@ inventory/capacity freshness, and an external audit.
 | [docs/SPECIFICATION.md](docs/SPECIFICATION.md) | Every digest layout, byte by byte — what a second implementation would be written against |
 | [docs/INVARIANTS.md](docs/INVARIANTS.md) | Every property the crate promises, with the test that fails when it stops being true |
 | [fuzz/README.md](fuzz/README.md) | The fuzz targets, what would count as a finding in each, and why they only run on Linux |
-| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | What 1.0.x may and may never contain, and the defects that will be documented rather than fixed |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | What a 1.x release may and may not change, and how a defect that needs a format change is handled |
 | [docs/DECISION_SEMANTICS.md](docs/DECISION_SEMANTICS.md) | Decision API, units, identities, policy comparison and its limits |
 | [docs/AGENT_BUDGET.md](docs/AGENT_BUDGET.md) | Shared budget, reservations, corrections, lifecycle report, support boundary |
 | [docs/ADAPTERS.md](docs/ADAPTERS.md) | Every reference mapping with its commands and code |
