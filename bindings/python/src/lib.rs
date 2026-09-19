@@ -1111,10 +1111,13 @@ impl PyCandidateExplanation {
 
 impl From<calybris_core_rs::kernel::CandidateExplanation> for PyCandidateExplanation {
     fn from(candidate: calybris_core_rs::kernel::CandidateExplanation) -> Self {
-        let mut flat = Self {
-            model_id: candidate.model_id,
-            model_index: candidate.model_index,
-            status: String::new(),
+        let (model_id, model_index) = (candidate.model_id, candidate.model_index);
+        // Each row starts with only the status its verdict names, so no field
+        // is a placeholder waiting to be overwritten.
+        let row = |status: &str| Self {
+            model_id,
+            model_index,
+            status: status.to_owned(),
             gate: None,
             measured: None,
             limit: None,
@@ -1124,39 +1127,37 @@ impl From<calybris_core_rs::kernel::CandidateExplanation> for PyCandidateExplana
             latency_penalty: None,
             utility: None,
         };
+        let priced = |status: &str, terms: calybris_core_rs::kernel::UtilityTerms| Self {
+            cost_microunits: Some(terms.cost_microunits),
+            quality_adjusted: Some(terms.quality_adjusted),
+            risk_penalty: Some(terms.risk_penalty),
+            latency_penalty: Some(terms.latency_penalty),
+            utility: Some(terms.utility),
+            ..row(status)
+        };
+
         match candidate.verdict {
             CandidateVerdict::Rejected {
                 gate,
                 measured,
                 limit,
-            } => {
-                flat.status = "rejected".to_string();
-                flat.gate = Some(format!("{gate:?}"));
-                flat.measured = Some(measured);
-                flat.limit = Some(limit);
-            }
+            } => Self {
+                gate: Some(format!("{gate:?}")),
+                measured: Some(measured),
+                limit: Some(limit),
+                ..row("rejected")
+            },
             CandidateVerdict::OverBudget {
                 cost_microunits,
                 limit_microunits,
-            } => {
-                flat.status = "over_budget".to_string();
-                flat.cost_microunits = Some(cost_microunits);
-                flat.limit = Some(limit_microunits);
-            }
-            CandidateVerdict::NonPositiveUtility(terms) | CandidateVerdict::Eligible(terms) => {
-                flat.status = if terms.utility > 0 {
-                    "eligible".to_string()
-                } else {
-                    "non_positive_utility".to_string()
-                };
-                flat.cost_microunits = Some(terms.cost_microunits);
-                flat.quality_adjusted = Some(terms.quality_adjusted);
-                flat.risk_penalty = Some(terms.risk_penalty);
-                flat.latency_penalty = Some(terms.latency_penalty);
-                flat.utility = Some(terms.utility);
-            }
+            } => Self {
+                cost_microunits: Some(cost_microunits),
+                limit: Some(limit_microunits),
+                ..row("over_budget")
+            },
+            CandidateVerdict::NonPositiveUtility(terms) => priced("non_positive_utility", terms),
+            CandidateVerdict::Eligible(terms) => priced("eligible", terms),
         }
-        flat
     }
 }
 

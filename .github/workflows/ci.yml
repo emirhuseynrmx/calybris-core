@@ -321,9 +321,17 @@ jobs:
       # The pinned vectors are the determinism claim: these tests assert exact
       # hex, so passing on another architecture is the same statement as
       # "the digests do not depend on the machine".
+      # `full` rather than --all-features: the one feature outside it is
+      # loom-model, a test-only switch whose `generator` dependency has no
+      # s390x or i686 support and has nothing to do with digests.
+      #
+      # The WAL lock directory falls back to $HOME, which the cross container
+      # does not let a test write, so it is pointed at /tmp explicitly.
       - name: Digest and semantics vectors
+        env:
+          CROSS_CONTAINER_OPTS: -e CALYBRIS_WAL_LOCK_DIR=/tmp/calybris-wal-locks
         run: |
-          cross test --target ${{ matrix.target }} --all-features \
+          cross test --target ${{ matrix.target }} --features full \
             --test specification \
             --test golden_caly_proof \
             --test golden_outcome \
@@ -373,14 +381,19 @@ jobs:
       # decoration. Rebuilt from scratch, so nothing is carried over in cache.
       - name: The stamped source digest is a function of the source
         run: |
+          # Wheels go outside the checkout. Inside it they are untracked files,
+          # and the second build would see the first wheel and stamp itself
+          # dirty — which would be the check failing on its own output.
           python -m pip install --quiet maturin
-          python -m maturin build --release --out dist-first
-          python -m pip install --quiet --force-reinstall --no-deps dist-first/*.whl
+          python -m maturin build --release --out "$RUNNER_TEMP/first"
+          # With dependencies: importing calybris._core runs the package
+          # __init__, which needs pydantic.
+          python -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/first/*.whl
           first=$(python -c "import calybris._core as c; print(c.BUILD_SOURCE_DIGEST)")
 
           rm -rf target/release/build
-          python -m maturin build --release --out dist-second
-          python -m pip install --quiet --force-reinstall --no-deps dist-second/*.whl
+          python -m maturin build --release --out "$RUNNER_TEMP/second"
+          python -m pip install --quiet --force-reinstall --no-deps "$RUNNER_TEMP"/second/*.whl
           second=$(python -c "import calybris._core as c; print(c.BUILD_SOURCE_DIGEST)")
 
           echo "first  $first"

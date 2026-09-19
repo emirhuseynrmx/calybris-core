@@ -528,6 +528,10 @@ pub unsafe extern "C" fn calybris_decision_digest_hex(
 }
 
 #[cfg(test)]
+// Every test here calls an `extern "C"` entry point, which Rust only allows
+// inside `unsafe`. Semgrep's unsafe-usage rule flags each block; they are
+// marked individually rather than excluded wholesale, so a new `unsafe` in the
+// library itself is still reported.
 mod tests {
     use super::*;
 
@@ -602,6 +606,7 @@ mod tests {
 
     #[test]
     fn a_decision_across_the_boundary_matches_the_kernel() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let handle = policy();
             let request = input();
@@ -630,6 +635,7 @@ mod tests {
     /// caller holds must equal the one the kernel computes.
     #[test]
     fn a_digest_computed_from_the_c_struct_matches_the_kernel() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let handle = policy();
             let request = input();
@@ -658,6 +664,7 @@ mod tests {
 
     #[test]
     fn a_buffer_one_byte_short_writes_nothing() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let handle = policy();
             let mut buffer = [0x7f_i8; CALYBRIS_DIGEST_HEX_LEN];
@@ -675,6 +682,7 @@ mod tests {
 
     #[test]
     fn an_invented_action_is_refused_rather_than_transmuted() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let handle = policy();
             let request = input();
@@ -704,6 +712,7 @@ mod tests {
 
     #[test]
     fn a_tampered_decision_fails_verification() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let handle = policy();
             let request = input();
@@ -733,6 +742,7 @@ mod tests {
 
     #[test]
     fn every_null_is_refused_rather_than_dereferenced() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let request = input();
             let mut decision = std::mem::zeroed::<CalybrisDecision>();
@@ -757,6 +767,7 @@ mod tests {
 
     #[test]
     fn an_empty_catalog_builds_and_rejects_everything() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let mut handle = ptr::null_mut();
             let status = calybris_policy_new(&config(), ptr::null(), 0, &mut handle);
@@ -791,6 +802,7 @@ mod tests {
     /// and for a while it was not.
     #[test]
     fn a_failed_verification_clears_valid_before_it_fails() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let handle = policy();
             let request = input();
@@ -839,6 +851,7 @@ mod tests {
     /// holding whatever pointer their variable had before the call.
     #[test]
     fn a_failed_construction_clears_the_handle_before_it_fails() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let handle = policy();
             let catalog = models();
@@ -882,6 +895,7 @@ mod tests {
     /// nothing.
     #[test]
     fn catalog_order_does_not_change_the_policy() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let sorted = models();
             let mut reversed = models();
@@ -931,6 +945,7 @@ mod tests {
     /// contract must not disagree about what a valid catalog is.
     #[test]
     fn an_enabled_flag_outside_zero_and_one_is_refused() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let mut catalog = models();
             catalog[1].enabled = 2;
@@ -948,6 +963,7 @@ mod tests {
     /// than reporting a generic invalid policy.
     #[test]
     fn the_reserved_model_id_is_refused_by_name() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let mut catalog = models();
             catalog[0].model_id = 0;
@@ -964,6 +980,7 @@ mod tests {
     #[test]
     fn the_abi_version_and_crate_version_are_reported() {
         assert_eq!(calybris_abi_version(), CALYBRIS_ABI_VERSION);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let version = std::ffi::CStr::from_ptr(calybris_version());
             assert_eq!(version.to_str().expect("utf-8"), env!("CARGO_PKG_VERSION"));

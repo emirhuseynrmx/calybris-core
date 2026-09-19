@@ -112,7 +112,7 @@ def test_every_workspace_member_ships_its_manifest() -> None:
 
     for member in release_contract.workspace_members(root):
         manifest = "Cargo.toml" if member == "." else f"{member}/Cargo.toml"
-        assert manifest in shipped, (
+        assert manifest in shipped, (  # skipcq: BAN-B101
             f"{member} is a workspace member but {manifest} is not in the "
             f"source archive, so `cargo test --workspace` would fail on it"
         )
@@ -128,4 +128,4 @@ def test_the_source_archive_omits_nothing_tracked() -> None:
     omissions = release_contract.source_manifest_omissions(Path(__file__).parents[2])
     assert omissions == [], "the source archive would omit tracked files:\n  " + "\n  ".join(
         f"{name}: {reason}" for name, reason in omissions
-    )
+    )  # skipcq: BAN-B101

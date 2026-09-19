@@ -179,7 +179,7 @@ fn mutate(text: &str, seed: usize) -> String {
     let at = seed % bytes.len();
     match seed % 5 {
         0 => text[..at].to_string(), // truncated
-        1 => format!("{}{}", &text[..at], &text[at..].to_uppercase()), // case
+        1 => format!("{}{}", &text[..at], text[at..].to_uppercase()), // case
         2 => text.replacen('0', "99999999999999999999", 1), // overflow
         3 => text.replacen("null", "0", 1), // absent -> zero
         _ => text.replacen('"', "", 1), // broken quoting

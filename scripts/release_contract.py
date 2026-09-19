@@ -226,7 +226,9 @@ def validate_distributions(directory: Path, version: str) -> None:
             )
 
 
-def _validate_source_name(name: str) -> PurePosixPath:
+# One flat chain of independent refusals. Splitting it would scatter the
+# allowlist across helpers without making any single rule easier to read.
+def _validate_source_name(name: str) -> PurePosixPath:  # skipcq: PY-R1000
     if "\\" in name:
         raise SystemExit(f"source archive path is not POSIX-normalized: {name!r}")
     path = PurePosixPath(name)
@@ -291,7 +293,9 @@ def source_manifest_omissions(root: Path) -> list[tuple[str, str]]:
     answer the question, and guessing would be worse than declining.
     """
     try:
-        listed = subprocess.run(
+        # `git` from PATH, as every other call in this file resolves it; the
+        # release job runs on a runner whose PATH it controls.
+        listed = subprocess.run(  # skipcq: BAN-B607
             ["git", "ls-files"],
             cwd=root,
             capture_output=True,

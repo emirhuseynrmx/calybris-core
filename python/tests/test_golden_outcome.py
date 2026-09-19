@@ -14,7 +14,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from calybris import (
     ALL_PROVIDERS,
     KernelInput,

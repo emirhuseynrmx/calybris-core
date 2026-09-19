@@ -25,8 +25,9 @@ fn field(case: &str, name: &str) -> String {
         .find(&format!("\"label\": \"{case}\""))
         .unwrap_or_else(|| panic!("no case labelled {case}"));
     let rest = &FIXTURE[start..];
-    let end = rest.find("    }").unwrap_or(rest.len());
-    let block = &rest[..end];
+    // `split` always yields a first piece, so this is the block up to the case's
+    // closing brace, or the whole remainder if there is none.
+    let block = rest.split("    }").next().unwrap_or(rest);
 
     let key = format!("\"{name}\": \"");
     let at = block

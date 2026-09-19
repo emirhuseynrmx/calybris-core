@@ -10,9 +10,8 @@ reachable only through the private module is not really part of the API.
 
 from __future__ import annotations
 
-import pytest
-
 import calybris
+import pytest
 from calybris import (
     ALL_PROVIDERS,
     FULL_PROBABILITY_BPS,
@@ -129,7 +128,8 @@ def test_explain_agrees_with_the_decision() -> None:
 
     assert decision.selected_model_id in {c.model_id for c in eligible}
     best = max(c.utility for c in eligible)
-    chosen = next(c for c in eligible if c.model_id == decision.selected_model_id)
+    chosen = next((c for c in eligible if c.model_id == decision.selected_model_id), None)
+    assert chosen is not None, "the selected model is not among the eligible rows"
     assert chosen.utility == best
 
 
@@ -143,7 +143,9 @@ def test_the_high_level_engine_explains_too() -> None:
     rows = engine.explain(request(max_p95_latency_ms=300))
 
     assert {row.model_id for row in rows} == {1, 2}
-    assert next(row for row in rows if row.model_id == 2).gate == "Latency"
+    latency_row = next((row for row in rows if row.model_id == 2), None)
+    assert latency_row is not None, "candidate 2 was not explained"
+    assert latency_row.gate == "Latency"
 
 
 def test_an_outcome_binds_to_the_policy_the_input_and_the_decision() -> None:
