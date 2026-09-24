@@ -17,7 +17,13 @@
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
 
-> **1.0.0: the API and the formats are stable.**
+> **1.2.0: it decides exactly as 1.0.0 did, and now says what would flip it.**
+> What a losing candidate would need to win, whether one decision is in the log
+> without reading the whole log, and what a different policy would have
+> achieved — behind the `preview` flag, outside the stability promise until
+> reviewed. See [In this release](#in-this-release--120).
+>
+> **Since 1.0.0 the API and the formats are stable.**
 >
 > The version number is the promise, not a boast. `0.x` means *expect breaking
 > changes*; from 1.0.0 on there are none to expect within 1.x. The public API,
