@@ -26,8 +26,11 @@ fn merkle_split_is_the_largest_power_of_two_below_n() {
 #[cfg(feature = "preview")]
 #[kani::proof]
 fn exploration_propensities_sum_to_one() {
-    let rate: u64 = kani::any();
-    let k: u64 = kani::any();
+    // Drawn as u16 and widened: the property is about rates up to 10,000 and
+    // windows up to 1,024, and a narrow symbolic width keeps the solver on the
+    // multiplication it actually has to prove.
+    let rate = u64::from(kani::any::<u16>());
+    let k = u64::from(kani::any::<u16>());
     kani::assume(rate <= 10_000);
     kani::assume((2..=1_024).contains(&k));
     let den = 10_000 * k;
