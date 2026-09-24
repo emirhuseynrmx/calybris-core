@@ -162,7 +162,22 @@ truth.
 | `persistence` | Atomic snapshots and WAL-verified generation checkpoints |
 | `async_wal` / `instrument` | Tokio WAL *(feature `async`)*, tracing spans *(feature `observability`)* |
 
-## In this release — 1.0.0
+## In this release — 1.2.0
+
+Every 1.0 decision, digest and receipt is unchanged. What 1.2.0 adds are the
+questions a decision raises afterwards, behind the `preview` feature flag
+(released, but not yet under the stability promise — see
+[docs/PREVIEW.md](docs/PREVIEW.md)):
+
+| | |
+|---|---|
+| **What would it take?** | `counterfactual::what_would_win` — the smallest single change to a losing candidate (quality, latency, price, risk ceiling) after which the kernel selects it; `decision_margin` — how far the winner can move before it loses. Runs the real kernel, so it cannot disagree with `prescribe`. Python: `PolicySnapshot.what_would_win`. |
+| **Is it in the log?** | `merkle` — RFC 9162 inclusion and consistency proofs over log records, matching the Certificate Transparency reference vectors. One decision is checked without the whole log, and a rewritten history cannot prove itself consistent with a published head. |
+| **Would another policy do better?** | `exploration` takes a small, keyed, replayable share of near-best alternatives and records exactly how likely each was; `ope` then estimates what a different policy would have achieved from those outcomes — and says so plainly when the log cannot answer. |
+| **Settle once** | `budget::Reservation` — double spends and use after delegation are compile errors. |
+| **Signatures that outlast Ed25519** | `hybrid` (feature `preview-pq`) — Ed25519 + ML-DSA-65, valid only when both verify. The ML-DSA implementation is unaudited, hence its own flag. |
+
+## Settled in 1.0.0
 
 Everything here is something the crate had to settle before it could promise not to break it.
 

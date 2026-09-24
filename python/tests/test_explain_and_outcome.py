@@ -340,3 +340,47 @@ def test_an_unknown_disposition_is_refused() -> None:
     outcome = Outcome.applied(snapshot, asked, decision, 1, measured())
     with pytest.raises(ValueError, match="applied, abandoned or in_flight"):
         outcome.disposition = "probably_fine"
+
+
+def test_what_would_win_names_a_boundary_the_kernel_agrees_with() -> None:
+    # Preview API. The loser's quality boundary must make it win, and one basis
+    # point less must not.
+    p = policy()
+    x = request()
+    winner = p.prescribe(x).selected_model_id
+    loser = 2 if winner == 1 else 1
+    cf = p.what_would_win(x, loser)
+    assert cf is not None
+    assert cf["blocked_by_request"] is None
+    levers = {lever["lever"]: lever for lever in cf["levers"]}
+    assert levers, "some single lever must be able to flip this decision"
+    if "quality_bps" in levers:
+        boundary = levers["quality_bps"]["boundary"]
+
+        def with_quality(q: int) -> int:
+            models = catalog()
+            for m in models:
+                if m.model_id == loser:
+                    m.quality_bps = q
+            moved = PolicySnapshot(1, 1, 9_000, 1_000, 2_000, 5, models)
+            return moved.prescribe(x).selected_model_id
+
+        assert with_quality(boundary) == loser
+        assert with_quality(boundary - 1) != loser
+
+
+def test_the_winner_has_nothing_to_change_and_a_margin() -> None:
+    p = policy()
+    x = request()
+    winner = p.prescribe(x).selected_model_id
+    assert p.what_would_win(x, winner)["levers"] == []  # type: ignore[index]
+    margin = p.decision_margin(x)
+    assert margin is not None and margin["model_id"] == winner
+
+
+def test_a_request_refused_at_the_hard_limit_has_no_lever() -> None:
+    cf = policy().what_would_win(request(risk_bps=9_000), 2)
+    assert cf is not None
+    assert cf["blocked_by_request"] == "risk_hard_limit"
+    assert cf["levers"] == []
+    assert policy().decision_margin(request(risk_bps=9_000)) is None

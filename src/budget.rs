@@ -1142,6 +1142,125 @@ impl BudgetEngine {
     }
 }
 
+/// A reservation held as a value: settled once, by the code that owns it.
+///
+/// [`BudgetEngine::try_reserve`] hands back a `u64`, and a `u64` can be copied,
+/// committed twice, released after it was committed, or handed to another task
+/// that commits it while the first one is still using it. The engine refuses
+/// every one of those at run time. This type refuses them at compile time:
+///
+/// - it is neither `Clone` nor `Copy`, so there is one of it;
+/// - [`commit`](Reservation::commit) and [`release`](Reservation::release) take
+///   it by value, so after either one the reservation cannot be touched again;
+/// - handing it to another task moves it, so the sender can no longer use it.
+///
+/// ```compile_fail
+/// # use calybris_core::budget::BudgetEngine;
+/// let engine = BudgetEngine::new();
+/// engine.ensure_tenant("t", 100);
+/// let r = engine.reserve_owned("t", 10).unwrap();
+/// r.commit(10).unwrap();
+/// r.commit(10).unwrap(); // error: use of moved value
+/// ```
+///
+/// ```compile_fail
+/// # use calybris_core::budget::BudgetEngine;
+/// let engine = BudgetEngine::new();
+/// engine.ensure_tenant("t", 100);
+/// let r = engine.reserve_owned("t", 10).unwrap();
+/// let copy = r.clone(); // error: Reservation is not Clone
+/// ```
+///
+/// Dropping one without settling it **keeps the hold**, exactly as a cancelled
+/// call does in the Python budget: the work may have started before the drop,
+/// and returning the money then would be an accidental refund. The budget stays
+/// conserved and the hold stays visible in
+/// [`active_reservations`](BudgetEngine::active_reservations) until someone
+/// releases it by id, which [`into_id`](Reservation::into_id) hands over.
+///
+/// Motivated by a catalog of 63 production budget overruns in LLM-agent
+/// frameworks, several of them double spends and uses after delegation:
+/// Khan, arXiv:2606.04056. Behind feature `preview`.
+#[cfg(feature = "preview")]
+#[must_use = "a reservation holds budget until it is committed or released"]
+pub struct Reservation<'engine> {
+    engine: &'engine BudgetEngine,
+    id: u64,
+    amount_microcents: i64,
+}
+
+#[cfg(feature = "preview")]
+impl std::fmt::Debug for Reservation<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reservation")
+            .field("id", &self.id)
+            .field("amount_microcents", &self.amount_microcents)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "preview")]
+impl BudgetEngine {
+    /// [`try_reserve`](Self::try_reserve), returning an owned [`Reservation`].
+    pub fn reserve_owned(
+        &self,
+        tenant_id: &str,
+        cost_microcents: i64,
+    ) -> Result<Reservation<'_>, BudgetReservation> {
+        match self.try_reserve(tenant_id, cost_microcents) {
+            (BudgetReservation::Reserved { .. }, Some(id)) => Ok(Reservation {
+                engine: self,
+                id,
+                amount_microcents: cost_microcents,
+            }),
+            (refused, _) => Err(refused),
+        }
+    }
+}
+
+#[cfg(feature = "preview")]
+impl Reservation<'_> {
+    /// The engine's id for this reservation.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// What was reserved.
+    #[must_use]
+    pub fn amount_microcents(&self) -> i64 {
+        self.amount_microcents
+    }
+
+    /// Commits the actual cost and consumes the reservation.
+    ///
+    /// When the actual cost exceeds the hold and the tenant cannot cover the
+    /// difference, the engine keeps the reservation in place and this returns
+    /// it in `Err`, together with the settlement, so the caller decides whether
+    /// to release it or retry. It is never silently lost.
+    pub fn commit(
+        self,
+        actual_microcents: i64,
+    ) -> Result<BudgetSettlement, (BudgetSettlement, Self)> {
+        match self.engine.commit(self.id, actual_microcents) {
+            overrun @ BudgetSettlement::Overrun { .. } => Err((overrun, self)),
+            settled => Ok(settled),
+        }
+    }
+
+    /// Returns the whole hold to the tenant and consumes the reservation.
+    pub fn release(self) -> BudgetSettlement {
+        self.engine.release(self.id)
+    }
+
+    /// Gives up ownership and returns the id, for settling through the
+    /// engine's id-based methods. The hold stays until then.
+    #[must_use]
+    pub fn into_id(self) -> u64 {
+        self.id
+    }
+}
+
 impl Default for BudgetEngine {
     // skipcq: RS-A1008
     // Delegating to `new()` is the form `clippy::new_without_default` requires.

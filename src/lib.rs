@@ -15,6 +15,15 @@
 //! - **`async_wal`**: Non-blocking WAL via Tokio (feature `async`)
 //! - **`instrument`**: Structured tracing instrumentation (feature `observability`)
 //!
+//! Behind the `preview` feature, released but not yet under the 1.x stability
+//! promise (`docs/PREVIEW.md`):
+//!
+//! - **`counterfactual`**: what a losing candidate would need to win, and the winner's margin
+//! - **`merkle`**: RFC 9162 inclusion and consistency proofs over a decision log
+//! - **`exploration`**: keyed, replayable exploration with exact recorded propensities
+//! - **`ope`**: off-policy estimates of what a different policy would have achieved
+//! - **`hybrid`**: Ed25519 + ML-DSA-65 hybrid signatures (feature `preview-pq`)
+//!
 //! ```no_run
 //! use calybris_core::kernel::*;
 //! use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
@@ -44,16 +53,33 @@ pub mod builder;
 pub mod certificate;
 /// Runtime configuration and validation.
 pub mod config;
+// What would have to change for a decision to come out differently (feature `preview`). Documented in the module itself.
+#[cfg(feature = "preview")]
+pub mod counterfactual;
 /// Canonical SHA-256 digests for audit binding.
 pub mod digest;
+// Keyed, replayable exploration among near-best candidates (feature `preview`). Documented in the module itself.
+#[cfg(feature = "preview")]
+pub mod exploration;
 /// Fixed-point financial layer: ledger digest and conservation proofs.
 pub mod finance;
+// Ed25519 + ML-DSA-65 hybrid signatures over an artifact digest (feature `preview-pq`). Documented in the module itself.
+#[cfg(feature = "preview-pq")]
+pub mod hybrid;
 /// Structured tracing instrumentation.
 #[cfg(feature = "observability")]
 pub mod instrument;
+#[cfg(kani)]
+mod kani_proofs;
 /// Allocation-free prescriptive decision kernel.
 pub mod kernel;
-/// Decision outcomes: what happened after a decision, and how it was chosen.
+// RFC 9162 Merkle inclusion and consistency proofs over a decision log (feature `preview`). Documented in the module itself.
+#[cfg(feature = "preview")]
+pub mod merkle;
+// Off-policy estimates of what a different policy would have achieved (feature `preview`). Documented in the module itself.
+#[cfg(feature = "preview")]
+pub mod ope;
+// Decision outcomes: what happened after a decision, and how it was chosen. Documented in the module itself.
 pub mod outcome;
 /// Snapshot persistence and crash recovery.
 #[cfg(feature = "serde")]

@@ -177,3 +177,31 @@ fn the_same_input_decides_identically() {
         assert_eq!(policy.prescribe(request()), first);
     }
 }
+
+/// The two refusals made before any candidate is looked at, at their exact
+/// boundaries: risk *at* the hard limit is refused, and confidence *at* the
+/// floor is accepted. A rule learned as `risk > t` therefore corresponds to a
+/// hard limit of `t + 1`, not `t`; the difference is one request, on the
+/// boundary, and it is the kind of difference that only shows up in production.
+#[test]
+fn request_level_refusals_hold_at_their_exact_boundaries() {
+    use calybris_core::kernel::KernelReason;
+    let p = policy(vec![model(1, 9_000, 1)]);
+    let at = |risk: u16, confidence: u16| {
+        p.prescribe(KernelInput {
+            risk_bps: risk,
+            confidence_bps: confidence,
+            ..request()
+        })
+    };
+    // hard_risk_limit_bps = 9_000: refused at 9_000, not at 8_999.
+    assert_eq!(at(9_000, 9_000).reason, KernelReason::RiskHardLimit);
+    assert_ne!(at(8_999, 9_000).reason, KernelReason::RiskHardLimit);
+    // minimum_confidence_bps = 1_000: accepted at 1_000, refused at 999.
+    assert_ne!(at(1_000, 1_000).reason, KernelReason::ConfidenceHardLimit);
+    assert_eq!(at(1_000, 999).reason, KernelReason::ConfidenceHardLimit);
+    // Risk is checked before confidence.
+    assert_eq!(at(9_000, 0).reason, KernelReason::RiskHardLimit);
+    // Refused before any candidate is evaluated.
+    assert_eq!(at(9_000, 9_000).evaluated_models, 0);
+}

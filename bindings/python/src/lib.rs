@@ -585,6 +585,56 @@ impl PyPolicySnapshot {
             .collect())
     }
 
+    /// What `model_id` would need, one lever at a time, to be selected.
+    ///
+    /// Preview API (not yet covered by the 1.x stability promise). Each entry in
+    /// `levers` names a lever of that candidate, its value today, and the value
+    /// closest to today at which the kernel would select it, computed by running
+    /// the real kernel rather than a second formula. `None` when the model is not
+    /// in the catalog.
+    fn what_would_win<'py>(
+        &self,
+        py: Python<'py>,
+        input: PyKernelInput,
+        model_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let rust_input = validate_input(input)?;
+        let Some(cf) =
+            calybris_core_rs::counterfactual::what_would_win(&self.inner, rust_input, model_id)
+        else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("model_id", cf.model_id)?;
+        d.set_item("selected_model_id", cf.decision.selected_model_id)?;
+        d.set_item(
+            "blocked_by_request",
+            cf.blocked_by_request.map(|r| r.to_string()),
+        )?;
+        d.set_item("levers", requirements_to_list(py, &cf.levers)?)?;
+        Ok(Some(d))
+    }
+
+    /// How far the selected candidate's levers can move before it loses.
+    ///
+    /// Preview API. `None` when nothing was selected. A lever missing from
+    /// `levers` cannot make the winner lose on its own.
+    fn decision_margin<'py>(
+        &self,
+        py: Python<'py>,
+        input: PyKernelInput,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let rust_input = validate_input(input)?;
+        let Some(m) = calybris_core_rs::counterfactual::decision_margin(&self.inner, rust_input)
+        else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("model_id", m.model_id)?;
+        d.set_item("levers", requirements_to_list(py, &m.levers)?)?;
+        Ok(Some(d))
+    }
+
     fn utility_for_model(&self, input: PyKernelInput, model_id: u32) -> PyResult<Option<i64>> {
         let rust_input = validate_input(input)?;
         Ok(self.inner.utility_for_model(rust_input, model_id))
@@ -1482,6 +1532,33 @@ impl PyOutcome {
             self.revision()
         )
     }
+}
+
+fn requirements_to_list<'py>(
+    py: Python<'py>,
+    levers: &[calybris_core_rs::counterfactual::Requirement],
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    use calybris_core_rs::counterfactual::Lever;
+    levers
+        .iter()
+        .map(|r| {
+            let d = PyDict::new(py);
+            d.set_item(
+                "lever",
+                match r.lever {
+                    Lever::QualityBps => "quality_bps",
+                    Lever::P95LatencyMs => "p95_latency_ms",
+                    Lever::PriceScalePpm => "price_scale_ppm",
+                    Lever::RiskCeilingBps => "risk_ceiling_bps",
+                    Lever::Enabled => "enabled",
+                },
+            )?;
+            d.set_item("current", r.current)?;
+            d.set_item("boundary", r.boundary)?;
+            d.set_item("cost_at_boundary_microunits", r.cost_at_boundary_microunits)?;
+            Ok(d)
+        })
+        .collect()
 }
 
 #[pymodule]

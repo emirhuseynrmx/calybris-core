@@ -47,6 +47,25 @@ single policy needs more than 63 groups, that policy is usually two policies: a
 request rarely has every group as a real candidate, and narrower catalogs make
 `compare_policies` mean something.
 
+## Before any candidate: the request-level refusals
+
+Two checks run on the request alone, before a single candidate is looked at.
+A request that fails either is refused with no candidate evaluated, and
+`explain` returns an empty candidate list for it.
+
+1. `risk_bps >= hard_risk_limit_bps` → `RiskHardLimit`
+2. `confidence_bps < minimum_confidence_bps` → `ConfidenceHardLimit`
+
+Risk is checked first. Note the two comparisons point different ways, and both
+boundaries are part of the contract: a request whose risk is **exactly at** the
+hard limit is refused, and a request whose confidence is **exactly at** the floor
+is accepted. A rule written elsewhere as "refuse when risk is above `t`" therefore
+corresponds to `hard_risk_limit_bps = t + 1`, not `t`.
+
+The per-candidate `risk_ceiling_bps` gate below is the other way round again: a
+candidate accepts a request whose risk is equal to its ceiling and refuses one
+above it.
+
 ## The gates, in order
 
 A candidate is checked in this order and reported against the **first** gate it

@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -34,7 +34,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(kani)"] }
 
 [features]
 default = ["wal"]
@@ -44,6 +44,17 @@ async = ["wal", "dep:tokio"]
 observability = ["dep:tracing"]
 provenance = ["dep:ed25519-dalek"]
 full = ["wal", "async", "observability", "provenance"]
+# Additions that are released but not yet covered by the 1.x stability promise:
+# counterfactuals and decision margins, Merkle inclusion and consistency proofs,
+# keyed verifiable exploration, off-policy estimates and owned budget
+# reservations. Each graduates to a stable feature in a later 1.x release once it
+# has been reviewed; until then its API may change in a minor release.
+# docs/PREVIEW.md says what each one does and what it does not claim.
+preview = ["dep:hmac"]
+# Ed25519 + ML-DSA-65 (FIPS 204) hybrid signatures over any artifact digest.
+# Separate from `preview` because the ML-DSA implementation it pulls in has not
+# been independently audited; turn it on knowing that.
+preview-pq = ["preview", "provenance", "dep:ml-dsa"]
 # Test-only dependency switch. `cfg(loom)` is enabled separately by
 # `CALYBRIS_LOOM=1`, so `--all-features` keeps standard synchronization.
 loom-model = ["dep:loom"]
@@ -53,6 +64,7 @@ sha2 = "0.11"
 hmac = { version = "0.13", optional = true }
 subtle = { version = "2.6", optional = true }
 ed25519-dalek = { version = "2", optional = true }
+ml-dsa = { version = "0.1.1", optional = true, default-features = false, features = ["alloc"] }
 file-id = { version = "0.2.3", optional = true }
 fs2 = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
