@@ -244,4 +244,24 @@ mod tests {
             Err(HybridError::MalformedMlDsa)
         );
     }
+
+    #[test]
+    fn an_invalid_ed25519_public_key_is_malformed() {
+        let s = signer();
+        let d = [9_u8; 32];
+        let sig = s.sign(&d).unwrap();
+        let bad = (0_u8..=255)
+            .map(|b| [b; 32])
+            .find(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_err())
+            .expect("some 32-byte string is not a curve point");
+        let mut pk = s.public_key();
+        pk.ed25519 = bad;
+        assert_eq!(verify(&pk, &d, &sig), Err(HybridError::MalformedEd25519));
+    }
+
+    #[test]
+    fn the_signer_debug_output_shows_no_key_material() {
+        let shown = format!("{:?}", signer());
+        assert_eq!(shown, "HybridSigner { .. }");
+    }
 }

@@ -452,4 +452,17 @@ mod tests {
         other.acted_model_id ^= 1;
         assert_ne!(r.digest(&p, &input(3)), other.digest(&p, &input(3)));
     }
+
+    #[test]
+    fn a_refused_request_acts_on_nothing_and_records_no_selection() {
+        let p = policy();
+        let x = KernelInput {
+            risk_bps: 9_000,
+            ..input(1)
+        };
+        let r = explore(&p, x, cfg(5_000, 1_000_000), &KEY).unwrap();
+        assert_eq!((r.acted_model_id, r.window_size, r.explored), (0, 0, false));
+        assert!(r.selection().is_none());
+        verify(&p, x, &KEY, &r).unwrap();
+    }
 }

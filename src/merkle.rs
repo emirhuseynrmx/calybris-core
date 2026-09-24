@@ -518,4 +518,59 @@ mod tests {
         manual.update(h.root);
         assert_eq!(h.digest(), <[u8; 32]>::from(manual.finalize()));
     }
+
+    #[test]
+    fn consistency_between_equal_sizes_and_impossible_sizes() {
+        let d = leaves(6);
+        let h = head(&d);
+        verify_consistency(&h, &h, &[]).unwrap();
+        let mut other = h;
+        other.root[0] ^= 1;
+        assert_eq!(
+            verify_consistency(&other, &h, &[]),
+            Err(MerkleError::RootMismatch)
+        );
+        assert_eq!(
+            verify_consistency(&h, &h, &[[0; 32]]),
+            Err(MerkleError::BadProofLength)
+        );
+        let empty = TreeHead {
+            size: 0,
+            root: h.root,
+        };
+        assert!(matches!(
+            verify_consistency(&empty, &h, &[]),
+            Err(MerkleError::BadSizes { .. })
+        ));
+        let bigger = TreeHead {
+            size: 7,
+            root: h.root,
+        };
+        assert!(matches!(
+            verify_consistency(&bigger, &h, &[]),
+            Err(MerkleError::BadSizes { .. })
+        ));
+        // A non-power-of-two old tree with no proof at all.
+        let old = head(&d[..3]);
+        assert_eq!(
+            verify_consistency(&old, &h, &[]),
+            Err(MerkleError::BadProofLength)
+        );
+        // Too long a proof runs past the root.
+        let mut p = consistency_proof(&d, 3).unwrap();
+        p.extend([[1; 32]; 4]);
+        assert!(verify_consistency(&old, &h, &p).is_err());
+    }
+
+    #[test]
+    fn a_truncated_consistency_proof_is_too_short() {
+        let d = leaves(11);
+        let (old, new) = (head(&d[..5]), head(&d));
+        let p = consistency_proof(&d, 5).unwrap();
+        assert!(p.len() > 1);
+        assert_eq!(
+            verify_consistency(&old, &new, &p[..p.len() - 1]),
+            Err(MerkleError::BadProofLength)
+        );
+    }
 }

@@ -207,21 +207,17 @@ pub fn decision_margin(policy: &PolicySnapshot, input: KernelInput) -> Option<Ma
     };
     let mut levers = Vec::new();
 
-    // Quality: the lowest value at which it still wins. No boundary if it
-    // survives all the way down to zero.
+    // Quality: the lowest value at which it still wins. There is always one:
+    // at quality zero its quality-adjusted value is zero, so its utility cannot
+    // be above zero and it cannot be eligible, let alone selected.
     let q = u64::from(model.quality_bps);
-    if !wins(KernelModel {
-        quality_bps: 0,
-        ..model
+    if let Some(b) = lowest_true(0, q, |v| {
+        wins(KernelModel {
+            quality_bps: v as u16,
+            ..model
+        })
     }) {
-        if let Some(b) = lowest_true(0, q, |v| {
-            wins(KernelModel {
-                quality_bps: v as u16,
-                ..model
-            })
-        }) {
-            levers.push(plain(Lever::QualityBps, q, b));
-        }
+        levers.push(plain(Lever::QualityBps, q, b));
     }
 
     // Latency: the highest value at which it still wins.
@@ -331,20 +327,11 @@ fn priced(
     model: KernelModel,
     scale_ppm: u64,
 ) -> Requirement {
-    let moved = scaled(model, scale_ppm);
-    let explanation = with_model(policy, index, moved).explain(input);
-    let cost = explanation
-        .candidates
-        .iter()
-        .find(|c| c.model_id == model.model_id)
-        .and_then(|c| match c.verdict {
-            crate::kernel::CandidateVerdict::Eligible(t)
-            | crate::kernel::CandidateVerdict::NonPositiveUtility(t) => Some(t.cost_microunits),
-            crate::kernel::CandidateVerdict::OverBudget {
-                cost_microunits, ..
-            } => Some(cost_microunits),
-            crate::kernel::CandidateVerdict::Rejected { .. } => None,
-        });
+    // Only ever called at a scale where this candidate is the one selected, so
+    // the decision's own estimated cost is this candidate's cost.
+    let decision = with_model(policy, index, scaled(model, scale_ppm)).prescribe(input);
+    debug_assert!(selected(&decision, model.model_id));
+    let cost = Some(decision.estimated_cost_microunits);
     Requirement {
         lever: Lever::PriceScalePpm,
         current: PPM,
@@ -442,14 +429,17 @@ mod tests {
 
     #[test]
     fn each_boundary_is_exact_one_step_short_loses() {
+        // Close enough that quality, latency and price can each flip it alone.
         let p = policy(vec![
-            model(1, 9_000, 100, 1_000_000),
-            model(2, 8_000, 300, 1_000_000),
+            model(1, 9_000, 100, 1_000_000_000),
+            model(2, 8_950, 150, 1_000_000_000),
         ]);
         let x = input();
         assert_eq!(p.prescribe(x).selected_model_id, 1);
         let cf = what_would_win(&p, x, 2).unwrap();
-        assert!(!cf.levers.is_empty());
+        for l in [Lever::QualityBps, Lever::P95LatencyMs, Lever::PriceScalePpm] {
+            assert!(lever(&cf.levers, l).is_some(), "{l:?} can flip it");
+        }
         for r in &cf.levers {
             let at = |v: u64| match r.lever {
                 Lever::QualityBps => with(&p, 2, |m| KernelModel {
@@ -587,5 +577,146 @@ mod tests {
         assert_eq!(highest_true(0, 100, |v| v <= 37), Some(37));
         assert_eq!(highest_true(0, 100, |_| false), None);
         assert_eq!(highest_true(5, 5, |_| true), Some(5));
+    }
+
+    #[test]
+    fn a_request_below_the_confidence_floor_has_no_lever() {
+        let p = PolicySnapshot::try_new(
+            1,
+            1,
+            9_000,
+            5_000,
+            0,
+            1_000,
+            vec![
+                model(1, 9_000, 100, 1_000_000),
+                model(2, 8_000, 300, 1_000_000),
+            ],
+        )
+        .unwrap();
+        let x = KernelInput {
+            confidence_bps: 1_000,
+            ..input()
+        };
+        let cf = what_would_win(&p, x, 2).unwrap();
+        assert_eq!(
+            cf.blocked_by_request,
+            Some(KernelReason::ConfidenceHardLimit)
+        );
+        assert!(cf.levers.is_empty());
+    }
+
+    #[test]
+    fn there_is_no_margin_when_nothing_was_selected() {
+        let p = policy(vec![model(1, 9_000, 100, 1_000_000)]);
+        assert!(decision_margin(
+            &p,
+            KernelInput {
+                risk_bps: 9_000,
+                ..input()
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn the_price_boundaries_are_exact_and_carry_the_kernels_cost() {
+        // Close in quality and dear, so price decides: a few percent either way flips it.
+        let p = policy(vec![
+            model(1, 9_000, 100, 1_000_000_000),
+            model(2, 8_900, 100, 1_000_000_000),
+        ]);
+        let x = input();
+        let at = |id: u32, s: u64| with(&p, id, |m| scaled(m, s)).prescribe(x);
+
+        let win = lever(
+            &what_would_win(&p, x, 2).unwrap().levers,
+            Lever::PriceScalePpm,
+        )
+        .expect("a cheaper loser wins");
+        let d = at(2, win.boundary);
+        assert_eq!(d.selected_model_id, 2);
+        assert_eq!(
+            win.cost_at_boundary_microunits,
+            Some(d.estimated_cost_microunits)
+        );
+        assert_ne!(at(2, win.boundary + 1).selected_model_id, 2);
+
+        let margin = lever(
+            &decision_margin(&p, x).unwrap().levers,
+            Lever::PriceScalePpm,
+        )
+        .expect("a dearer winner loses");
+        assert_eq!(at(1, margin.boundary).selected_model_id, 1);
+        assert_ne!(at(1, margin.boundary + 1).selected_model_id, 1);
+    }
+
+    #[test]
+    fn the_risk_ceiling_boundary_is_the_request_risk() {
+        // The better candidate is turned away at the risk-ceiling gate; raising
+        // its ceiling to the request's risk is exactly what it takes.
+        let mut guarded = model(2, 9_900, 10, 1);
+        guarded.risk_ceiling_bps = 50;
+        let p = policy(vec![model(1, 9_000, 100, 1_000_000), guarded]);
+        let x = input(); // risk_bps = 100
+        let r = lever(
+            &what_would_win(&p, x, 2).unwrap().levers,
+            Lever::RiskCeilingBps,
+        )
+        .expect("ceiling lever");
+        assert_eq!((r.current, r.boundary), (50, 100));
+
+        // And for the winner, lowering its ceiling below the request's risk loses.
+        let p = policy(vec![
+            model(1, 9_000, 100, 1_000_000),
+            model(2, 8_000, 300, 1_000_000),
+        ]);
+        let m = lever(
+            &decision_margin(&p, x).unwrap().levers,
+            Lever::RiskCeilingBps,
+        )
+        .expect("winner ceiling");
+        assert_eq!(m.boundary, 100);
+    }
+
+    #[test]
+    fn latency_alone_can_decide_and_its_boundary_is_exact() {
+        // Identical but for latency, so only latency separates them; at equal
+        // latency the tie-break picks model 1, so model 2 must be strictly faster.
+        let p = policy(vec![
+            model(1, 9_000, 100, 1_000),
+            model(2, 9_000, 300, 1_000),
+        ]);
+        let x = input();
+        let r = lever(
+            &what_would_win(&p, x, 2).unwrap().levers,
+            Lever::P95LatencyMs,
+        )
+        .expect("latency lever");
+        assert_eq!((r.current, r.boundary), (300, 99));
+    }
+
+    #[test]
+    fn a_lever_that_cannot_make_the_winner_lose_is_left_out_of_the_margin() {
+        // No latency penalty and a riskless request: latency and the risk
+        // ceiling can move anywhere without the winner losing.
+        let p = PolicySnapshot::try_new(
+            1,
+            1,
+            9_000,
+            0,
+            0,
+            0,
+            vec![model(1, 9_000, 100, 1_000), model(2, 8_000, 100, 1_000)],
+        )
+        .unwrap();
+        let x = KernelInput {
+            risk_bps: 0,
+            ..input()
+        };
+        let m = decision_margin(&p, x).unwrap();
+        assert!(lever(&m.levers, Lever::P95LatencyMs).is_none());
+        assert!(lever(&m.levers, Lever::RiskCeilingBps).is_none());
+        assert!(lever(&m.levers, Lever::QualityBps).is_some());
     }
 }

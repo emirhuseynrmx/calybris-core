@@ -228,3 +228,81 @@ fn a_refused_reservation_is_an_error_carrying_the_reason() {
     assert!(engine.reserve_owned("t", 100).is_err());
     assert!(engine.reserve_owned("missing", 1).is_err());
 }
+
+#[test]
+fn a_persons_choice_and_a_missing_reward_are_excluded_not_defaulted() {
+    use calybris_core::outcome::Selection;
+    let p = PolicySnapshot::try_new(1, 1, 9_000, 0, 0, 0, vec![model(1, 9_000)]).unwrap();
+    let x = input(1);
+    let d = p.prescribe(x);
+    let observed = Observation {
+        succeeded: Some(true),
+        ..Observation::default()
+    };
+    let mut human = Outcome::applied(&p, &x, &d, 1, observed);
+    human.selection = Selection::human(1);
+    let silent = Outcome::applied(
+        &p,
+        &x,
+        &d,
+        2,
+        Observation {
+            realized_latency_ms: Some(5),
+            ..Observation::default()
+        },
+    );
+    let counted = Outcome::applied(&p, &x, &d, 3, observed);
+    let reward = |o: &Outcome| o.observation.succeeded.map(|s| if s { 1.0 } else { 0.0 });
+    let e = evaluate(&p, &[(x, human), (x, silent), (x, counted)], reward, None).unwrap();
+    assert_eq!((e.used, e.excluded), (1, 2));
+}
+
+#[test]
+fn a_reservation_reports_itself_and_can_be_handed_over_by_id() {
+    let engine = BudgetEngine::new();
+    engine.ensure_tenant("t", 1_000);
+    let r = engine.reserve_owned("t", 250).unwrap();
+    let id = r.id();
+    let shown = format!("{r:?}");
+    assert!(
+        shown.contains("Reservation") && shown.contains("250"),
+        "{shown}"
+    );
+    assert_eq!(r.into_id(), id);
+    assert_eq!(
+        engine.active_reservations(),
+        1,
+        "handing over the id keeps the hold"
+    );
+    assert!(matches!(
+        engine.release(id),
+        BudgetSettlement::Released { .. }
+    ));
+    assert_eq!(engine.active_reservations(), 0);
+}
+
+#[test]
+fn a_target_that_refuses_the_request_earns_nothing_for_it() {
+    // The target's hard risk limit sits below the request's risk, so it would
+    // select nothing; that record is used, valued at zero, and not unsupported.
+    let logger = PolicySnapshot::try_new(1, 1, 9_000, 0, 0, 0, vec![model(1, 9_000)]).unwrap();
+    let target = PolicySnapshot::try_new(1, 1, 100, 0, 0, 0, vec![model(1, 9_000)]).unwrap();
+    let x = KernelInput {
+        risk_bps: 500,
+        ..input(1)
+    };
+    let d = logger.prescribe(x);
+    let o = Outcome::applied(
+        &logger,
+        &x,
+        &d,
+        1,
+        Observation {
+            succeeded: Some(true),
+            ..Observation::default()
+        },
+    );
+    let e = evaluate(&target, &[(x, o)], |_| Some(1.0), None).unwrap();
+    assert_eq!((e.used, e.matched, e.unsupported), (1, 0, 0));
+    assert_eq!(e.ips, 0.0);
+}
