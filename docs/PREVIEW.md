@@ -1,0 +1,148 @@
+# Preview features
+
+Released in 1.2.0, behind the `preview` and `preview-pq` feature flags, and
+**not yet covered by the 1.x stability promise**. Their APIs may change in a
+minor release. Each one graduates to a stable feature in a later 1.x release
+after review; graduating is an addition, so code that did not turn a preview
+flag on is unaffected either way.
+
+Nothing on this page changes a decision. The kernel, the gate order, the
+utility, the tie-break and every existing digest are exactly as in 1.0.0; the
+features below read decisions, or add new artifacts under new digest tags.
+
+```toml
+calybris-core = { version = "1.2", features = ["preview"] }      # everything below except hybrid signatures
+calybris-core = { version = "1.2", features = ["preview-pq"] }   # adds Ed25519 + ML-DSA-65 hybrid signatures
+```
+
+| Module | Question it answers | New digest tag |
+|---|---|---|
+| `counterfactual` | What would this candidate need to win? How far can the winner move before it loses? | — |
+| `merkle` | Is this one decision in the log? Is today's log an extension of yesterday's? | `calymth1` |
+| `exploration` | Take a small, keyed, replayable share of near-best alternatives, and record exactly how likely each choice was | `calyexp1` |
+| `ope` | What would a *different* policy have achieved, estimated from outcomes that were observed? | — |
+| `budget::Reservation` | A reservation that can be settled once, by the code that owns it | — |
+| `hybrid` (`preview-pq`) | A signature that stays convincing if either Ed25519 or ML-DSA is broken | `calyhyb1` |
+
+## `counterfactual`
+
+`what_would_win(policy, input, model_id)` returns, for a candidate that was not
+selected, the smallest change to **one** of its levers — quality, p95 latency,
+price, risk ceiling, or being switched on — after which the kernel selects it.
+`decision_margin(policy, input)` returns, for the winner, how far each lever can
+move before it stops winning.
+
+Both run the real kernel on a copy of the policy with one field changed and
+search for the boundary, so there is no second formula to drift from
+`prescribe`. The tests check that every boundary is exact: at the boundary the
+candidate wins, one step short it does not.
+
+What it does not claim: a single-lever answer. A candidate that could win only by
+moving two levers together has no answer here, and the lever is left out rather
+than guessed. The answer is about this request and this catalog; it says
+nothing about what the candidate *should* change.
+
+Python: `PolicySnapshot.what_would_win(input, model_id)` and
+`PolicySnapshot.decision_margin(input)`.
+
+Research: counterfactual explanations as recourse — Wachter, Mittelstadt and
+Russell, [arXiv:1711.00399](https://arxiv.org/abs/1711.00399); exact recourse for
+linear, integer-scored decisions — Ustun, Spangher and Liu,
+[arXiv:1809.06514](https://arxiv.org/abs/1809.06514).
+
+## `merkle`
+
+RFC 9162 (Certificate Transparency 2.0) Merkle trees over log records:
+`inclusion_proof` / `verify_inclusion` for one record, `consistency_proof` /
+`verify_consistency` for "the tree of size *m* is a prefix of the tree of size
+*n*". A log rewritten after its head was published cannot produce a consistency
+proof. `leaf_from_entry_hash` turns a WAL `entry_hash` into leaf data, so the
+tree commits to what the hash chain already commits to.
+
+The tree is the standard one, checked against the Certificate Transparency
+reference vectors, so any RFC 9162 verifier can check these proofs without this
+crate. `TreeHead::digest` (`calymth1`) is the 32 bytes a signer or an
+independent witness signs.
+
+What it does not claim: publication or witnessing. It produces and checks the
+proofs; getting a head co-signed by witnesses the operator does not control is
+a deployment decision.
+
+Research: witness co-signing — Syta et al.,
+[arXiv:1503.08768](https://arxiv.org/abs/1503.08768).
+
+## `exploration`
+
+A deterministic kernel can never learn what its second choice would have done.
+`explore(policy, input, config, key)` lets the kernel decide as usual, then,
+among eligible candidates within `window_microunits` of the winner's utility,
+takes an alternative on `rate_bps` of requests. The draw is
+`HMAC-SHA256(key, "calyexp1" ‖ policy digest ‖ input digest)`: fixed by the
+policy, the request and the key, unpredictable without the key, and replayed
+exactly by `verify`. The record carries the exact probability of the choice as
+a fraction, and `ExplorationRecord::selection()` turns it into the `Selection`
+an `Outcome` already records.
+
+What it does not claim: public verifiability. Only a holder of the key can
+replay the draw. A draw anyone can check needs a verifiable random function
+(RFC 9381), which is not here.
+
+Research: why a system that learns only from its own approvals fools itself —
+Scarone et al., [arXiv:2606.18479](https://arxiv.org/abs/2606.18479); logged
+propensities — Li et al., [arXiv:1003.0146](https://arxiv.org/abs/1003.0146).
+
+## `ope`
+
+`evaluate(target, logs, reward, clip)` estimates a target policy's mean reward
+from `(request, Outcome)` pairs, using the propensity each outcome recorded:
+IPS with an approximate 95% interval, self-normalised IPS, and the effective
+sample size. Outcomes with no propensity (a person chose) or paired with the
+wrong request are excluded and counted.
+
+What it does not claim, stated in the result: a log written only by the kernel's
+own ranking cannot speak for choices it never made. Those records are counted in
+`Estimate::unsupported`; when that is not zero, the estimate describes only the
+requests on which the two policies agree. The remedy is `exploration`, and the
+integration test shows the pair recovering a target policy's success rate from
+logs of a policy that never ran it.
+
+Research: doubly robust estimation — Dudík, Langford and Li,
+[arXiv:1103.4601](https://arxiv.org/abs/1103.4601); offline evaluation from
+logged propensities — Li et al.,
+[arXiv:1003.5956](https://arxiv.org/abs/1003.5956); deterministic logging
+policies — Narita et al., [arXiv:2212.01925](https://arxiv.org/abs/2212.01925).
+
+## `budget::Reservation`
+
+`BudgetEngine::reserve_owned` returns a `Reservation` that is neither `Clone`
+nor `Copy`; `commit` and `release` take it by value. Double spending, settling
+after release, and using a reservation after handing it to another task are
+compile errors (checked by `compile_fail` doctests). An overrun the tenant
+cannot cover hands the reservation back instead of losing it. Dropping one
+without settling it keeps the hold, as a cancelled call does in the Python
+budget: returning money for work that may have started would be an accidental
+refund.
+
+Research: a catalog of 63 production budget overruns in LLM-agent frameworks —
+Khan, [arXiv:2606.04056](https://arxiv.org/abs/2606.04056).
+
+## `hybrid` (feature `preview-pq`)
+
+`HybridSigner::sign` signs `"calyhyb1" ‖ digest` with Ed25519 and with ML-DSA-65
+(FIPS 204, context `calybris`); `hybrid::verify` accepts only when **both**
+halves verify. Signing is deterministic and keys come from caller-held seeds.
+
+What it does not claim: an audited post-quantum implementation. The ML-DSA
+implementation used (RustCrypto `ml-dsa`) has **not been independently
+audited**, which is why this has its own flag.
+
+Research: post-quantum audit evidence — Kao,
+[arXiv:2512.00110](https://arxiv.org/abs/2512.00110).
+
+## Formal checks
+
+`src/kani_proofs.rs` holds bounded model-checking harnesses for properties the
+preview features rest on: the Merkle split, the exploration probabilities
+summing to one, and the counterfactual boundary search. They run in CI on Linux
+(`.github/workflows/kani.yml`), separately from the release gate while they are
+new. Kani: Delmas et al., [arXiv:2607.01504](https://arxiv.org/abs/2607.01504).

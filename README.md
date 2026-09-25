@@ -13,11 +13,18 @@
 [![docs.rs](https://img.shields.io/docsrs/calybris-core)](https://docs.rs/calybris-core)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/emirhuseynrmx)
 
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
 
-> **1.0.0: the API and the formats are stable.**
+> **1.2.0: it decides exactly as 1.0.0 did, and now says what would flip it.**
+> What a losing candidate would need to win, whether one decision is in the log
+> without reading the whole log, and what a different policy would have
+> achieved — behind the `preview` flag, outside the stability promise until
+> reviewed. See [In this release](#in-this-release--120).
+>
+> **Since 1.0.0 the API and the formats are stable.**
 >
 > The version number is the promise, not a boast. `0.x` means *expect breaking
 > changes*; from 1.0.0 on there are none to expect within 1.x. The public API,
@@ -57,7 +64,22 @@ selects by the rules you wrote, and a wrong rule produces a wrong decision you
 can at least see. And it proves the *integrity of the trail*, not the truth of
 your inputs.
 
-## In this release — 1.0.0
+## In this release — 1.2.0
+
+Every 1.0 decision, digest and receipt is unchanged. What 1.2.0 adds are the
+questions a decision raises afterwards, behind the `preview` feature flag
+(released, but not yet under the stability promise — see
+[docs/PREVIEW.md](docs/PREVIEW.md)):
+
+| | |
+|---|---|
+| **What would it take?** | `counterfactual::what_would_win` — the smallest single change to a losing candidate (quality, latency, price, risk ceiling) after which the kernel selects it; `decision_margin` — how far the winner can move before it loses. Runs the real kernel, so it cannot disagree with `prescribe`. Python: `PolicySnapshot.what_would_win`. |
+| **Is it in the log?** | `merkle` — RFC 9162 inclusion and consistency proofs over log records, matching the Certificate Transparency reference vectors. One decision is checked without the whole log, and a rewritten history cannot prove itself consistent with a published head. |
+| **Would another policy do better?** | `exploration` takes a small, keyed, replayable share of near-best alternatives and records exactly how likely each was; `ope` then estimates what a different policy would have achieved from those outcomes — and says so plainly when the log cannot answer. |
+| **Settle once** | `budget::Reservation` — double spends and use after delegation are compile errors. |
+| **Signatures that outlast Ed25519** | `hybrid` (feature `preview-pq`) — Ed25519 + ML-DSA-65, valid only when both verify. The ML-DSA implementation is unaudited, hence its own flag. |
+
+## Settled in 1.0.0
 
 Everything here is something the crate had to settle before it could promise not to break it.
 
@@ -402,6 +424,14 @@ inventory/capacity freshness, and an external audit.
 | [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting, supported versions |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, test gate, PR expectations |
+
+## Sponsoring
+
+Calybris Core is built and maintained by one person. If it saves you work, or you
+want the preview modules reviewed and stabilised sooner, you can support it on
+GitHub Sponsors.
+
+<a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_Calybris-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Calybris on GitHub Sponsors" /></a>
 
 ## License
 

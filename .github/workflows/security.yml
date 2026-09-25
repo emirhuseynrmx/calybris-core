@@ -161,6 +161,11 @@ jobs:
         run: cargo miri setup
 
       - name: Miri library tests
+        # The preview modules skipped below (counterfactual, exploration,
+        # hybrid and the exhaustive Merkle sweeps) contain no unsafe code and
+        # are pure computation; under Miri's interpreter their loops of kernel
+        # runs, HMAC draws and ML-DSA signatures take hours without exercising
+        # anything the rest of this job does not. They run natively in CI.
         run: >
           cargo miri test --locked --lib --all-features --
           --skip wal::
@@ -177,6 +182,11 @@ jobs:
           --skip arbitrary_inputs_never_bypass_provider_fence
           --skip decode_hex32_rejects_non_hex_strings
           --skip prescriptive_kernel
+          --skip counterfactual::
+          --skip exploration::
+          --skip hybrid::
+          --skip merkle::tests::every_
+          --skip merkle::tests::root_matches_the_naive_definition
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
 

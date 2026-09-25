@@ -79,6 +79,16 @@ is not raised within 1.x.
 | `provenance` | yes | Ed25519 signing |
 | `full` | yes | all of the above |
 | `loom-model` | **no** | test-only dependency switch, not part of the API |
+| `preview` | **no** | released, reviewed features waiting to graduate; see [PREVIEW.md](PREVIEW.md) |
+| `preview-pq` | **no** | `preview` plus hybrid signatures over an unaudited ML-DSA implementation |
+
+`preview` and `preview-pq` are the exception to everything above: what they
+enable may change in a minor release until it graduates. They never change what
+the stable API does — a build that does not turn them on decides, digests and
+verifies exactly as it would without them — and the digest tags they introduce
+(`calymth1`, `calyexp1`, `calyhyb1`) are new, so no existing artifact changes
+meaning. When a preview feature graduates it moves to a stable flag, which is an
+addition.
 
 `--no-default-features` is supported and tested. `SECURITY.md` asks a reviewer to
 run it, so it has to work — which is why every example that needs `serde` or

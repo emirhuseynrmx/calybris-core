@@ -1,0 +1,26 @@
+name: Kani
+
+# Bounded model checking of the preview features (src/kani_proofs.rs). Kept
+# out of ci.yml and out of the release preflight on purpose while these
+# harnesses are new: a failure here is a finding to read, not a gate that a
+# toolchain update can close by accident.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kani:
+    name: cargo kani --features preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          args: --features preview --lib

@@ -390,7 +390,7 @@ type RejectionCounts = RejectionHistogram;
 ///
 /// Field-less on purpose. `prescribe` runs this for every candidate and only
 /// needs to know which counter to bump; the measured values behind a gate are
-/// recovered by [`PolicySnapshot::gate_detail`] on the explanation path, which
+/// recovered by `gate_detail` on the explanation path, which
 /// is allowed to be slower.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

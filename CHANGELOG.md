@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-25
+
+1.2.0 answers the questions a decision raises after it is made — what would it
+have taken to decide otherwise, is this decision really in the log, and would a
+different policy have done better — without changing a single decision. The
+kernel, the gate order, the utility, the tie-break and every existing digest
+are exactly as in 1.0.0. There was no separate 1.1.0; what was planned for it
+is here.
+
+### Preview features
+
+New capabilities ship behind the `preview` feature flag, which is **not** yet
+covered by the 1.x stability promise (see `docs/PREVIEW.md` and
+`docs/COMPATIBILITY.md`). Each will graduate to a stable flag in a later 1.x
+release after review.
+
+- **`counterfactual`** — `what_would_win` gives the smallest single-lever change
+  (quality, latency, price, risk ceiling, enabled) after which a losing candidate
+  is selected; `decision_margin` gives how far the winner's levers can move before
+  it loses. Computed by running the real kernel and searching for the boundary,
+  so it cannot disagree with `prescribe`. Exposed in Python as
+  `PolicySnapshot.what_would_win` and `PolicySnapshot.decision_margin`.
+- **`merkle`** — RFC 9162 inclusion and consistency proofs over log records,
+  checked against the Certificate Transparency reference vectors. A tree head
+  binds under the new tag `calymth1`.
+- **`exploration`** — keyed, replayable exploration among near-best candidates,
+  recording the exact probability of each choice and converting it into the
+  `Selection` an `Outcome` already carries. New tag `calyexp1`.
+- **`ope`** — off-policy estimates (IPS, self-normalised IPS, effective sample
+  size) of what a different policy would have achieved, which count and report
+  the records a deterministic log cannot speak for instead of hiding them.
+- **`budget::Reservation`** — an owned reservation that can be settled once;
+  double spends and use after delegation are compile errors.
+- **`hybrid`** (feature `preview-pq`) — Ed25519 + ML-DSA-65 hybrid signatures over
+  any artifact digest, valid only when both halves verify. The ML-DSA
+  implementation used has not been independently audited, hence its own flag.
+  New tag `calyhyb1`.
+
+Each module cites the research it builds on; the list is in `docs/PREVIEW.md`.
+
+### Documented
+
+- `docs/DECISION_SEMANTICS.md` now states the two request-level refusals and
+  their exact boundaries: risk **at** the hard limit is refused, confidence **at**
+  the floor is accepted. This was always the behaviour; it was not written down,
+  and a rule learned as "risk above *t*" maps to a hard limit of *t* + 1. Pinned by
+  `request_level_refusals_hold_at_their_exact_boundaries`.
+
+### Checks
+
+- `src/kani_proofs.rs` and `.github/workflows/kani.yml`: bounded model checking of
+  the Merkle split, the exploration probabilities and the counterfactual search,
+  run in CI on Linux and kept out of the release gate while new.
+
 ## [1.0.0] - 2026-09-17
 
 The release that makes the API and the formats stable. Everything in it is
