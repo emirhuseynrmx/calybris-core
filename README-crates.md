@@ -13,6 +13,7 @@
 [![docs.rs](https://img.shields.io/docsrs/calybris-core)](https://docs.rs/calybris-core)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/emirhuseynrmx)
 
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
@@ -199,6 +200,14 @@ CodSpeed CI (Linux x86_64, release): ~**8.6M** `prescribe`/sec, ~115 ns/decision
 on a 22-model synthetic catalog. Hardware and workload dependent — provenance
 and a reproduction recipe are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); run
 `cargo bench --bench kernel_bench` on your own hardware.
+
+## Sponsoring
+
+Calybris Core is built and maintained by one person. If it saves you work, or you
+want the preview modules reviewed and stabilised sooner, you can support it on
+GitHub Sponsors.
+
+<a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_Calybris-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Calybris on GitHub Sponsors" /></a>
 
 ## Documentation
 

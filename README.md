@@ -13,6 +13,7 @@
 [![docs.rs](https://img.shields.io/docsrs/calybris-core)](https://docs.rs/calybris-core)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/emirhuseynrmx)
 
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
@@ -423,6 +424,14 @@ inventory/capacity freshness, and an external audit.
 | [docs/PYTHON.md](docs/PYTHON.md) | Python wrappers vs Rust core, commerce API notes |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting, supported versions |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, test gate, PR expectations |
+
+## Sponsoring
+
+Calybris Core is built and maintained by one person. If it saves you work, or you
+want the preview modules reviewed and stabilised sooner, you can support it on
+GitHub Sponsors.
+
+<a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_Calybris-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Calybris on GitHub Sponsors" /></a>
 
 ## License
 
