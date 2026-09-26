@@ -21,8 +21,14 @@
 //!    `TSTInfo`, and the signature over them verifies — RSA PKCS#1 v1.5, or
 //!    ECDSA on P-256 or P-384;
 //! 4. the signer is one of the certificates the caller **pinned**, that
-//!    certificate carries the critical `timeStamping` extended key usage, and
-//!    the token's time lies inside its validity period.
+//!    certificate's extended key usage is the critical `timeStamping` one and
+//!    nothing else (RFC 3161 §2.3: the key is reserved for timestamping), and
+//!    the token's time lies inside its validity period;
+//! 5. the signed attributes name that very certificate: an ESS
+//!    `signingCertificate` (RFC 2634, SHA-1) or `signingCertificateV2`
+//!    (RFC 5816) attribute is required, and each one present must carry the
+//!    pinned certificate's hash, and its issuer and serial number if it names
+//!    them (RFC 3161 §2.4.1).
 //!
 //! What it does not do, deliberately: build a chain to a root, or check
 //! revocation. The caller names the TSA certificates it trusts, the way a
@@ -38,7 +44,10 @@ use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use der::asn1::{Int, ObjectIdentifier, OctetString};
 use der::{Decode, Encode};
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use spki::AlgorithmIdentifierOwned;
+use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::{ExtendedKeyUsage, SubjectKeyIdentifier};
+use x509_cert::serial_number::SerialNumber;
 use x509_cert::Certificate;
 use x509_tsp::{MessageImprint, TimeStampReq, TimeStampResp, TspVersion, TstInfo};
 
@@ -62,6 +71,10 @@ const SECP384R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34")
 const ID_CE_EXT_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
 const ID_CE_SUBJECT_KEY_IDENTIFIER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
 const ID_KP_TIME_STAMPING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
+const ID_AA_SIGNING_CERTIFICATE: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.12");
+const ID_AA_SIGNING_CERTIFICATE_V2: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.47");
 
 /// Largest response [`verify_response`] reads.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -86,8 +99,14 @@ pub enum TsaError {
     AttributesMismatch,
     #[error("the TSA's signature does not verify")]
     BadSignature,
-    #[error("the signing certificate lacks the critical timeStamping key usage")]
+    #[error(
+        "the signing certificate's extended key usage is not the critical timeStamping one alone"
+    )]
     NotATimestampingCertificate,
+    #[error("the token does not name its signing certificate (ESS signingCertificate)")]
+    NoSigningCertificate,
+    #[error("the token's ESS signingCertificate names another certificate than the pinned one")]
+    SigningCertificateMismatch,
     #[error("the token's time is outside the signing certificate's validity")]
     OutsideValidity,
     #[error("a pinned certificate is malformed")]
@@ -104,6 +123,9 @@ impl From<der::Error> for TsaError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedTsa {
     cert: Certificate,
+    /// The certificate as given, which is what an ESS certificate hash is
+    /// taken over.
+    der: Vec<u8>,
 }
 
 impl PinnedTsa {
@@ -111,6 +133,7 @@ impl PinnedTsa {
     pub fn from_der(der: &[u8]) -> Result<Self, TsaError> {
         Ok(Self {
             cert: Certificate::from_der(der).map_err(|_| TsaError::BadCertificate)?,
+            der: der.to_vec(),
         })
     }
 
@@ -152,24 +175,46 @@ impl PinnedTsa {
         }
     }
 
+    /// RFC 3161 §2.3: one extended key usage extension, critical, whose only
+    /// purpose is `id-kp-timeStamping`. A certificate that may also sign for
+    /// something else is not a timestamping key.
     fn check_timestamping_usage(&self) -> Result<(), TsaError> {
-        let ok = self
+        let usages: Vec<_> = self
             .cert
             .tbs_certificate
             .extensions
             .iter()
             .flatten()
             .filter(|e| e.extn_id == ID_CE_EXT_KEY_USAGE)
-            .any(|e| {
+            .collect();
+        let ok = match usages.as_slice() {
+            [e] => {
                 e.critical
                     && ExtendedKeyUsage::from_der(e.extn_value.as_bytes())
-                        .is_ok_and(|eku| eku.0.contains(&ID_KP_TIME_STAMPING))
-            });
+                        .is_ok_and(|eku| eku.0 == [ID_KP_TIME_STAMPING])
+            }
+            _ => false,
+        };
         if ok {
             Ok(())
         } else {
             Err(TsaError::NotATimestampingCertificate)
         }
+    }
+
+    /// Whether an ESS certificate identifier names this certificate: its
+    /// hash matches, and so do the issuer and serial number if it gives
+    /// them.
+    fn is_named_by(&self, cert_hash: &[u8], hashed: &[u8], issuer: Option<&IssuerSerial>) -> bool {
+        let tbs = &self.cert.tbs_certificate;
+        cert_hash == hashed
+            && issuer.is_none_or(|is| {
+                is.serial_number == tbs.serial_number
+                    && is
+                        .issuer
+                        .iter()
+                        .any(|g| matches!(g, GeneralName::DirectoryName(n) if *n == tbs.issuer))
+            })
     }
 
     fn check_validity(&self, unix: u64) -> Result<(), TsaError> {
@@ -341,6 +386,7 @@ fn verify_token(
     let gen_time = tst.gen_time.to_unix_duration().as_secs();
     pin.check_timestamping_usage()?;
     pin.check_validity(gen_time)?;
+    check_signing_certificate(info, pin)?;
 
     let accuracy_seconds = tst.accuracy.as_ref().map_or(0, |a| {
         let sub = a.millis.unwrap_or(0) > 0 || a.micros.unwrap_or(0) > 0;
@@ -379,6 +425,101 @@ fn check_signed_attributes(info: &SignerInfo, tst_der: &[u8]) -> Result<(), TsaE
     let message_digest: OctetString = single(ID_MESSAGE_DIGEST)?.decode_as()?;
     if message_digest.as_bytes() != hash(&info.digest_alg.oid, tst_der)? {
         return Err(TsaError::AttributesMismatch);
+    }
+    Ok(())
+}
+
+/// `ESSCertID` (RFC 2634 §5.4.1): a SHA-1 hash of the signing certificate.
+#[derive(Clone, Debug, der::Sequence)]
+struct EssCertId {
+    cert_hash: OctetString,
+    #[asn1(optional = "true")]
+    issuer_serial: Option<IssuerSerial>,
+}
+
+/// `ESSCertIDv2` (RFC 5035 §4, RFC 5816): the hash algorithm is named, and
+/// is SHA-256 when it is not (`DEFAULT`, read here as absent).
+#[derive(Clone, Debug, der::Sequence)]
+struct EssCertIdV2 {
+    #[asn1(optional = "true")]
+    hash_algorithm: Option<AlgorithmIdentifierOwned>,
+    cert_hash: OctetString,
+    #[asn1(optional = "true")]
+    issuer_serial: Option<IssuerSerial>,
+}
+
+/// `IssuerSerial` (RFC 5035): the certificate's issuer and serial number.
+#[derive(Clone, Debug, der::Sequence)]
+struct IssuerSerial {
+    issuer: Vec<GeneralName>,
+    serial_number: SerialNumber,
+}
+
+/// `SigningCertificate` (RFC 2634 §5.4): the first entry names the signer.
+#[derive(Clone, Debug, der::Sequence)]
+struct SigningCertificate {
+    certs: Vec<EssCertId>,
+    #[asn1(optional = "true")]
+    _policies: Option<der::Any>,
+}
+
+/// `SigningCertificateV2` (RFC 5035 §3): the first entry names the signer.
+#[derive(Clone, Debug, der::Sequence)]
+struct SigningCertificateV2 {
+    certs: Vec<EssCertIdV2>,
+    #[asn1(optional = "true")]
+    _policies: Option<der::Any>,
+}
+
+/// RFC 3161 §2.4.1 and RFC 5816: the signed attributes must name the
+/// signing certificate, so that a token cannot be passed off as signed under
+/// another certificate for the same key. Either attribute form is accepted;
+/// each one present must name the pinned certificate by its first entry.
+fn check_signing_certificate(info: &SignerInfo, pin: &PinnedTsa) -> Result<(), TsaError> {
+    let attrs = info
+        .signed_attrs
+        .as_ref()
+        .ok_or(TsaError::AttributesMismatch)?;
+    let value = |oid: ObjectIdentifier| -> Result<Option<der::Any>, TsaError> {
+        let mut found = attrs.iter().filter(|a| a.oid == oid);
+        let Some(attr) = found.next() else {
+            return Ok(None);
+        };
+        if found.next().is_some() || attr.values.len() != 1 {
+            return Err(TsaError::AttributesMismatch);
+        }
+        Ok(attr.values.get(0).cloned())
+    };
+    let v1 = value(ID_AA_SIGNING_CERTIFICATE)?;
+    let v2 = value(ID_AA_SIGNING_CERTIFICATE_V2)?;
+    if v1.is_none() && v2.is_none() {
+        return Err(TsaError::NoSigningCertificate);
+    }
+    let unnamed = TsaError::Malformed("an ESS signing certificate attribute names no certificate");
+    if let Some(any) = v1 {
+        let sc: SigningCertificate = any.decode_as()?;
+        let first = sc.certs.first().ok_or(unnamed.clone())?;
+        let hashed = sha1::Sha1::digest(&pin.der);
+        if !pin.is_named_by(
+            first.cert_hash.as_bytes(),
+            &hashed,
+            first.issuer_serial.as_ref(),
+        ) {
+            return Err(TsaError::SigningCertificateMismatch);
+        }
+    }
+    if let Some(any) = v2 {
+        let sc: SigningCertificateV2 = any.decode_as()?;
+        let first = sc.certs.first().ok_or(unnamed)?;
+        let alg = first.hash_algorithm.as_ref().map_or(ID_SHA256, |a| a.oid);
+        let hashed = hash(&alg, &pin.der)?;
+        if !pin.is_named_by(
+            first.cert_hash.as_bytes(),
+            &hashed,
+            first.issuer_serial.as_ref(),
+        ) {
+            return Err(TsaError::SigningCertificateMismatch);
+        }
     }
     Ok(())
 }

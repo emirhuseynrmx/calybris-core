@@ -719,6 +719,32 @@ fn witness_processes_appending_at_once_each_keep_their_cosignature() {
     assert_eq!(note.signatures().len(), N + 1, "{}", note.render());
 }
 
+/// A cosignature dated far ahead of the verifier's clock is not counted: a
+/// witness whose clock runs ahead cannot make a checkpoint look fresh.
+#[test]
+fn a_cosignature_dated_in_the_future_is_not_counted() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    assert!(s
+        .cosign("w1", &wal, "c.checkpoint", 0, 1_000)
+        .status
+        .success());
+    // Year 2096.
+    assert!(s
+        .cosign("w2", &wal, "c.checkpoint", 0, 4_000_000_000)
+        .status
+        .success());
+    let out = s.verify("c.checkpoint", &[]);
+    assert_eq!(out.status.code(), Some(1));
+    let text = stdout(&out);
+    assert!(
+        text.contains("w2.example dated its cosignature 4000000000"),
+        "{text}"
+    );
+}
+
 /// A witness whose clock reads zero refuses, as C2SP tlog-witness requires,
 /// and does so before recording the checkpoint.
 #[test]

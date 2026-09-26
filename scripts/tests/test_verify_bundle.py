@@ -147,3 +147,22 @@ def test_a_cosignature_time_of_zero_or_above_2_63_is_refused(when: int, accepted
     sig = when.to_bytes(8, "big") + signature
     expected = when if accepted else None
     assert verify_bundle.cosigned_at(body, sig, key) == expected  # skipcq: BAN-B101
+
+
+def test_an_ots_file_is_reported_as_naming_the_digest_not_as_verified(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle = tmp_path / "bundle"
+    shutil.copytree(BUNDLE, bundle)
+    signed = (bundle / "000001.checkpoint.signed").read_bytes()
+    header = verify_bundle.OTS_MAGIC + b"\x01\x08" + hashlib.sha256(signed).digest()
+    ots = bundle / "000001.checkpoint.signed.ots"
+    ots.write_bytes(header + b"not a proof at all")
+    assert verify_bundle.main([str(bundle)]) == 0  # skipcq: BAN-B101
+    out = capsys.readouterr().out
+    assert "NOT verified here" in out  # skipcq: BAN-B101
+    assert "timestamps are verified only by the commands above" in out  # skipcq: BAN-B101
+
+    ots.write_bytes(verify_bundle.OTS_MAGIC + b"\x01\x08" + bytes(32))
+    assert verify_bundle.main([str(bundle)]) == 1  # skipcq: BAN-B101
+    assert "does not name the stamped bytes" in capsys.readouterr().out  # skipcq: BAN-B101

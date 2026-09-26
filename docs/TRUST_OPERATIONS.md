@@ -21,7 +21,8 @@ consistency proof extending that head. Keep old public keys for historical
 verification. Old signatures are not magically verified by a new public key.
 
 During a compromise: stop the signer, preserve the WAL and externally held
-checkpoints, revoke the key with a trusted time, establish the last checkpoint
+checkpoints, revoke the key with a trusted time and the Bitcoin tip height
+of your own node at that moment, establish the last checkpoint
 whose *signature* existed before that time, distribute a new pin and extend
 the retained witness heads. Do not regenerate a history to make it look clean.
 Content-only timestamps and the operator's own timestamp cannot establish

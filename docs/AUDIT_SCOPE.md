@@ -63,8 +63,10 @@ durability is not claimed; review storage assumptions separately.
 - `SplitView::verify` accepts only two log-signed checkpoints of one origin
   and size with different roots.
 - `KeyStatus::accepts` never accepts on the signer's own clock, nor on
-  evidence that covers only the content (`Covers::Content`); a timestamp
-  over `SignedNote::signed_by` covers the log's signature.
+  evidence that covers only the content (`Covers::Content`), nor on a
+  Bitcoin block's own time: an anchor counts only at or below the chain
+  height recorded at the revocation. A timestamp over
+  `SignedNote::signed_by` covers the log's signature.
 
 **Checkpoints**
 
@@ -79,8 +81,11 @@ durability is not claimed; review storage assumptions separately.
 - A token verifies only if the pinned certificate signed it, the signed
   attributes bind content type and message digest of the exact `TSTInfo`, the
   imprint is SHA-256 of the requested digest, the nonce matches when given,
-  the certificate carries a critical `timeStamping` EKU, and `genTime` lies in
-  its validity.
+  the certificate's extended key usage is the critical `timeStamping` one and
+  nothing else (RFC 3161 §2.3), `genTime` lies in its validity, and an ESS
+  `signingCertificate` (SHA-1) or `signingCertificateV2` attribute names the
+  pinned certificate by hash, and by issuer and serial number when it gives
+  them (RFC 3161 §2.4.1, RFC 5816).
 - DER parsing of adversarial input neither panics nor accepts ambiguity; the
   re-encoding of signed attributes as a SET OF does not let a differently
   encoded attribute set verify.

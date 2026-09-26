@@ -73,6 +73,39 @@ four questions it answers, are in `docs/TRUST.md`.
 
 ### Fixed before release
 
+- `audit`, `ots`: a Bitcoin block's own time was taken as the time a
+  signature existed, and could date a signature made after a key's
+  revocation to before it: the miner sets that time, and consensus only asks
+  that it exceed the median of the eleven blocks before. A Bitcoin anchor now
+  dates by height (`TimeSource::Bitcoin { height }`, `audit::anchored_by`),
+  counts against a revocation only at or below the chain height recorded at
+  the revocation (`KeyStatus::Revoked { at, bitcoin_height }`,
+  `calybris-verify … --revoked-at-height`), and `existed_by` / `signed_by`
+  read clocks only: witnesses and RFC 3161.
+  **Preview API change:** `KeyStatus::Revoked` gains `bitcoin_height`
+  (`KeyStatus::revoked_at(t)` for none), and `TimeEvidence::bitcoin` takes
+  the height.
+- `tsa`: a signing certificate whose extended key usage allowed other
+  purposes besides `timeStamping` was accepted, and the ESS signing
+  certificate attribute was not checked. The usage must now be
+  `timeStamping` alone (RFC 3161 §2.3), and a `signingCertificate` (SHA-1)
+  or `signingCertificateV2` attribute must name the pinned certificate
+  (RFC 3161 §2.4.1, RFC 5816): `TsaError::NoSigningCertificate`,
+  `TsaError::SigningCertificateMismatch`. FreeTSA's and DigiCert's tokens
+  pass both.
+- `audit`: a cosignature dated in the future made `Auditor::with_max_age`
+  see a fresh checkpoint (`now - time` saturated to zero). Cosignatures dated
+  more than `DEFAULT_MAX_CLOCK_SKEW` (five minutes) ahead are not counted:
+  `verify_checkpoint_at`, `Auditor::with_max_clock_skew`,
+  `AuditError::CosignedInTheFuture`, and the same in `calybris-verify`.
+- `exploration`: `word % n` favoured some results by about one part in
+  10^15, so the recorded propensities were not exact in the strict sense.
+  Draws are now uniform by rejection sampling; a draw that was not rejected
+  is unchanged, so existing records replay.
+- `scripts/verify_bundle.py` said an `.ots` file "is a proof" when it had
+  only read which digest the file names. It now says the proof is not
+  verified there and points to `ots verify`.
+
 - `ots`: a proof whose fork branches arrived out of canonical order parsed to
   a value that differed from the one its own serialization parsed to. CI's
   `ots_decode` fuzz target found it. Nodes now keep attestations and

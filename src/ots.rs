@@ -537,7 +537,8 @@ pub struct BitcoinHeader {
     pub height: u64,
     /// The header's hash, in the usual reversed hex display order.
     pub block_hash: String,
-    /// The header's timestamp, Unix seconds.
+    /// The header's timestamp, Unix seconds, as its miner set it: see
+    /// [`BitcoinConfirmed::block_time`].
     pub block_time: u64,
 }
 
@@ -562,12 +563,17 @@ impl BitcoinHeader {
 }
 
 /// A proof committed in a block that a trusted source puts on the main
-/// chain. `block_time` is the evidence.
+/// chain. `height` is the evidence: the digest existed once the chain had
+/// reached this block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BitcoinConfirmed {
     pub height: u64,
     pub block_hash: String,
-    /// The block's timestamp, Unix seconds.
+    /// The block's timestamp, Unix seconds. Indicative, not a clock: the
+    /// miner sets it, and consensus asks only that it exceed the median time
+    /// of the eleven blocks before, so it can be earlier than the block was
+    /// mined. Compare heights, not this, against a revocation
+    /// (`audit::KeyStatus`).
     pub block_time: u64,
 }
 

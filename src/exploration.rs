@@ -20,6 +20,9 @@
 //! - a requester without the key cannot predict or steer it;
 //! - the probability of the candidate that was acted on is exact and recorded,
 //!   which is what an off-policy estimate needs and cannot recover afterwards.
+//!   Exact in the strict sense: each choice is drawn uniformly by rejection
+//!   sampling rather than `word % n`, which would favour the first
+//!   `2^64 mod n` values by about one part in 10^15.
 //!
 //! What it does not do: an HMAC is checkable only by someone who holds the key.
 //! A draw that anyone can check without a secret needs a verifiable random
@@ -195,8 +198,11 @@ pub fn explore(
     let den = BASIS_POINTS * k;
 
     let draw = draw(policy, &input, key);
-    let roll = u64::from_be_bytes(draw[0..8].try_into().expect("8 bytes")) % BASIS_POINTS;
-    let pick = u64::from_be_bytes(draw[8..16].try_into().expect("8 bytes")) % k;
+    let word = |at: usize| u64::from_be_bytes(draw[at..at + 8].try_into().expect("8 bytes"));
+    let roll = uniform(BASIS_POINTS, word(0), |i| {
+        retry_word(policy, &input, key, ROLL, i)
+    });
+    let pick = uniform(k, word(8), |i| retry_word(policy, &input, key, PICK, i));
 
     // With probability `rate`, choose uniformly among all k (the winner
     // included); otherwise keep the winner. So the winner has probability
@@ -240,6 +246,46 @@ pub fn verify(
     }
 }
 
+/// Which of the draw's two numbers a retry word replaces.
+const ROLL: u8 = 0;
+const PICK: u8 = 1;
+
+/// A uniform integer in `0..n`, from `first` and, only if needed, the words
+/// `next(0)`, `next(1)`, ...
+///
+/// `word % n` favours the first `2^64 mod n` results whenever `n` does not
+/// divide 2^64. So a word among the top `2^64 mod n` values is rejected and
+/// the next one taken; what is left is a multiple of `n` values, each result
+/// covering the same number of them. The first word is kept with probability
+/// at least `1 - n / 2^64`, and then the result is `first % n`: a draw made
+/// before this sampling replays the same unless its word was one of the
+/// rejected ones.
+fn uniform(n: u64, first: u64, mut next: impl FnMut(u32) -> u64) -> u64 {
+    debug_assert!(n > 0);
+    let rejected = (u64::MAX % n + 1) % n;
+    let mut word = first;
+    let mut i = 0;
+    while rejected != 0 && word >= rejected.wrapping_neg() {
+        word = next(i);
+        i += 1;
+    }
+    word % n
+}
+
+/// A further word for `which` number of the draw, the `i`-th retry:
+/// `HMAC-SHA256(key, "calyexp1" ‖ policy digest ‖ input digest ‖ which ‖ i)`,
+/// longer than the draw's own message, so the two never coincide.
+fn retry_word(policy: &PolicySnapshot, input: &KernelInput, key: &[u8], which: u8, i: u32) -> u64 {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(EXPLORATION_TAG);
+    mac.update(&policy_digest(policy));
+    mac.update(&input_digest(input));
+    mac.update(&[which]);
+    mac.update(&i.to_be_bytes());
+    let out = mac.finalize().into_bytes();
+    u64::from_be_bytes(out[..8].try_into().expect("8 bytes"))
+}
+
 fn draw(policy: &PolicySnapshot, input: &KernelInput, key: &[u8]) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(EXPLORATION_TAG);
@@ -255,6 +301,69 @@ mod tests {
     use crate::outcome::SelectionStrategy;
 
     const KEY: [u8; 32] = [7; 32];
+
+    /// The rejection bound is exact: what is kept is a multiple of `n`, and
+    /// exactly the top `2^64 mod n` words are redrawn.
+    #[test]
+    fn uniform_rejects_exactly_the_words_that_would_bias_the_modulus() {
+        let two_64 = 1_u128 << 64;
+        for n in [
+            1,
+            2,
+            3,
+            7,
+            10,
+            64,
+            1_000,
+            BASIS_POINTS,
+            u64::MAX / 3,
+            u64::MAX,
+        ] {
+            let rejected = two_64 % u128::from(n);
+            let kept = two_64 - rejected;
+            assert_eq!(kept % u128::from(n), 0, "n={n}");
+            let never = |_| panic!("n={n}: a kept word was redrawn");
+            // The largest kept word is used as it is.
+            let top_kept = u64::try_from(kept - 1).unwrap();
+            assert_eq!(uniform(n, top_kept, never), top_kept % n);
+            if rejected > 0 {
+                // The smallest rejected word, and every one above it, is not.
+                let first_rejected = u64::try_from(kept).unwrap();
+                for w in [first_rejected, u64::MAX] {
+                    let mut asked = Vec::new();
+                    let got = uniform(n, w, |i| {
+                        asked.push(i);
+                        if i == 0 {
+                            u64::MAX
+                        } else {
+                            41
+                        }
+                    });
+                    assert_eq!(got, 41 % n, "n={n}");
+                    assert_eq!(asked, [0, 1], "n={n}: u64::MAX is rejected too");
+                }
+            }
+        }
+        // 2^64 mod 10,000 is 1,616.
+        assert_eq!(
+            uniform(BASIS_POINTS, u64::MAX - 1_616, |_| unreachable!()),
+            (u64::MAX - 1_616) % BASIS_POINTS
+        );
+        assert_eq!(uniform(BASIS_POINTS, u64::MAX - 1_615, |_| 3), 3);
+    }
+
+    #[test]
+    fn retry_words_differ_by_number_and_attempt() {
+        let policy = policy();
+        let input = input(1);
+        let words: std::collections::BTreeSet<u64> = [(ROLL, 0), (ROLL, 1), (PICK, 0), (PICK, 1)]
+            .into_iter()
+            .map(|(which, i)| retry_word(&policy, &input, &KEY, which, i))
+            .collect();
+        assert_eq!(words.len(), 4);
+        let first = u64::from_be_bytes(draw(&policy, &input, &KEY)[..8].try_into().unwrap());
+        assert!(!words.contains(&first));
+    }
 
     fn model(id: u32, quality: u16) -> KernelModel {
         KernelModel {

@@ -183,9 +183,13 @@ old key signs after the rotation, which every witness refuses.
 4. The first checkpoint under the new key must extend the last checkpoint
    the witnesses cosigned; they enforce that with a consistency proof, so the
    history is carried over by the witnesses, not by the old key.
-5. Auditors verify old checkpoints with `KeyStatus::Revoked { at }`: a
-   signature counts only if a witness quorum or a timestamp over the signed
-   note dates it before `at`. Evidence that dates only the body does not.
+5. Auditors verify old checkpoints with `KeyStatus::Revoked { at,
+   bitcoin_height }`: a signature counts only if a witness quorum or an
+   RFC 3161 token over the signed note dates it before `at`, or an
+   OpenTimestamps proof over it sits in a Bitcoin block at or below
+   `bitcoin_height`. Record that height, the tip of your own node, when you
+   revoke; a Bitcoin block's own time is set by its miner and is never
+   compared with `at`. Evidence that dates only the body does not count.
 6. Compare every checkpoint the old key signed after `at` that you can find
    with your auditors' views (`Auditor::compare`): a second history signed
    with the stolen key comes out as split-view proof.

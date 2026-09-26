@@ -18,7 +18,9 @@ A bundle directory holds the files ``calybris-verify`` writes:
     decisions.wal.jsonl        the decision log the checkpoint commits to
 
 Timestamps are checked with their own standard tools (``openssl ts -verify``,
-``ots verify`` or opentimestamps.org); this prints the commands. It exits 0
+``ots verify`` or opentimestamps.org); this prints the commands. Of an ``.ots``
+file it reads only the header, to show which digest it names: that is not a
+verification of the proof. It exits 0
 when every check it made passed and 1 otherwise. It does not replay the
 decisions: that needs the policies, and it is ``calybris-verify audit``'s job.
 """
@@ -242,7 +244,13 @@ def check_witness(r: Report, body: str, signatures: list, w: Key) -> None:
 
 
 def check_stamped(r: Report, signed_path: Path, expected: bytes) -> None:
-    """The bytes that were timestamped, and the OpenTimestamps file over them."""
+    """The bytes that were timestamped, and which digest the OTS file names.
+
+    Only the file's header is read: that it is an OpenTimestamps file whose
+    file digest is SHA-256 of the stamped bytes. The proof itself, the path
+    to a Bitcoin block and that block being on the chain, is not checked
+    here; that is what ``ots verify`` does.
+    """
     signed = signed_path.read_bytes()
     if signed == expected:
         r.ok("stamped bytes", f"{signed_path.name} is the note with the log's signature")
@@ -254,9 +262,13 @@ def check_stamped(r: Report, signed_path: Path, expected: bytes) -> None:
     proof, digest = ots.read_bytes(), hashlib.sha256(signed).digest()
     start = len(OTS_MAGIC) + 2  # the major version and the SHA-256 tag
     if proof.startswith(OTS_MAGIC) and proof[start : start + 32] == digest:
-        r.ok("OpenTimestamps file", f"is a proof of SHA-256 {digest.hex()}")
+        r.ok(
+            "OpenTimestamps file",
+            f"names SHA-256 {digest.hex()} of the stamped bytes; "
+            "the proof itself is NOT verified here (run `ots verify`)",
+        )
     else:
-        r.fail("OpenTimestamps file", "is not a proof of the stamped bytes")
+        r.fail("OpenTimestamps file", "does not name the stamped bytes")
 
 
 def check_wal(r: Report, wal_path: Path, hmac_key: bytes | None, size: int, root: bytes) -> None:
@@ -300,7 +312,10 @@ def verify(
     if r.failures:
         print(f"\nRESULT: FAILED ({r.failures} of {r.passed + r.failures} checks)")
         return 1
-    print(f"\nRESULT: verified without Calybris ({r.passed} checks)")
+    print(
+        f"\nRESULT: verified without Calybris ({r.passed} checks); "
+        "timestamps are verified only by the commands above"
+    )
     return 0
 
 

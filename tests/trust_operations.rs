@@ -344,7 +344,7 @@ fn a_log_key_rotates_through_a_checkpoint_both_keys_sign() {
     // The old key is revoked at 250. What the quorum dated before then
     // still counts; a checkpoint the thief signs afterwards gets no
     // cosignature, and nothing dates it before the revocation.
-    let revoked = KeyStatus::Revoked { at: 250 };
+    let revoked = KeyStatus::revoked_at(250);
     let seen = verify_checkpoint(&n6.render(), old.verifier(), &policy).unwrap();
     revoked
         .accepts(&[TimeEvidence::witnesses(seen.seen_by())])

@@ -31,10 +31,13 @@
 //! rewritten and a fork cannot reach the quorum. What it *can* do is sign new
 //! records, possibly dated in the past. [`KeyStatus`] closes that: once a key
 //! is marked revoked at time *t*, something it signed counts only if its
-//! *signature* is proven — by witnesses, an RFC 3161 token or a
-//! Bitcoin-anchored OpenTimestamps proof, never by the signer's own clock — to
-//! have existed before *t*. Evidence that dates only the signed content does
-//! not count: a thief can sign an old body that was timestamped long ago.
+//! *signature* is proven — by witnesses or an RFC 3161 token dating it before
+//! *t*, or by a Bitcoin anchor in a block the chain had reached when the key
+//! was revoked, never by the signer's own clock — to have existed before the
+//! revocation. Evidence that dates only the signed content does not count: a
+//! thief can sign an old body that was timestamped long ago. Nor does a
+//! Bitcoin block's own time: its miner sets it, and it can be earlier than
+//! the block (see [`TimeSource::Bitcoin`]).
 
 use crate::checkpoint::{
     Checkpoint, CheckpointError, NoteVerifier, SignedNote, ALG_COSIGNATURE_V1,
@@ -64,6 +67,17 @@ pub enum AuditError {
     Inconsistent,
     #[error("the newest witness cosignature is older than the allowed age")]
     Stale,
+    /// A cosignature dated further ahead of the verifier's clock than the
+    /// allowed skew was not counted, and without it the quorum is not met.
+    #[error(
+        "{witness} dated its cosignature {time}, later than this verifier's clock allows \
+         ({latest}); it was not counted, and the quorum is not met without it"
+    )]
+    CosignedInTheFuture {
+        witness: String,
+        time: u64,
+        latest: u64,
+    },
     #[error("no checkpoint has been accepted yet")]
     NoCheckpoint,
     #[error("nothing proves this existed before its key was revoked")]
@@ -76,6 +90,18 @@ pub enum AuditError {
         "this was first proven to exist at {existed_by}, after its key was revoked at {revoked_at}"
     )]
     SignedAfterRevocation { existed_by: u64, revoked_at: u64 },
+    /// Only a Bitcoin anchor dates the signature, and the revocation names no
+    /// chain height to compare its block with.
+    #[error(
+        "only a Bitcoin anchor dates the signature; a block's own time is set by its miner \
+         and can be earlier than the block, so give the chain height at the revocation"
+    )]
+    BitcoinNeedsHeight,
+    #[error(
+        "the signature was first anchored in Bitcoin block {height}, after the chain had \
+         reached {revoked_height} at the revocation"
+    )]
+    AnchoredAfterRevocation { height: u64, revoked_height: u64 },
 }
 
 /// The witnesses a verifier trusts and how many must cosign.
@@ -181,17 +207,57 @@ impl Witnessed {
     }
 }
 
+/// How far ahead of the verifier's clock a cosignature may be dated and still
+/// count: five minutes, enough for clocks that are merely a little apart.
+pub const DEFAULT_MAX_CLOCK_SKEW: u64 = 300;
+
 /// Checks the log's signature and the witness quorum on a checkpoint note.
+///
+/// This takes no clock, so it cannot tell a cosignature dated in the future;
+/// a verifier that has a clock should use [`verify_checkpoint_at`].
 pub fn verify_checkpoint(
     note: &str,
     log: &NoteVerifier,
     policy: &WitnessPolicy,
 ) -> Result<Witnessed, AuditError> {
+    verify_quorum(note, log, policy, None)
+}
+
+/// [`verify_checkpoint`] at time `now` (Unix seconds): a cosignature dated
+/// after `now + max_skew` is not counted. A witness whose clock runs ahead
+/// would otherwise make a checkpoint look fresher than it is, and the
+/// `threshold`-th time a later one than the witnesses could have seen it.
+pub fn verify_checkpoint_at(
+    note: &str,
+    log: &NoteVerifier,
+    policy: &WitnessPolicy,
+    now: u64,
+    max_skew: u64,
+) -> Result<Witnessed, AuditError> {
+    verify_quorum(note, log, policy, Some(now.saturating_add(max_skew)))
+}
+
+fn verify_quorum(
+    note: &str,
+    log: &NoteVerifier,
+    policy: &WitnessPolicy,
+    latest: Option<u64>,
+) -> Result<Witnessed, AuditError> {
     let note = SignedNote::parse(note)?;
     note.verify(log)?;
     let checkpoint = note.checkpoint()?;
-    let mut cosigned = policy.cosignatures(&note);
+    let (mut cosigned, ahead): (Vec<Cosigned>, Vec<Cosigned>) = policy
+        .cosignatures(&note)
+        .into_iter()
+        .partition(|c| latest.is_none_or(|l| c.time <= l));
     if cosigned.len() < policy.threshold {
+        if let (Some(first), Some(latest)) = (ahead.into_iter().min_by_key(|c| c.time), latest) {
+            return Err(AuditError::CosignedInTheFuture {
+                witness: first.witness,
+                time: first.time,
+                latest,
+            });
+        }
         return Err(AuditError::QuorumNotMet {
             got: cosigned.len(),
             need: policy.threshold,
@@ -245,9 +311,25 @@ pub enum TimeSource {
     Witnesses,
     /// An RFC 3161 timestamping authority, at `genTime` plus its accuracy.
     Rfc3161,
-    /// A Bitcoin block committing to it through OpenTimestamps, confirmed to
-    /// be on the chain; the block's timestamp.
-    Bitcoin,
+    /// A Bitcoin block at `height`, confirmed on the main chain, committing
+    /// to it through OpenTimestamps.
+    ///
+    /// The height is the evidence: the record existed once the chain had
+    /// reached that block. The block's own time is not a clock. Its miner
+    /// sets it, and consensus asks only that it exceed the median time of
+    /// the eleven blocks before, so a block can carry a time from before it
+    /// was mined. [`TimeEvidence::time`] holds it for reports only;
+    /// [`existed_by`], [`signed_by`] and [`KeyStatus::accepts`] never use it.
+    Bitcoin { height: u64 },
+}
+
+impl TimeSource {
+    /// Whether this source is a clock a verifier can compare with a time:
+    /// witnesses and RFC 3161, not Bitcoin.
+    #[must_use]
+    pub fn is_clock(self) -> bool {
+        !matches!(self, Self::Bitcoin { .. })
+    }
 }
 
 /// What a piece of time evidence covers.
@@ -266,7 +348,8 @@ pub enum Covers {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimeEvidence {
     pub source: TimeSource,
-    /// Unix seconds.
+    /// Unix seconds. For [`TimeSource::Bitcoin`], the block's own time, which
+    /// is indicative only.
     pub time: u64,
     pub covers: Covers,
 }
@@ -292,31 +375,52 @@ impl TimeEvidence {
         }
     }
 
+    /// An anchor in the Bitcoin block at `height`, whose header carries
+    /// `block_time`. See [`TimeSource::Bitcoin`] for why only the height
+    /// counts.
     #[must_use]
-    pub fn bitcoin(time: u64, covers: Covers) -> Self {
+    pub fn bitcoin(height: u64, block_time: u64, covers: Covers) -> Self {
         Self {
-            source: TimeSource::Bitcoin,
-            time,
+            source: TimeSource::Bitcoin { height },
+            time: block_time,
             covers,
         }
     }
 }
 
-/// The earliest time any piece of independent evidence puts on a record's
-/// content.
+/// The earliest time a clock (a witness quorum or an RFC 3161 token) puts on
+/// a record's content. A Bitcoin anchor dates by height, not by time: see
+/// [`anchored_by`].
 #[must_use]
 pub fn existed_by(evidence: &[TimeEvidence]) -> Option<u64> {
-    evidence.iter().map(|e| e.time).min()
+    evidence
+        .iter()
+        .filter(|e| e.source.is_clock())
+        .map(|e| e.time)
+        .min()
 }
 
-/// The earliest time any piece of independent evidence puts on a record's
-/// signature. Content-only evidence is ignored.
+/// The earliest time a clock puts on a record's signature. Content-only
+/// evidence and Bitcoin anchors are ignored.
 #[must_use]
 pub fn signed_by(evidence: &[TimeEvidence]) -> Option<u64> {
     evidence
         .iter()
-        .filter(|e| e.covers == Covers::Signature)
+        .filter(|e| e.source.is_clock() && e.covers == Covers::Signature)
         .map(|e| e.time)
+        .min()
+}
+
+/// The lowest Bitcoin block height anchoring a record's signature, if any.
+#[must_use]
+pub fn anchored_by(evidence: &[TimeEvidence]) -> Option<u64> {
+    evidence
+        .iter()
+        .filter(|e| e.covers == Covers::Signature)
+        .filter_map(|e| match e.source {
+            TimeSource::Bitcoin { height } => Some(height),
+            _ => None,
+        })
         .min()
 }
 
@@ -324,32 +428,70 @@ pub fn signed_by(evidence: &[TimeEvidence]) -> Option<u64> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyStatus {
     Active,
-    /// Compromised or retired at this time (Unix seconds). Only what was
-    /// provably signed before it still counts.
+    /// Compromised or retired at `at` (Unix seconds). Only what was provably
+    /// signed before it still counts: dated before `at` by a witness quorum
+    /// or an RFC 3161 token, or anchored in a Bitcoin block at or below
+    /// `bitcoin_height`.
+    ///
+    /// `bitcoin_height` is the height the chain had reached when the key was
+    /// revoked, recorded then from a node you trust; any lower height is
+    /// also safe. Without it a Bitcoin anchor does not count at all, because
+    /// a block's own time can be earlier than the block.
     Revoked {
         at: u64,
+        bitcoin_height: Option<u64>,
     },
 }
 
 impl KeyStatus {
+    /// Revoked at `at`, with no chain height recorded.
+    #[must_use]
+    pub fn revoked_at(at: u64) -> Self {
+        Self::Revoked {
+            at,
+            bitcoin_height: None,
+        }
+    }
+
     /// Decides whether something signed by a key with this status counts,
     /// given the independent evidence of when its signature existed. The
     /// signer's own timestamp is deliberately not an input: a thief with the
     /// key writes whatever date suits. Nor is evidence covering only the
     /// content: the thief can sign content that was timestamped long ago.
+    /// Nor is a Bitcoin block's time, which its miner chooses.
     pub fn accepts(self, evidence: &[TimeEvidence]) -> Result<(), AuditError> {
-        let Self::Revoked { at } = self else {
+        let Self::Revoked { at, bitcoin_height } = self else {
             return Ok(());
         };
-        match signed_by(evidence) {
-            None if existed_by(evidence).is_some() => Err(AuditError::SignatureUndated),
-            None => Err(AuditError::TimeUnproven),
-            Some(t) if t < at => Ok(()),
-            Some(t) => Err(AuditError::SignedAfterRevocation {
+        if !evidence.iter().any(|e| e.covers == Covers::Signature) {
+            return Err(if evidence.is_empty() {
+                AuditError::TimeUnproven
+            } else {
+                AuditError::SignatureUndated
+            });
+        }
+        let clock = signed_by(evidence);
+        let anchor = anchored_by(evidence);
+        if clock.is_some_and(|t| t < at) {
+            return Ok(());
+        }
+        if let (Some(height), Some(limit)) = (anchor, bitcoin_height) {
+            if height <= limit {
+                return Ok(());
+            }
+        }
+        Err(match (clock, anchor, bitcoin_height) {
+            (Some(t), _, _) => AuditError::SignedAfterRevocation {
                 existed_by: t,
                 revoked_at: at,
-            }),
-        }
+            },
+            (None, Some(height), Some(limit)) => AuditError::AnchoredAfterRevocation {
+                height,
+                revoked_height: limit,
+            },
+            (None, Some(_), None) => AuditError::BitcoinNeedsHeight,
+            (None, None, _) => AuditError::TimeUnproven,
+        })
     }
 }
 
@@ -371,6 +513,7 @@ pub struct Auditor {
     origin: String,
     policy: WitnessPolicy,
     max_age: Option<u64>,
+    max_skew: u64,
     latest: Option<Witnessed>,
 }
 
@@ -383,6 +526,7 @@ impl Auditor {
             origin: origin.to_owned(),
             policy,
             max_age: None,
+            max_skew: DEFAULT_MAX_CLOCK_SKEW,
             latest: None,
         }
     }
@@ -395,13 +539,21 @@ impl Auditor {
         self
     }
 
+    /// How far ahead of `now` a cosignature may be dated and still count
+    /// ([`DEFAULT_MAX_CLOCK_SKEW`] unless set). See [`verify_checkpoint_at`].
+    #[must_use]
+    pub fn with_max_clock_skew(mut self, seconds: u64) -> Self {
+        self.max_skew = seconds;
+        self
+    }
+
     #[must_use]
     pub fn latest(&self) -> Option<&Witnessed> {
         self.latest.as_ref()
     }
 
     fn check(&self, note: &str, now: u64) -> Result<Witnessed, AuditError> {
-        let w = verify_checkpoint(note, &self.log, &self.policy)?;
+        let w = verify_checkpoint_at(note, &self.log, &self.policy, now, self.max_skew)?;
         if w.checkpoint.origin() != self.origin {
             return Err(AuditError::WrongOrigin {
                 got: w.checkpoint.origin().to_owned(),
@@ -534,6 +686,94 @@ mod tests {
 
     fn log() -> LogSigner {
         LogSigner::from_seed(ORIGIN, &[1; 32]).unwrap()
+    }
+
+    /// The review finding: a witness whose clock runs ahead dates its
+    /// cosignature in the future, and `now - fresh_as_of` saturated to zero,
+    /// so the checkpoint passed any freshness limit. Such a cosignature is
+    /// not counted now.
+    #[test]
+    fn a_cosignature_dated_ahead_of_the_clock_is_not_counted() {
+        let log = log();
+        let ws = witnesses(3);
+        let d = leaves(4);
+        let now = 10_000;
+        let head = TreeHead {
+            size: 4,
+            root: root_of(&d),
+        };
+        let mut note = log.sign(&Checkpoint::new(ORIGIN, head).unwrap());
+        for (w, t) in ws
+            .iter()
+            .zip([now - 50, now + DEFAULT_MAX_CLOCK_SKEW, now + 86_400])
+        {
+            note.add_signature(w.cosign(note.text(), t).unwrap())
+                .unwrap();
+        }
+        let note = note.render();
+
+        // Within the skew counts; a day ahead does not.
+        let w = verify_checkpoint_at(&note, log.verifier(), &policy(&ws, 2), now, 300).unwrap();
+        assert_eq!(w.cosigned.len(), 2);
+        assert_eq!(w.fresh_as_of(), now - 50);
+        assert_eq!(
+            verify_checkpoint_at(&note, log.verifier(), &policy(&ws, 3), now, 300),
+            Err(AuditError::CosignedInTheFuture {
+                witness: "w2.example".into(),
+                time: now + 86_400,
+                latest: now + 300
+            })
+        );
+        // Without a clock nothing can be told apart.
+        assert_eq!(
+            verify_checkpoint(&note, log.verifier(), &policy(&ws, 3))
+                .unwrap()
+                .cosigned
+                .len(),
+            3
+        );
+        // A tighter skew leaves one; with no future ones, the error is the
+        // plain quorum count.
+        assert_eq!(
+            verify_checkpoint_at(&note, log.verifier(), &policy(&ws, 2), now, 0)
+                .map(|w| w.cosigned.len()),
+            Err(AuditError::CosignedInTheFuture {
+                witness: "w1.example".into(),
+                time: now + 300,
+                latest: now
+            })
+        );
+        let one = cosigned(&log, &d, &[&ws[0]], 1_000);
+        assert_eq!(
+            verify_checkpoint_at(&one, log.verifier(), &policy(&ws, 2), now, 300),
+            Err(AuditError::QuorumNotMet { got: 1, need: 2 })
+        );
+
+        // The freshness limit now holds: the two in-time cosignatures are an
+        // hour old, and the one from the future no longer hides that.
+        let stale = {
+            let mut n = log.sign(&Checkpoint::new(ORIGIN, head).unwrap());
+            for (w, t) in ws.iter().zip([now - 3_600, now - 3_601, now + 86_400]) {
+                n.add_signature(w.cosign(n.text(), t).unwrap()).unwrap();
+            }
+            n.render()
+        };
+        let mut strict =
+            Auditor::new(ORIGIN, log.verifier().clone(), policy(&ws, 2)).with_max_age(600);
+        assert_eq!(
+            strict.advance(&stale, &[], now).unwrap_err(),
+            AuditError::Stale
+        );
+        let mut all_three =
+            Auditor::new(ORIGIN, log.verifier().clone(), policy(&ws, 3)).with_max_age(600);
+        assert!(matches!(
+            all_three.advance(&stale, &[], now),
+            Err(AuditError::CosignedInTheFuture { .. })
+        ));
+        // A verifier that allows a day of skew counts it again.
+        let mut lax = Auditor::new(ORIGIN, log.verifier().clone(), policy(&ws, 3))
+            .with_max_clock_skew(86_400);
+        assert_eq!(lax.advance(&stale, &[], now).unwrap().cosigned.len(), 3);
     }
 
     #[test]
@@ -687,10 +927,10 @@ mod tests {
     /// is real and early, and must not vouch for the signature.
     #[test]
     fn content_only_evidence_never_vouches_for_a_signature_after_revocation() {
-        let revoked = KeyStatus::Revoked { at: 11 };
+        let revoked = KeyStatus::revoked_at(11);
         let body_at_ten = [
             TimeEvidence::rfc3161(10, Covers::Content),
-            TimeEvidence::bitcoin(10, Covers::Content),
+            TimeEvidence::bitcoin(800_000, 10, Covers::Content),
         ];
         assert_eq!(
             revoked.accepts(&body_at_ten),
@@ -705,9 +945,68 @@ mod tests {
         );
     }
 
+    /// The review finding: the key is stolen at 12:00 and the chain is at
+    /// block 800,000. The thief's signature lands in block 800,001, whose
+    /// miner dated it 11:55, before the revocation. The block's time must not
+    /// vouch for it; the height decides.
+    #[test]
+    fn a_bitcoin_block_time_never_dates_a_signature_before_revocation() {
+        let (noon, five_to) = (43_200, 42_900);
+        let stolen = [TimeEvidence::bitcoin(800_001, five_to, Covers::Signature)];
+        assert_eq!(
+            KeyStatus::revoked_at(noon).accepts(&stolen),
+            Err(AuditError::BitcoinNeedsHeight)
+        );
+        let at_block = KeyStatus::Revoked {
+            at: noon,
+            bitcoin_height: Some(800_000),
+        };
+        assert_eq!(
+            at_block.accepts(&stolen),
+            Err(AuditError::AnchoredAfterRevocation {
+                height: 800_001,
+                revoked_height: 800_000
+            })
+        );
+        // Anchored in a block the chain had already reached, it counts,
+        // whatever time that block carries.
+        for height in [799_000, 800_000] {
+            assert_eq!(
+                at_block.accepts(&[TimeEvidence::bitcoin(
+                    height,
+                    noon + 7_200,
+                    Covers::Signature
+                )]),
+                Ok(())
+            );
+        }
+        // Block times are left out of the clock readings.
+        assert_eq!(existed_by(&stolen), None);
+        assert_eq!(signed_by(&stolen), None);
+        assert_eq!(anchored_by(&stolen), Some(800_001));
+        assert!(TimeSource::Witnesses.is_clock() && TimeSource::Rfc3161.is_clock());
+        assert!(!TimeSource::Bitcoin { height: 1 }.is_clock());
+        // A late clock reading is the error reported, anchor or not.
+        assert_eq!(
+            at_block.accepts(&[
+                TimeEvidence::witnesses(noon + 1),
+                TimeEvidence::bitcoin(800_001, five_to, Covers::Signature)
+            ]),
+            Err(AuditError::SignedAfterRevocation {
+                existed_by: noon + 1,
+                revoked_at: noon
+            })
+        );
+        // An anchor of the content alone does not count either.
+        assert_eq!(
+            at_block.accepts(&[TimeEvidence::bitcoin(1, 1, Covers::Content)]),
+            Err(AuditError::SignatureUndated)
+        );
+    }
+
     #[test]
     fn a_revoked_key_counts_only_for_what_was_proven_before_revocation() {
-        let revoked = KeyStatus::Revoked { at: 1_000 };
+        let revoked = KeyStatus::revoked_at(1_000);
         assert_eq!(KeyStatus::Active.accepts(&[]), Ok(()));
         assert_eq!(revoked.accepts(&[]), Err(AuditError::TimeUnproven));
         assert_eq!(revoked.accepts(&[TimeEvidence::witnesses(999)]), Ok(()));
@@ -718,10 +1017,10 @@ mod tests {
                 revoked_at: 1_000
             })
         );
-        // The earliest independent evidence decides.
+        // The earliest clock reading decides.
         assert_eq!(
             revoked.accepts(&[
-                TimeEvidence::bitcoin(2_000, Covers::Signature),
+                TimeEvidence::rfc3161(2_000, Covers::Signature),
                 TimeEvidence::witnesses(900)
             ]),
             Ok(())

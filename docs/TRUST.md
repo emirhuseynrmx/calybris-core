@@ -97,19 +97,29 @@ independent sources, each covering a whole checkpoint:
 |---|---|---|
 | Witness cosignatures | At least *k* witnesses had seen the checkpoint by the *k*-th earliest cosignature time (`audit::Witnessed::seen_by`) | The quorum |
 | RFC 3161 token | A timestamping authority signed the digest at `genTime` (`tsa::verify_response`) | The TSA certificate you pinned |
-| OpenTimestamps | The digest is committed in a Bitcoin block on the main chain; the block's time bounds when it existed (`ots::DetachedTimestamp::verify_bitcoin`, then `BitcoinHeader::confirm`) | Bitcoin's proof of work, and the source that tells you which block is at that height |
+| OpenTimestamps | The digest is committed in a Bitcoin block on the main chain, so it existed once the chain reached that **height** (`ots::DetachedTimestamp::verify_bitcoin`, then `BitcoinHeader::confirm`) | Bitcoin's proof of work, and the source that tells you which block is at that height |
 
-`audit::existed_by` takes the earliest. What is timestamped is the
+`audit::existed_by` takes the earliest witness or RFC 3161 time. A Bitcoin
+anchor dates by height, not by time (`audit::anchored_by`): a block's own time
+is set by its miner, and consensus asks only that it exceed the median time of
+the eleven blocks before, so a block can carry a time from before it was
+mined. `calybris-verify` prints that time as the miner's, and never compares
+it with a revocation. What is timestamped is the
 **log-signed note** (`SignedNote::signed_by`: the body plus the log's signature
 line), not the body alone, so the timestamp dates the signature as well as
 every record in the tree. A stamp over the body alone (`Checkpoint::digest`) is
 still accepted, as evidence of the content only; see question 3 for why the
 difference matters.
 
-The RFC 3161 check pins the TSA's signing certificate, requires its critical
-`timeStamping` key usage and a `genTime` inside its validity, and verifies the
-CMS signature over signed attributes that bind the token's content (RSA
-PKCS#1 v1.5, ECDSA P-256 and P-384). It does not build a chain to a root or
+The RFC 3161 check pins the TSA's signing certificate, requires its extended
+key usage to be the critical `timeStamping` one and nothing else (a key that
+may sign for other purposes is not a timestamping key, RFC 3161 §2.3) and a
+`genTime` inside its validity, verifies the CMS signature over signed
+attributes that bind the token's content (RSA PKCS#1 v1.5, ECDSA P-256 and
+P-384), and requires those attributes to name the pinned certificate: an ESS
+`signingCertificate` (SHA-1) or `signingCertificateV2` whose hash, and issuer
+and serial number when given, are the pinned certificate's (RFC 3161 §2.4.1,
+RFC 5816). It does not build a chain to a root or
 check revocation: you name the certificate you trust. `tests/rfc3161.rs` uses
 tokens from a local OpenSSL TSA of each key type and from FreeTSA and DigiCert,
 each accepted by `openssl ts -verify` before it was pinned.
@@ -122,7 +132,7 @@ transaction, a few hours after submission:
 | Pending | Calendars accepted the digest and promised to commit it | No |
 | Anchored | The proof reaches a Bitcoin block attestation, not yet checked | No |
 | Header checked | The path ends in the Merkle root of a header at the stated height whose work meets its own target and a floor of 2^64 | No |
-| Confirmed | A source you trust names that header's hash for that height: `bitcoin-cli getblockhash` on your own node, or several independent explorers that agree | Yes: the block's time |
+| Confirmed | A source you trust names that header's hash for that height: `bitcoin-cli getblockhash` on your own node, or several independent explorers that agree | Yes: by the block's height |
 
 A header is 80 bytes anyone can write. One with an easy target and the right
 Merkle root passes every check a header can have on its own; before the floor
@@ -144,7 +154,11 @@ Then they can sign anything as the log. What they cannot do:
   a TSA and Bitcoin date to now.
 - **Freeze the log by going quiet** without it showing:
   `audit::Auditor::with_max_age` refuses a checkpoint whose quorum's newest
-  cosignatures are too old.
+  cosignatures are too old. A cosignature dated more than
+  `audit::DEFAULT_MAX_CLOCK_SKEW` (five minutes) ahead of the auditor's clock
+  is not counted (`verify_checkpoint_at`, `Auditor::with_max_clock_skew`), so
+  a witness whose clock runs ahead cannot make a checkpoint look fresh;
+  `calybris-verify` applies the same rule with the machine's clock.
 
 What is left is signing new, correctly dated records. `audit::KeyStatus`
 handles the key itself: once a key is marked revoked at time *t*, something it
@@ -154,7 +168,11 @@ evidence that dates only the content: a checkpoint body stamped at 10:00 does
 not show who signed it when, and a thief holding the key at 12:00 can sign that
 old body. Evidence counts when it covers the signature (`audit::Covers`): a
 stamp over the log-signed note, or a witness cosignature, since a witness
-checks the log's signature before it cosigns. Keeping keys in an HSM, rotating them,
+checks the log's signature before it cosigns. A Bitcoin anchor counts only
+against the chain height recorded at the revocation
+(`KeyStatus::Revoked { at, bitcoin_height }`, `--revoked-at-height`): the
+thief's signature can land in a block whose miner dated it minutes before the
+revocation, but not in a block the chain had already reached. Keeping keys in an HSM, rotating them,
 and choosing witnesses run by other organisations remain operational decisions
 ([KEY_MANAGEMENT.md](KEY_MANAGEMENT.md)); a witness run by the same
 administrator adds nothing.
@@ -246,7 +264,10 @@ calybris-verify checkpoint verify checkpoints/000002.checkpoint --log-key log.vk
 Or without Calybris at all: `scripts/verify_bundle.py` checks the log
 signature, the cosignatures, the stamped bytes, the WAL chain and the Merkle
 root with nothing but Python's standard library, written from the
-specifications. `tests/fixtures/bundle` is a bundle both programs check.
+specifications. `tests/fixtures/bundle` is a bundle both programs check. It
+does not verify timestamps: of an `.ots` file it reads only which digest it
+names, says so, and prints the `ots verify` and `openssl ts -verify` commands
+that check the proof and the token.
 
 ```sh
 python3 scripts/verify_bundle.py checkpoints/ --note 000002.checkpoint --witness w1.vkey
@@ -278,7 +299,8 @@ Every one of these, and only these:
 4. Each optional check you asked for passed: `--wal` (the WAL's first entries
    reproduce the checkpoint root and their hash chain holds), `--prev` (the
    checkpoint names its predecessor), `--revoked-at` (the signature is dated
-   before the revocation).
+   before the revocation by witnesses or an RFC 3161 token, or, with
+   `--revoked-at-height`, anchored in a block the chain had reached then).
 
 It does **not** establish:
 

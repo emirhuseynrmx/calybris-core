@@ -59,7 +59,7 @@ preview-pq = ["preview", "provenance", "dep:ml-dsa"]
 # RFC 3161 timestamp tokens: build a request, verify a response against a
 # pinned TSA certificate. Separate from `preview` because it pulls in X.509,
 # CMS and RSA parsing that nothing else needs.
-preview-tsa = ["preview", "dep:der", "dep:x509-cert", "dep:cms", "dep:x509-tsp", "dep:spki", "dep:rsa", "dep:p256", "dep:p384"]
+preview-tsa = ["preview", "dep:der", "dep:x509-cert", "dep:cms", "dep:x509-tsp", "dep:spki", "dep:rsa", "dep:p256", "dep:p384", "dep:sha1"]
 # Test-only dependency switch. `cfg(loom)` is enabled separately by
 # `CALYBRIS_LOOM=1`, so `--all-features` keeps standard synchronization.
 loom-model = ["dep:loom"]
@@ -79,6 +79,10 @@ spki = { version = "0.7", optional = true }
 rsa = { version = "0.9", optional = true, default-features = false, features = ["sha2"] }
 p256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa"] }
 p384 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa"] }
+# RFC 3161 tokens name their signing certificate by SHA-1 in the original
+# ESSCertID (FreeTSA uses only that). Hashing a pinned certificate to compare,
+# not a signature algorithm.
+sha1 = { version = "0.11", optional = true, default-features = false }
 ml-dsa = { version = "0.1.1", optional = true, default-features = false, features = ["alloc"] }
 file-id = { version = "0.2.3", optional = true }
 fs2 = { version = "0.4", optional = true }

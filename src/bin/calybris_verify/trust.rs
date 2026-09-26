@@ -15,7 +15,8 @@
 //!                                     [--wal WAL [--hmac-key-hex HEX]] [--prev PREV]
 //!                                     [--ots NOTE.signed.ots [--block-height H --block-header HEX --block-hash HASH]]
 //!                                     [--tsr NOTE.signed.tsr --tsa-cert CERT.pem [--nonce N]]
-//!                                     [--revoked-at UNIX] [--require witnessed|timestamped|bitcoin|full]
+//!                                     [--revoked-at UNIX [--revoked-at-height H]]
+//!                                     [--require witnessed|timestamped|bitcoin|full]
 //! ```
 //!
 //! The network is reached only by `stamp` and `upgrade`, through the system
@@ -37,7 +38,9 @@
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
-use calybris_core::audit::{existed_by, Covers, KeyStatus, TimeEvidence, WitnessPolicy};
+use calybris_core::audit::{
+    anchored_by, existed_by, Covers, KeyStatus, TimeEvidence, WitnessPolicy,
+};
 use calybris_core::checkpoint::{
     Checkpoint, LogSigner, NoteSignature, NoteVerifier, SignedNote, WitnessSigner,
 };
@@ -219,6 +222,13 @@ fn write_key_pair(skey_path: &str, skey: &str, vkey_path: &str, vkey: &str) -> R
         });
     }
     Ok(())
+}
+
+fn unix_now() -> Result<u64, Fail> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the system clock is before 1970")?
+        .as_secs())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -515,10 +525,7 @@ fn cosign(f: &Flags) -> Result<ExitCode, Fail> {
     }
     let now = match f.one("--now") {
         Some(t) => t.parse().map_err(|_| "--now must be Unix seconds")?,
-        None => std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "the system clock is before 1970")?
-            .as_secs(),
+        None => unix_now()?,
     };
     match witness.add_checkpoint(&req, now) {
         Ok(sig) => {
@@ -821,24 +828,55 @@ fn verify(f: &Flags) -> Result<ExitCode, Fail> {
     }
 
     match existed_by(&r.evidence) {
-        Some(t) => println!("  existed by {} (earliest independent evidence)", utc(t)),
-        None => println!("  existed by: no independent time evidence"),
+        Some(t) => println!(
+            "  existed by {} (earliest witness or RFC 3161 time)",
+            utc(t)
+        ),
+        None => println!("  existed by: no witness or RFC 3161 time"),
     }
-    if let Some(revoked) = f.one("--revoked-at") {
-        let at: u64 = revoked
-            .parse()
-            .map_err(|_| "--revoked-at must be Unix seconds")?;
-        match (KeyStatus::Revoked { at }).accepts(&r.evidence) {
-            Ok(()) => r.ok(
-                "revoked key",
-                &format!("signature proven before its revocation at {}", utc(at)),
-            ),
-            Err(e) => r.fail("revoked key", &e.to_string()),
-        }
+    if let Some(height) = anchored_by(&r.evidence) {
+        println!(
+            "  anchored in Bitcoin block {height} (dated by height, not by the block's own time)"
+        );
     }
+    check_revocation(f, &mut r)?;
 
     let missing = unmet(f, &r)?;
     Ok(verdict(&r, &missing))
+}
+
+/// `--revoked-at UNIX [--revoked-at-height H]`: whether the signature is
+/// proven to predate the revocation. A Bitcoin anchor counts only against
+/// the height the chain had reached then, never by its block's own time.
+fn check_revocation(f: &Flags, r: &mut Report) -> Result<(), Fail> {
+    let height = f
+        .one("--revoked-at-height")
+        .map(|h| {
+            h.parse::<u64>()
+                .map_err(|_| "--revoked-at-height must be a block height")
+        })
+        .transpose()?;
+    let Some(revoked) = f.one("--revoked-at") else {
+        if height.is_some() {
+            return Err("--revoked-at-height goes with --revoked-at".into());
+        }
+        return Ok(());
+    };
+    let at: u64 = revoked
+        .parse()
+        .map_err(|_| "--revoked-at must be Unix seconds")?;
+    let status = KeyStatus::Revoked {
+        at,
+        bitcoin_height: height,
+    };
+    match status.accepts(&r.evidence) {
+        Ok(()) => r.ok(
+            "revoked key",
+            &format!("signature proven before its revocation at {}", utc(at)),
+        ),
+        Err(e) => r.fail("revoked key", &e.to_string()),
+    }
+    Ok(())
 }
 
 fn verdict(r: &Report, missing: &[&str]) -> ExitCode {
@@ -882,7 +920,15 @@ fn check_witnesses(
         .map_or(Ok(keys.len()), str::parse)
         .map_err(|_| "--threshold must be a number")?;
     let policy = WitnessPolicy::new(keys, threshold).map_err(|e| e.to_string())?;
-    match calybris_core::audit::verify_checkpoint(&note.render(), log, &policy) {
+    // A cosignature dated ahead of this machine's clock by more than the
+    // allowed skew is not counted.
+    match calybris_core::audit::verify_checkpoint_at(
+        &note.render(),
+        log,
+        &policy,
+        unix_now()?,
+        calybris_core::audit::DEFAULT_MAX_CLOCK_SKEW,
+    ) {
         Ok(w) => {
             let names: Vec<String> = w
                 .cosigned
@@ -1027,7 +1073,7 @@ fn check_ots(f: &Flags, ots_path: &str, stamped: &Stamped, r: &mut Report) -> Re
             r.ok(
                 "OpenTimestamps",
                 &format!(
-                    "in Bitcoin block {} ({}) at {}; {}",
+                    "in Bitcoin block {} ({}), whose miner dated it {}; {}",
                     v.height,
                     v.block_hash,
                     utc(v.block_time),
@@ -1036,7 +1082,8 @@ fn check_ots(f: &Flags, ots_path: &str, stamped: &Stamped, r: &mut Report) -> Re
             );
             r.timestamped = true;
             r.bitcoin = true;
-            r.evidence.push(TimeEvidence::bitcoin(v.block_time, covers));
+            r.evidence
+                .push(TimeEvidence::bitcoin(v.height, v.block_time, covers));
         }
         Err(e) => r.fail("OpenTimestamps", &e.to_string()),
     }
@@ -1154,6 +1201,7 @@ const VALUED: &[&str] = &[
     "--tsr",
     "--tsa-cert",
     "--revoked-at",
+    "--revoked-at-height",
     "--block-hash",
     "--require",
     "--allow-calendar",
@@ -1208,7 +1256,8 @@ pub const USAGE: &str = "\
 \x20 calybris-verify checkpoint verify   <note> --log-key LOG.vkey [--witness W.vkey ... --threshold K]
 \x20                                     [--wal WAL] [--prev PREV]
 \x20                                     [--ots F --block-height H --block-header HEX --block-hash HASH]
-\x20                                     [--tsr F --tsa-cert PEM --nonce N] [--revoked-at UNIX]
+\x20                                     [--tsr F --tsa-cert PEM --nonce N]
+\x20                                     [--revoked-at UNIX [--revoked-at-height H]]
 \x20                                     [--require witnessed|timestamped|bitcoin|full]
 \x20 The result names what was established: SIGNATURE VERIFIED ONLY, INDEPENDENTLY
 \x20 WITNESSED, TIMESTAMP VERIFIED or FULL VERIFICATION COMPLETE. Exit code 1 if a
@@ -1653,6 +1702,24 @@ mod tests {
         assert!(r.timestamped && r.bitcoin && !r.failed && !r.incomplete);
         assert_eq!(r.evidence[0].covers, Covers::Signature);
         assert_eq!(verdict(&r, &[]), ExitCode::SUCCESS);
+
+        // Against a revocation the block counts by its height only. Its own
+        // time (2015) is long before this revocation, and still does not.
+        let revoke = |args: &[&str]| {
+            let mut again = Report {
+                evidence: r.evidence.clone(),
+                ..Report::default()
+            };
+            let res = check_revocation(&flags(args), &mut again);
+            (res, again.failed)
+        };
+        assert_eq!(revoke(&["--revoked-at", "1700000000"]), (Ok(()), true));
+        let at = ["--revoked-at", "1700000000", "--revoked-at-height"];
+        assert_eq!(revoke(&[&at[..], &["358391"]].concat()), (Ok(()), false));
+        assert_eq!(revoke(&[&at[..], &["358390"]].concat()), (Ok(()), true));
+        assert!(revoke(&["--revoked-at-height", "358391"]).0.is_err());
+        assert!(revoke(&[&at[..], &["x"]].concat()).0.is_err());
+        assert_eq!(revoke(&[]), (Ok(()), false));
 
         let body_only = Stamped {
             signature: None,
