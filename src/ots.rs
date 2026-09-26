@@ -10,15 +10,25 @@
 //! proof holds only a promise.
 //!
 //! That promise is not evidence, and this module keeps the difference
-//! explicit. [`Status`] is one of three states:
+//! explicit. A proof goes through three states, and only the last dates
+//! anything:
 //!
-//! - **Pending** — calendars accepted the digest and will commit it; nothing
-//!   here dates the checkpoint yet.
-//! - **Anchored** — the proof reaches a Bitcoin block attestation, not yet
-//!   checked against a block header.
-//! - **Verified** — [`DetachedTimestamp::verify_bitcoin`] recomputed the path,
-//!   it ends in the Merkle root of a header whose proof of work is valid, and
-//!   that header's time is the evidence.
+//! - **Pending** ([`Status::Pending`]) — calendars accepted the digest and
+//!   will commit it.
+//! - **Anchored** ([`Status::Anchored`]) — the proof reaches a Bitcoin block
+//!   attestation, not yet checked against anything.
+//! - **Confirmed** ([`BitcoinConfirmed`]) — [`DetachedTimestamp::verify_bitcoin`]
+//!   recomputed the path to the Merkle root of a header whose proof of work
+//!   meets both its own target and a floor, *and* [`BitcoinHeader::confirm`]
+//!   matched that header's hash against a source the verifier trusts to know
+//!   the main chain: its own node, or several independent explorers that
+//!   agree.
+//!
+//! The second step is not optional. A header is 80 bytes anyone can write:
+//! one with an easy target and the right Merkle root passes every check a
+//! header can have on its own. The work floor
+//! ([`MIN_TARGET_ZERO_BITS`]) makes such a header cost about 2^64 hashes
+//! instead of nothing; only the chain check makes it worthless.
 //!
 //! The file format is the one the reference Python client writes (`.ots`,
 //! magic `\0OpenTimestamps\0\0Proof\0…`), serialized in the same canonical
@@ -84,6 +94,10 @@ pub enum OtsError {
     NotInBlock,
     #[error("the block header's proof of work does not meet its own target")]
     BadProofOfWork,
+    #[error("the block header's target is easier than any main-chain block this proof could name")]
+    InsufficientWork,
+    #[error("the block header is not the one the trusted source names for this height")]
+    NotOnChain,
     #[error("calendar URL {0:?} is not on the allowed list")]
     CalendarNotAllowed(String),
 }
@@ -488,7 +502,8 @@ fn write_attestation(out: &mut Vec<u8>, att: &Attestation) {
     write_varbytes(out, &payload);
 }
 
-/// Where a proof stands. Only [`Status::Verified`] dates anything.
+/// Where a proof stands, from the proof alone. Neither state dates anything;
+/// see [`BitcoinConfirmed`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     /// Calendars promised to commit; the URIs to ask for the upgrade.
@@ -496,21 +511,56 @@ pub enum Status {
     /// Reaches Bitcoin attestations at these heights, not yet checked
     /// against a header.
     Anchored { heights: Vec<u64> },
-    /// Checked against a block header the verifier supplied: see
-    /// [`BitcoinVerified`].
-    Verified(BitcoinVerified),
 }
 
-/// A Bitcoin attestation that checked out against a header.
+/// A proof checked against a block header: the path reaches the header's
+/// Merkle root and the header's work is real. Not yet evidence: nothing here
+/// shows the header is on the main chain. Call [`BitcoinHeader::confirm`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BitcoinVerified {
+pub struct BitcoinHeader {
     /// The height the verifier fetched the header at.
     pub height: u64,
-    /// The block hash, in the usual reversed hex display order.
+    /// The header's hash, in the usual reversed hex display order.
     pub block_hash: String,
-    /// The header's timestamp, Unix seconds: the evidence.
+    /// The header's timestamp, Unix seconds.
     pub block_time: u64,
 }
+
+impl BitcoinHeader {
+    /// Confirms the header against the block hash a trusted source gives for
+    /// this height (`bitcoin-cli getblockhash <height>` on your own node, or
+    /// the agreed answer of independent explorers), as hex in display order.
+    pub fn confirm(&self, trusted_block_hash: &str) -> Result<BitcoinConfirmed, OtsError> {
+        if trusted_block_hash
+            .trim()
+            .eq_ignore_ascii_case(&self.block_hash)
+        {
+            Ok(BitcoinConfirmed {
+                height: self.height,
+                block_hash: self.block_hash.clone(),
+                block_time: self.block_time,
+            })
+        } else {
+            Err(OtsError::NotOnChain)
+        }
+    }
+}
+
+/// A proof committed in a block that a trusted source puts on the main
+/// chain. `block_time` is the evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BitcoinConfirmed {
+    pub height: u64,
+    pub block_hash: String,
+    /// The block's timestamp, Unix seconds.
+    pub block_time: u64,
+}
+
+/// The fewest leading zero bits a header's target may have. Every block an
+/// OpenTimestamps proof can name (the service started in 2016; its 2015
+/// example, block 358391, is checked in tests/opentimestamps.rs) is far harder; a header
+/// under this floor is refused before anything else is looked at.
+pub const MIN_TARGET_ZERO_BITS: u32 = 64;
 
 /// A detached `.ots` file: the SHA-256 digest of a file and its proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -614,8 +664,7 @@ impl DetachedTimestamp {
             .collect()
     }
 
-    /// Pending or anchored, from the proof alone. Never `Verified`: that
-    /// takes a block header, see [`DetachedTimestamp::verify_bitcoin`].
+    /// Pending or anchored, from the proof alone.
     #[must_use]
     pub fn status(&self) -> Status {
         let mut heights: Vec<u64> = self
@@ -641,13 +690,15 @@ impl DetachedTimestamp {
 
     /// Checks the proof against the 80-byte header of the Bitcoin block at
     /// `height`, as the verifier fetched it: there must be an attestation for
-    /// that height whose message is the header's Merkle root, and the header's
-    /// hash must meet the target its own `nBits` sets.
+    /// that height whose message is the header's Merkle root, the header's
+    /// target must have at least [`MIN_TARGET_ZERO_BITS`] leading zero bits,
+    /// and its hash must meet that target. The result still has to be
+    /// confirmed against the main chain ([`BitcoinHeader::confirm`]).
     pub fn verify_bitcoin(
         &self,
         height: u64,
         header: &[u8; 80],
-    ) -> Result<BitcoinVerified, OtsError> {
+    ) -> Result<BitcoinHeader, OtsError> {
         let merkle_root = &header[36..68];
         let committed = self
             .timestamp
@@ -657,11 +708,15 @@ impl DetachedTimestamp {
         if !committed {
             return Err(OtsError::NotInBlock);
         }
+        let bits = u32::from_le_bytes(header[72..76].try_into().expect("4 bytes"));
+        let target = target_of(bits).ok_or(OtsError::BadProofOfWork)?;
+        if leading_zero_bits(&target) < MIN_TARGET_ZERO_BITS {
+            return Err(OtsError::InsufficientWork);
+        }
         let hash: [u8; 32] = Sha256::digest(Sha256::digest(header)).into();
-        if !meets_target(
-            &hash,
-            u32::from_le_bytes(header[72..76].try_into().expect("4 bytes")),
-        ) {
+        let mut be = hash;
+        be.reverse();
+        if be > target {
             return Err(OtsError::BadProofOfWork);
         }
         let block_time = u64::from(u32::from_le_bytes(
@@ -670,7 +725,7 @@ impl DetachedTimestamp {
         let mut display = hash;
         display.reverse();
         let block_hash = bytes_to_hex(&display);
-        Ok(BitcoinVerified {
+        Ok(BitcoinHeader {
             height,
             block_hash,
             block_time,
@@ -678,20 +733,40 @@ impl DetachedTimestamp {
     }
 }
 
-/// Whether a block hash (internal byte order) is at or below the target a
-/// compact `nBits` encodes.
-fn meets_target(hash: &[u8; 32], bits: u32) -> bool {
+/// The big-endian 256-bit target a compact `nBits` encodes. A negative or
+/// zero target, or one that overflows 256 bits, is `None` rather than wrapped.
+fn target_of(bits: u32) -> Option<[u8; 32]> {
     let exponent = (bits >> 24) as usize;
     let mantissa = bits & 0x00ff_ffff;
-    // A negative or zero target is never met; one that overflows 256 bits
-    // is refused rather than wrapped.
     if mantissa & 0x0080_0000 != 0 || mantissa == 0 || !(3..=32).contains(&exponent) {
-        return false;
+        return None;
     }
-    let mut target = [0_u8; 32]; // big-endian
+    let mut target = [0_u8; 32];
     let m = mantissa.to_be_bytes();
     let start = 32 - exponent;
     target[start..start + 3].copy_from_slice(&m[1..]);
+    Some(target)
+}
+
+fn leading_zero_bits(be: &[u8; 32]) -> u32 {
+    let mut n = 0;
+    for &b in be {
+        if b == 0 {
+            n += 8;
+        } else {
+            return n + b.leading_zeros();
+        }
+    }
+    n
+}
+
+/// Whether a block hash (internal byte order) is at or below the target a
+/// compact `nBits` encodes.
+#[cfg(test)]
+fn meets_target(hash: &[u8; 32], bits: u32) -> bool {
+    let Some(target) = target_of(bits) else {
+        return false;
+    };
     let mut be = *hash;
     be.reverse();
     be <= target
@@ -784,6 +859,15 @@ mod tests {
         assert!(meets_target(&[0; 32], bits));
         assert!(!meets_target(&[0; 32], 0x1d80_0000)); // negative
         assert!(!meets_target(&[0; 32], 0x2200_ffff)); // overflow
+    }
+
+    #[test]
+    fn the_work_floor_counts_leading_zero_bits_of_the_target() {
+        // Genesis difficulty: 32 zero bits, far under the floor.
+        assert_eq!(leading_zero_bits(&target_of(0x1d00_ffff).unwrap()), 32);
+        // Exponent 0x17 leaves 32 - 23 = 9 zero bytes, and 0x03 adds 6 bits.
+        assert_eq!(leading_zero_bits(&target_of(0x1703_4219).unwrap()), 78);
+        assert_eq!(leading_zero_bits(&[0; 32]), 256);
     }
 
     #[test]

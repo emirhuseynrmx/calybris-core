@@ -29,6 +29,16 @@ decision path.
 
 ## The four questions
 
+### Where this stands today
+
+The mechanisms are implemented and tested; the independent parties are not yet
+in place. **No witness run by anyone other than the maintainer cosigns a
+Calybris log today.** A policy of witnesses run by one party is a policy of one
+witness, and `calybris-verify` reports what was checked, not what was hoped for.
+The RFC 3161 authorities and Bitcoin are independent now; witnesses become
+independent when other organisations run them, which the C2SP formats make
+possible without any Calybris-specific software.
+
 ### 1. How does an independent witness notice it is being shown a false history?
 
 By remembering. A witness keeps, for each log, the last tree head it cosigned,
@@ -74,12 +84,15 @@ independent sources, each covering a whole checkpoint:
 | Source | What it proves | Who you trust |
 |---|---|---|
 | Witness cosignatures | At least *k* witnesses had seen the checkpoint by the *k*-th earliest cosignature time (`audit::Witnessed::seen_by`) | The quorum |
-| RFC 3161 token | A timestamping authority signed the checkpoint digest at `genTime` (`tsa::verify_response`) | The TSA certificate you pinned |
-| OpenTimestamps | The checkpoint digest is committed in a Bitcoin block; its header time bounds when it existed (`ots::DetachedTimestamp::verify_bitcoin`) | Bitcoin's proof of work, and your source for the header |
+| RFC 3161 token | A timestamping authority signed the digest at `genTime` (`tsa::verify_response`) | The TSA certificate you pinned |
+| OpenTimestamps | The digest is committed in a Bitcoin block on the main chain; the block's time bounds when it existed (`ots::DetachedTimestamp::verify_bitcoin`, then `BitcoinHeader::confirm`) | Bitcoin's proof of work, and the source that tells you which block is at that height |
 
-`audit::existed_by` takes the earliest. What is timestamped is
-`Checkpoint::digest`, SHA-256 of the checkpoint body; every record in the tree
-existed no later than that.
+`audit::existed_by` takes the earliest. What is timestamped is the
+**log-signed note** (`SignedNote::signed_by`: the body plus the log's signature
+line), not the body alone, so the timestamp dates the signature as well as
+every record in the tree. A stamp over the body alone (`Checkpoint::digest`) is
+still accepted, as evidence of the content only; see question 3 for why the
+difference matters.
 
 The RFC 3161 check pins the TSA's signing certificate, requires its critical
 `timeStamping` key usage and a `genTime` inside its validity, and verifies the
@@ -96,12 +109,16 @@ transaction, a few hours after submission:
 |---|---|---|
 | Pending | Calendars accepted the digest and promised to commit it | No |
 | Anchored | The proof reaches a Bitcoin block attestation, not yet checked | No |
-| Verified | The path ends in the Merkle root of the header of the block at that height, and the header's hash meets its own target | Yes: the block's time |
+| Header checked | The path ends in the Merkle root of a header at the stated height whose work meets its own target and a floor of 2^64 | No |
+| Confirmed | A source you trust names that header's hash for that height: `bitcoin-cli getblockhash` on your own node, or several independent explorers that agree | Yes: the block's time |
 
-`ots::DetachedTimestamp::status` can only return Pending or Anchored; Verified
-needs a block header, and the height the verifier fetched it at. The height is
-an input because nothing in a proof authenticates the height it claims.
-Compare the reported block hash with a node you run.
+A header is 80 bytes anyone can write. One with an easy target and the right
+Merkle root passes every check a header can have on its own; before the floor
+(`ots::MIN_TARGET_ZERO_BITS`) it cost nothing to make, now it costs about 2^64
+hashes, and only the chain check makes it worthless. So a proof dates nothing
+until `BitcoinHeader::confirm` matches the hash, and `calybris-verify` asks for
+`--block-hash`. The height is an input for the same reason: nothing in a proof
+authenticates the height it claims.
 
 ### 3. What if an administrator also gets the signing keys?
 
@@ -119,8 +136,13 @@ Then they can sign anything as the log. What they cannot do:
 
 What is left is signing new, correctly dated records. `audit::KeyStatus`
 handles the key itself: once a key is marked revoked at time *t*, something it
-signed counts only if independent evidence shows it existed before *t*. The
-signer's own timestamp is not an input. Keeping keys in an HSM, rotating them,
+signed counts only if independent evidence shows its **signature** existed
+before *t*. The signer's own timestamp is not an input, and neither is
+evidence that dates only the content: a checkpoint body stamped at 10:00 does
+not show who signed it when, and a thief holding the key at 12:00 can sign that
+old body. Evidence counts when it covers the signature (`audit::Covers`): a
+stamp over the log-signed note, or a witness cosignature, since a witness
+checks the log's signature before it cosigns. Keeping keys in an HSM, rotating them,
 and choosing witnesses run by other organisations remain operational decisions
 ([KEY_MANAGEMENT.md](KEY_MANAGEMENT.md)); a witness run by the same
 administrator adds nothing.
@@ -170,12 +192,16 @@ witness that speaks the protocol over HTTP.
 Timestamps:
 
 ```sh
-calybris-verify checkpoint stamp checkpoints/000002.checkpoint        # OpenTimestamps, Pending
-calybris-verify checkpoint upgrade checkpoints/000002.checkpoint.ots  # hours later: Anchored
-calybris-verify checkpoint tsa-request checkpoints/000002.checkpoint  # prints the nonce
-curl -H "Content-Type: application/timestamp-query" --data-binary @checkpoints/000002.checkpoint.tsq \
-    -o checkpoints/000002.checkpoint.tsr https://freetsa.org/tsr
+calybris-verify checkpoint stamp checkpoints/000002.checkpoint --log-key log.vkey   # OpenTimestamps, Pending
+calybris-verify checkpoint upgrade checkpoints/000002.checkpoint.signed.ots        # hours later: Anchored
+calybris-verify checkpoint tsa-request checkpoints/000002.checkpoint --log-key log.vkey  # prints the nonce
+curl -H "Content-Type: application/timestamp-query" --data-binary @checkpoints/000002.checkpoint.signed.tsq \
+    -o checkpoints/000002.checkpoint.signed.tsr https://freetsa.org/tsr
 ```
+
+Both stamp `000002.checkpoint.signed`, the note with the log's signature only,
+which they write next to it. `upgrade --allow-calendar URL` admits a calendar
+that `stamp --calendar` used but the default list does not name.
 
 An auditor, with only public material:
 
@@ -183,22 +209,35 @@ An auditor, with only public material:
 calybris-verify checkpoint verify checkpoints/000002.checkpoint --log-key log.vkey \
     --witness w1.vkey --witness w2.vkey --witness w3.vkey --threshold 2 \
     --wal decisions.wal.jsonl --prev checkpoints/000001.checkpoint \
-    --ots checkpoints/000002.checkpoint.ots --block-height H --block-header HEX \
-    --tsr checkpoints/000002.checkpoint.tsr --tsa-cert freetsa.crt --nonce N
+    --ots checkpoints/000002.checkpoint.signed.ots \
+    --block-height H --block-header HEX --block-hash HASH \
+    --tsr checkpoints/000002.checkpoint.signed.tsr --tsa-cert freetsa.crt --nonce N \
+    --require full
 ```
 
-Exit codes: 0 everything asked for verified; 1 a check failed; 2 usage; 3 no
-check failed but a timestamp is still Pending or Anchored without a header. A
-Pending proof is never reported as verified.
+The last line names what was established, and nothing more:
+
+| Result | Meaning |
+|---|---|
+| `SIGNATURE VERIFIED ONLY` | The operator's own signature. Nothing independent was checked. |
+| `INDEPENDENTLY WITNESSED` | A quorum of the witnesses you named cosigned; no independent timestamp. |
+| `TIMESTAMP VERIFIED` | An RFC 3161 token or a confirmed Bitcoin block dates it; no witnesses. |
+| `FULL VERIFICATION COMPLETE` | Both. |
+
+`--require witnessed|timestamped|bitcoin|full` makes a missing level a failure.
+Exit codes: 0 no check failed and every requirement was met; 1 a check failed
+or a requirement was not; 2 usage; 3 nothing failed but a timestamp is still
+pending, or its block is not confirmed.
 
 What to keep, per checkpoint:
 
 ```text
 checkpoints/
-  000001.checkpoint       signed note; cosignature lines are appended to it
-  000001.checkpoint.ots   OpenTimestamps proof of SHA-256(body)
-  000001.checkpoint.tsq   RFC 3161 request (holds the nonce)
-  000001.checkpoint.tsr   RFC 3161 response
+  000001.checkpoint              signed note; cosignature lines are appended to it
+  000001.checkpoint.signed       the note with the log's signature only: what is stamped
+  000001.checkpoint.signed.ots   OpenTimestamps proof of it
+  000001.checkpoint.signed.tsq   RFC 3161 request (holds the nonce)
+  000001.checkpoint.signed.tsr   RFC 3161 response
 ```
 
 A checkpoint may name the previous one in an extension line
@@ -217,7 +256,8 @@ its. On Windows the reference client currently fails at start-up
 - That records are true. It proves which records were written and when, not
   that their inputs were right ([THREAT_MODEL.md](THREAT_MODEL.md)).
 - That witnesses are independent. A policy of witnesses run by one party is a
-  policy of one witness.
-- That a TSA is honest beyond its certificate, or that a Bitcoin header came
-  from the main chain unless you checked it against a node you trust.
+  policy of one witness, and today every Calybris witness is run by the
+  maintainer.
+- That a TSA is honest beyond its certificate, or that a Bitcoin block is on
+  the main chain beyond what the source you gave `--block-hash` says.
 - An audited post-quantum implementation (question 4).

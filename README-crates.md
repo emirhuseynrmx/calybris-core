@@ -31,9 +31,9 @@ computer, the receipt reproduces exactly the same decision. Change a single
 record and the numbers stop matching.
 
 New in 1.3.0: you do not have to take the operator's word for it either.
-Independent parties can co-sign the log, and a public timestamping service and
-the Bitcoin blockchain can date it, so nobody — including whoever runs it — can
-quietly rewrite the past or backdate a decision.
+A public timestamping service and the Bitcoin blockchain can date the log, and
+other organisations can co-sign it, so nobody — including whoever runs it —
+can rewrite the past or backdate a decision without it showing.
 
 **Try it in your browser, nothing to install:** [calybris.tech/try](https://calybris.tech/try/)
 
@@ -195,8 +195,9 @@ sit behind the `preview` flags (see [docs/PREVIEW.md](docs/PREVIEW.md)), and
 | **Who else saw this log?** | `checkpoint` + `witness` — the log's state as a signed C2SP checkpoint, co-signed by witnesses that sign only a checkpoint extending everything they signed before. The formats are the ones Go's checksum database and Sigsum witnesses already use, pinned byte for byte against the Go reference. |
 | **Was I shown the same log as everyone else?** | `audit` — a quorum of witnesses you trust; two conflicting checkpoints become proof anyone can check. A property test plays forked histories against real witnesses in every order. |
 | **When did it exist?** | `tsa` (feature `preview-tsa`) verifies RFC 3161 tokens against a TSA certificate you pin; `ots` verifies OpenTimestamps proofs against a Bitcoin block header, and says *Pending* until one exists. Tested with FreeTSA, DigiCert and a 2015 Bitcoin proof. |
-| **If a signing key is stolen** | Witnesses keep the past from being rewritten, timestamps keep it from being backdated, and `audit::KeyStatus` counts a revoked key only for what independent evidence dates before its revocation. |
-| **From the command line** | `calybris-verify checkpoint create / stamp / verify` and `witness cosign`: sign, witness, timestamp and audit a WAL without writing code. |
+| **If a signing key is stolen** | Witnesses keep the past from being rewritten, timestamps keep it from being backdated, and `audit::KeyStatus` counts a revoked key only for signatures that independent evidence dates before its revocation. |
+| **From the command line** | `calybris-verify checkpoint create / stamp / verify` and `witness cosign`: sign, witness, timestamp and audit a WAL without writing code. `verify` names exactly what it established, from *signature only* to *full verification*, and `--require` fails when independence is missing. |
+| **What is not there yet** | The witnesses are the mechanism, not yet the parties: today no one but the maintainer runs a witness for a Calybris log. RFC 3161 authorities and Bitcoin are independent already. |
 | **Post-quantum, in bulk** | `hybrid::HybridSigner::sign_batch` — one hybrid signature for a whole batch. NIST ACVP vectors pin the ML-DSA-65 calls; the implementation is still **unaudited** ([docs/AUDIT_SCOPE.md](docs/AUDIT_SCOPE.md)). |
 
 ## Added in 1.2.0

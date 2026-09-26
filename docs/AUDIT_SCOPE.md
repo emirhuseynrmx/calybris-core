@@ -47,7 +47,9 @@ and the four questions it answers are in [TRUST.md](TRUST.md).
   `fresh_as_of` are the *k*-th earliest and *k*-th latest cosignature times.
 - `SplitView::verify` accepts only two log-signed checkpoints of one origin
   and size with different roots.
-- `KeyStatus::accepts` never accepts on the signer's own clock.
+- `KeyStatus::accepts` never accepts on the signer's own clock, nor on
+  evidence that covers only the content (`Covers::Content`); a timestamp
+  over `SignedNote::signed_by` covers the log's signature.
 
 **Checkpoints**
 
@@ -75,8 +77,11 @@ and the four questions it answers are in [TRUST.md](TRUST.md).
 - Parsing enforces the reference limits (message 4096 bytes, depth 256,
   payload 8192) and serialization is the reference client's canonical order.
 - `verify_bitcoin` accepts only an attestation for the caller's height whose
-  message equals the header's Merkle root, and a header meeting its own
-  target; `status` never reports Verified.
+  message equals the header's Merkle root, and a header whose target has at
+  least 64 leading zero bits and whose hash meets it; nothing counts as
+  evidence until `BitcoinHeader::confirm` matches a trusted block hash.
+- `calybris-verify checkpoint verify` never reports more than was checked,
+  and fails when a `--require`d level is missing.
 - Calendar URLs outside the allowlist are never contacted by `upgrade`.
 
 ## Evidence already in the repository

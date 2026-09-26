@@ -30,10 +30,11 @@
 //! that contradicts what they already signed, so the witnessed past cannot be
 //! rewritten and a fork cannot reach the quorum. What it *can* do is sign new
 //! records, possibly dated in the past. [`KeyStatus`] closes that: once a key
-//! is marked revoked at time *t*, something it signed counts only if it is
-//! proven — by witnesses, an RFC 3161 token or a Bitcoin-anchored
-//! OpenTimestamps proof, never by the signer's own clock — to have existed
-//! before *t*.
+//! is marked revoked at time *t*, something it signed counts only if its
+//! *signature* is proven — by witnesses, an RFC 3161 token or a
+//! Bitcoin-anchored OpenTimestamps proof, never by the signer's own clock — to
+//! have existed before *t*. Evidence that dates only the signed content does
+//! not count: a thief can sign an old body that was timestamped long ago.
 
 use crate::checkpoint::{
     Checkpoint, CheckpointError, NoteVerifier, SignedNote, ALG_COSIGNATURE_V1,
@@ -67,6 +68,10 @@ pub enum AuditError {
     NoCheckpoint,
     #[error("nothing proves this existed before its key was revoked")]
     TimeUnproven,
+    /// There is evidence of when the content existed, none of when it was
+    /// signed.
+    #[error("the evidence dates the content, not the signature, so it cannot show the signature predates the revocation")]
+    SignatureUndated,
     #[error(
         "this was first proven to exist at {existed_by}, after its key was revoked at {revoked_at}"
     )]
@@ -233,31 +238,86 @@ pub enum Comparison {
     SplitView(Box<SplitView>),
 }
 
-/// When a signed record provably existed, and by whose word.
+/// Who dated a record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TimeEvidence {
-    /// A witness quorum had seen a checkpoint containing it by this time.
-    Witnesses(u64),
-    /// An RFC 3161 timestamp token over it, or over a checkpoint containing it.
-    Rfc3161(u64),
-    /// A Bitcoin block, verified against its header, commits to it via
-    /// OpenTimestamps; the block's own timestamp.
-    Bitcoin(u64),
+pub enum TimeSource {
+    /// A witness quorum, by the `threshold`-th earliest cosignature time.
+    Witnesses,
+    /// An RFC 3161 timestamping authority, at `genTime` plus its accuracy.
+    Rfc3161,
+    /// A Bitcoin block committing to it through OpenTimestamps, confirmed to
+    /// be on the chain; the block's timestamp.
+    Bitcoin,
+}
+
+/// What a piece of time evidence covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Covers {
+    /// The signed content only, such as a checkpoint body. Dates what was
+    /// said, not when anyone signed it.
+    Content,
+    /// The content together with the signature on it: a stamp over
+    /// `SignedNote::signed_by`, or a witness cosignature (a witness checks the
+    /// log's signature before it cosigns).
+    Signature,
+}
+
+/// When a signed record provably existed, by whose word, and over what.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeEvidence {
+    pub source: TimeSource,
+    /// Unix seconds.
+    pub time: u64,
+    pub covers: Covers,
 }
 
 impl TimeEvidence {
+    /// A witness quorum's time. It covers the log's signature: C2SP witnesses
+    /// verify it before they cosign.
     #[must_use]
-    pub fn time(self) -> u64 {
-        match self {
-            Self::Witnesses(t) | Self::Rfc3161(t) | Self::Bitcoin(t) => t,
+    pub fn witnesses(time: u64) -> Self {
+        Self {
+            source: TimeSource::Witnesses,
+            time,
+            covers: Covers::Signature,
+        }
+    }
+
+    #[must_use]
+    pub fn rfc3161(time: u64, covers: Covers) -> Self {
+        Self {
+            source: TimeSource::Rfc3161,
+            time,
+            covers,
+        }
+    }
+
+    #[must_use]
+    pub fn bitcoin(time: u64, covers: Covers) -> Self {
+        Self {
+            source: TimeSource::Bitcoin,
+            time,
+            covers,
         }
     }
 }
 
-/// The earliest time any piece of independent evidence puts on a record.
+/// The earliest time any piece of independent evidence puts on a record's
+/// content.
 #[must_use]
 pub fn existed_by(evidence: &[TimeEvidence]) -> Option<u64> {
-    evidence.iter().map(|e| e.time()).min()
+    evidence.iter().map(|e| e.time).min()
+}
+
+/// The earliest time any piece of independent evidence puts on a record's
+/// signature. Content-only evidence is ignored.
+#[must_use]
+pub fn signed_by(evidence: &[TimeEvidence]) -> Option<u64> {
+    evidence
+        .iter()
+        .filter(|e| e.covers == Covers::Signature)
+        .map(|e| e.time)
+        .min()
 }
 
 /// Whether a signing key is still trusted, and if not, since when.
@@ -273,14 +333,16 @@ pub enum KeyStatus {
 
 impl KeyStatus {
     /// Decides whether something signed by a key with this status counts,
-    /// given the independent evidence of when it existed. The signer's own
-    /// timestamp is deliberately not an input: a thief with the key writes
-    /// whatever date suits.
+    /// given the independent evidence of when its signature existed. The
+    /// signer's own timestamp is deliberately not an input: a thief with the
+    /// key writes whatever date suits. Nor is evidence covering only the
+    /// content: the thief can sign content that was timestamped long ago.
     pub fn accepts(self, evidence: &[TimeEvidence]) -> Result<(), AuditError> {
         let Self::Revoked { at } = self else {
             return Ok(());
         };
-        match existed_by(evidence) {
+        match signed_by(evidence) {
+            None if existed_by(evidence).is_some() => Err(AuditError::SignatureUndated),
             None => Err(AuditError::TimeUnproven),
             Some(t) if t < at => Ok(()),
             Some(t) => Err(AuditError::SignedAfterRevocation {
@@ -620,14 +682,37 @@ mod tests {
         assert!(a.verify_record(7, &leaf_hash(b"forged"), &p).is_err());
     }
 
+    /// The review finding: a body timestamped at 10:00, the key revoked at
+    /// 11:00, and the thief signing the old body at 12:00. The body evidence
+    /// is real and early, and must not vouch for the signature.
+    #[test]
+    fn content_only_evidence_never_vouches_for_a_signature_after_revocation() {
+        let revoked = KeyStatus::Revoked { at: 11 };
+        let body_at_ten = [
+            TimeEvidence::rfc3161(10, Covers::Content),
+            TimeEvidence::bitcoin(10, Covers::Content),
+        ];
+        assert_eq!(
+            revoked.accepts(&body_at_ten),
+            Err(AuditError::SignatureUndated)
+        );
+        assert_eq!(existed_by(&body_at_ten), Some(10));
+        assert_eq!(signed_by(&body_at_ten), None);
+        // The same time, covering the signature, does count.
+        assert_eq!(
+            revoked.accepts(&[TimeEvidence::rfc3161(10, Covers::Signature)]),
+            Ok(())
+        );
+    }
+
     #[test]
     fn a_revoked_key_counts_only_for_what_was_proven_before_revocation() {
         let revoked = KeyStatus::Revoked { at: 1_000 };
         assert_eq!(KeyStatus::Active.accepts(&[]), Ok(()));
         assert_eq!(revoked.accepts(&[]), Err(AuditError::TimeUnproven));
-        assert_eq!(revoked.accepts(&[TimeEvidence::Witnesses(999)]), Ok(()));
+        assert_eq!(revoked.accepts(&[TimeEvidence::witnesses(999)]), Ok(()));
         assert_eq!(
-            revoked.accepts(&[TimeEvidence::Rfc3161(1_000)]),
+            revoked.accepts(&[TimeEvidence::rfc3161(1_000, Covers::Signature)]),
             Err(AuditError::SignedAfterRevocation {
                 existed_by: 1_000,
                 revoked_at: 1_000
@@ -635,7 +720,10 @@ mod tests {
         );
         // The earliest independent evidence decides.
         assert_eq!(
-            revoked.accepts(&[TimeEvidence::Bitcoin(2_000), TimeEvidence::Witnesses(900)]),
+            revoked.accepts(&[
+                TimeEvidence::bitcoin(2_000, Covers::Signature),
+                TimeEvidence::witnesses(900)
+            ]),
             Ok(())
         );
     }

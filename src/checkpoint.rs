@@ -166,8 +166,9 @@ impl Checkpoint {
         out
     }
 
-    /// `SHA-256(body)`: the 32 bytes a timestamping authority or
-    /// OpenTimestamps is asked to stamp for this checkpoint.
+    /// `SHA-256(body)`. A timestamp over this dates the checkpoint's
+    /// *content* only; to date the log's signature as well, stamp
+    /// [`SignedNote::signed_by`] instead.
     #[must_use]
     pub fn digest(&self) -> Hash {
         Sha256::digest(self.body().as_bytes()).into()
@@ -370,6 +371,20 @@ impl SignedNote {
             out.push_str(&sig.line());
         }
         out
+    }
+
+    /// The note with `key`'s signature only, as text, after checking that
+    /// signature: the bytes to timestamp.
+    ///
+    /// A timestamp over the body alone proves the body existed, not that the
+    /// log had signed it. Someone who later steals the log key can sign an
+    /// old, already-timestamped body, so body evidence cannot show that a
+    /// signature predates a key's revocation. A timestamp over these bytes
+    /// covers the signature too.
+    pub fn signed_by(&self, key: &NoteVerifier) -> Result<String, CheckpointError> {
+        self.verify(key)?;
+        let sig = self.signature_from(key)?;
+        Ok(format!("{}\n{}", self.text, sig.line()))
     }
 
     fn signature_from(&self, key: &NoteVerifier) -> Result<&NoteSignature, CheckpointError> {
@@ -862,6 +877,28 @@ mod tests {
             SignedNote::parse(&"a".repeat(MAX_NOTE_BYTES + 1)),
             Err(CheckpointError::NoteTooLarge)
         );
+    }
+
+    #[test]
+    fn the_stamped_bytes_carry_the_log_signature_and_nothing_else() {
+        let log = LogSigner::from_seed("log", &[1; 32]).unwrap();
+        let w = WitnessSigner::from_seed("w", &[2; 32]).unwrap();
+        let mut note = log.sign(&cp(3));
+        let before = note.signed_by(log.verifier()).unwrap();
+        note.add_signature(w.cosign(note.text(), 9).unwrap())
+            .unwrap();
+        // Cosignatures arriving later do not change what was stamped.
+        assert_eq!(note.signed_by(log.verifier()).unwrap(), before);
+        assert_eq!(before, log.sign(&cp(3)).render());
+        assert_ne!(
+            before,
+            cp(3).body(),
+            "the body alone would not date the signature"
+        );
+        // Only a verifying log signature can be stamped.
+        let stranger = LogSigner::from_seed("log", &[5; 32]).unwrap();
+        assert!(note.signed_by(stranger.verifier()).is_err());
+        assert!(note.signed_by(w.verifier()).is_err());
     }
 
     #[test]

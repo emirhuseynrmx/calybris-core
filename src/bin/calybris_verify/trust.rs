@@ -6,29 +6,37 @@
 //! calybris-verify checkpoint create   <wal> --origin ORIGIN --key LOG.skey [--prev PREV] [--out FILE] [--hmac-key-hex HEX]
 //! calybris-verify checkpoint request  <wal> --note FILE --old N [--hmac-key-hex HEX]
 //! calybris-verify witness cosign      <request> --key W.skey --log ORIGIN=LOG.vkey --state STATE.json [--now UNIX] [--append-to NOTE]
-//! calybris-verify checkpoint stamp    <note> [--calendar URL ...]
-//! calybris-verify checkpoint upgrade  <note.ots>
-//! calybris-verify checkpoint tsa-request <note> [--nonce N]
+//! calybris-verify checkpoint stamp    <note> --log-key LOG.vkey [--calendar URL ...]
+//! calybris-verify checkpoint upgrade  <note.signed.ots> [--allow-calendar PATTERN ...]
+//! calybris-verify checkpoint tsa-request <note> --log-key LOG.vkey [--nonce N]
 //! calybris-verify checkpoint verify   <note> --log-key LOG.vkey
 //!                                     [--witness W.vkey ... --threshold K]
 //!                                     [--wal WAL [--hmac-key-hex HEX]] [--prev PREV]
-//!                                     [--ots NOTE.ots [--block-height H --block-header HEX]]
-//!                                     [--tsr NOTE.tsr --tsa-cert CERT.pem [--nonce N]]
-//!                                     [--revoked-at UNIX]
+//!                                     [--ots NOTE.signed.ots [--block-height H --block-header HEX --block-hash HASH]]
+//!                                     [--tsr NOTE.signed.tsr --tsa-cert CERT.pem [--nonce N]]
+//!                                     [--revoked-at UNIX] [--require witnessed|timestamped|bitcoin|full]
 //! ```
 //!
 //! The network is reached only by `stamp` and `upgrade`, through the system
 //! `curl` (present on Windows 10 and later, macOS and Linux), so the library
 //! stays free of an HTTP stack. Everything `verify` checks is offline.
 //!
-//! Exit codes: 0 everything asked for verified; 1 a check failed; 2 usage;
-//! 3 nothing failed but a timestamp is still pending or anchored without a
-//! block header, so the checkpoint is not yet dated by Bitcoin.
+//! `verify` never lets the operator's own signature pass for more than it is.
+//! Its last line names what was established — `SIGNATURE VERIFIED ONLY`,
+//! `INDEPENDENTLY WITNESSED`, `TIMESTAMP VERIFIED` or `FULL VERIFICATION
+//! COMPLETE` — and `--require` turns a missing level into a failure.
+//! Timestamps are taken over the log-signed note (`<note>.signed`), so they
+//! date the signature and not only the body; a Bitcoin block counts only once
+//! `--block-hash` from a node you trust confirms it.
+//!
+//! Exit codes: 0 no check failed and every `--require` was met; 1 a check
+//! failed or a requirement was not met; 2 usage; 3 nothing failed but a
+//! timestamp is still pending, or its block is not confirmed.
 
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
-use calybris_core::audit::{existed_by, KeyStatus, TimeEvidence, WitnessPolicy};
+use calybris_core::audit::{existed_by, Covers, KeyStatus, TimeEvidence, WitnessPolicy};
 use calybris_core::checkpoint::{Checkpoint, LogSigner, NoteVerifier, SignedNote, WitnessSigner};
 use calybris_core::merkle::{
     consistency_proof, leaf_from_entry_hash, leaf_hash, root_of, Hash, TreeHead,
@@ -382,16 +390,28 @@ fn print_status(status: &Status) {
             calendars.join(", ")
         ),
         Status::Anchored { heights } => println!(
-            "OTS ANCHORED at Bitcoin block {heights:?}; verify with --block-height and --block-header from a node you trust"
+            "OTS ANCHORED at Bitcoin block {heights:?}; verify with --block-height, --block-header and --block-hash from a node you trust"
         ),
-        Status::Verified(v) => println!("OTS VERIFIED: block {} {}", v.height, v.block_hash),
     }
+}
+
+/// The log-signed note as bytes, written next to the note as `<note>.signed`:
+/// what `stamp` and `tsa-request` timestamp, so the timestamp covers the log's
+/// signature and not only the body.
+fn signed_bytes(f: &Flags, path: &str) -> Result<(String, String), Fail> {
+    let (note, _) = open_note(path)?;
+    let log =
+        NoteVerifier::parse(&read_key_text(f.need("--log-key")?)?).map_err(|e| e.to_string())?;
+    let signed = note.signed_by(&log).map_err(|e| format!("{path}: {e}"))?;
+    let out = format!("{path}.signed");
+    write_file(&out, signed.as_bytes())?;
+    Ok((out, signed))
 }
 
 fn stamp(f: &Flags) -> Result<ExitCode, Fail> {
     let path = f.target()?;
-    let (_, cp) = open_note(path)?;
-    let mut proof = DetachedTimestamp::new(cp.digest());
+    let (signed_path, signed) = signed_bytes(f, path)?;
+    let mut proof = DetachedTimestamp::new(Sha256::digest(signed.as_bytes()).into());
     let commitment = proof.prepare_submission(random::<16>()?);
     let calendars = f.all("--calendar");
     let calendars: Vec<&str> = if calendars.is_empty() {
@@ -413,9 +433,9 @@ fn stamp(f: &Flags) -> Result<ExitCode, Fail> {
     if accepted == 0 {
         return Err("no calendar accepted the checkpoint".into());
     }
-    let out = format!("{path}.ots");
+    let out = format!("{signed_path}.ots");
     write_file(&out, &proof.serialize())?;
-    eprintln!("wrote {out} ({accepted} calendars)");
+    eprintln!("wrote {signed_path} (the stamped bytes) and {out} ({accepted} calendars)");
     print_status(&proof.status());
     Ok(ExitCode::from(EXIT_INCOMPLETE))
 }
@@ -424,16 +444,19 @@ fn upgrade(f: &Flags) -> Result<ExitCode, Fail> {
     let path = f.target()?;
     let raw = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let mut proof = DetachedTimestamp::parse(&raw).map_err(|e| e.to_string())?;
+    // A calendar used with `stamp --calendar` is not on the default list;
+    // `--allow-calendar` admits it (and any other pattern) for the upgrade.
+    let mut allowed: Vec<&str> = ots::DEFAULT_UPGRADE_ALLOWLIST.to_vec();
+    allowed.extend(f.all("--allow-calendar"));
     let mut changed = false;
     for (commitment, uri) in proof.pending() {
-        let url =
-            match ots::calendar_upgrade_path(&uri, &commitment, &ots::DEFAULT_UPGRADE_ALLOWLIST) {
-                Ok(u) => u,
-                Err(e) => {
-                    eprintln!("skipping: {e}");
-                    continue;
-                }
-            };
+        let url = match ots::calendar_upgrade_path(&uri, &commitment, &allowed) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("skipping: {e} (add it with --allow-calendar if you trust it)");
+                continue;
+            }
+        };
         match curl(&url, None) {
             Ok(Some(body)) => match proof.merge_calendar_response(&commitment, &body) {
                 Ok(()) => changed = true,
@@ -458,17 +481,18 @@ fn upgrade(f: &Flags) -> Result<ExitCode, Fail> {
 #[cfg(feature = "preview-tsa")]
 fn tsa_request(f: &Flags) -> Result<ExitCode, Fail> {
     let path = f.target()?;
-    let (_, cp) = open_note(path)?;
+    let (signed_path, signed) = signed_bytes(f, path)?;
     let nonce = match f.one("--nonce") {
         Some(n) => n.parse().map_err(|_| "--nonce must be a number")?,
         None => u64::from_be_bytes(random::<8>()?),
     };
-    let der = calybris_core::tsa::request(&cp.digest(), Some(nonce)).map_err(|e| e.to_string())?;
-    let out = format!("{path}.tsq");
+    let digest: [u8; 32] = Sha256::digest(signed.as_bytes()).into();
+    let der = calybris_core::tsa::request(&digest, Some(nonce)).map_err(|e| e.to_string())?;
+    let out = format!("{signed_path}.tsq");
     write_file(&out, &der)?;
     println!("{nonce}");
     eprintln!(
-        "wrote {out}; nonce {nonce} (pass it to verify). Send it with:\n  curl -H \"Content-Type: application/timestamp-query\" --data-binary @{out} -o {path}.tsr https://freetsa.org/tsr"
+        "wrote {out}; nonce {nonce} (pass it to verify). Send it with:\n  curl -H \"Content-Type: application/timestamp-query\" --data-binary @{out} -o {signed_path}.tsr https://freetsa.org/tsr"
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -478,9 +502,17 @@ fn tsa_request(_: &Flags) -> Result<ExitCode, Fail> {
     Err("built without the preview-tsa feature".into())
 }
 
+/// What a verification established, beyond "no check failed".
+#[derive(Default)]
 struct Report {
     failed: bool,
     incomplete: bool,
+    /// A quorum of the witnesses named with --witness cosigned.
+    witnessed: bool,
+    /// An RFC 3161 token verified, or a Bitcoin block confirmed.
+    timestamped: bool,
+    /// The Bitcoin block was confirmed against --block-hash.
+    bitcoin: bool,
     evidence: Vec<TimeEvidence>,
 }
 
@@ -496,16 +528,37 @@ impl Report {
         self.incomplete = true;
         println!("  PENDING  {what}: {detail}");
     }
+    fn note(&mut self, what: &str, detail: &str) {
+        println!("  note     {what}: {detail}");
+    }
+}
+
+/// What `--require` asked for and was not established.
+fn unmet(f: &Flags, r: &Report) -> Result<Vec<&'static str>, Fail> {
+    let mut missing = Vec::new();
+    for req in f.all("--require").iter().flat_map(|v| v.split(',')) {
+        let (name, met) = match req.trim() {
+            "witnessed" => ("witnessed", r.witnessed),
+            "timestamped" => ("timestamped", r.timestamped),
+            "bitcoin" => ("bitcoin", r.bitcoin),
+            "full" => ("full", r.witnessed && r.timestamped),
+            other => {
+                return Err(format!(
+                    "--require takes witnessed, timestamped, bitcoin or full, not {other:?}"
+                ))
+            }
+        };
+        if !met && !missing.contains(&name) {
+            missing.push(name);
+        }
+    }
+    Ok(missing)
 }
 
 fn verify(f: &Flags) -> Result<ExitCode, Fail> {
     let path = f.target()?;
     let (note, cp) = open_note(path)?;
-    let mut r = Report {
-        failed: false,
-        incomplete: false,
-        evidence: Vec::new(),
-    };
+    let mut r = Report::default();
     println!(
         "checkpoint {} size {} root {}",
         cp.origin(),
@@ -519,6 +572,9 @@ fn verify(f: &Flags) -> Result<ExitCode, Fail> {
         Ok(()) => r.ok("log signature", log.name()),
         Err(e) => r.fail("log signature", &e.to_string()),
     }
+    // What a timestamp over the signature is a timestamp of. `None` when the
+    // log signature does not verify, which has already failed the run.
+    let signed = note.signed_by(&log).ok();
     check_witnesses(f, &note, &log, &mut r)?;
     if let Some(wal) = f.one("--wal") {
         check_wal(f, wal, &cp, &mut r)?;
@@ -526,11 +582,15 @@ fn verify(f: &Flags) -> Result<ExitCode, Fail> {
     if let Some(prev) = f.one("--prev") {
         check_prev(prev, &cp, &mut r)?;
     }
+    let stamped = Stamped {
+        signature: signed.map(|s| Sha256::digest(s.as_bytes()).into()),
+        content: cp.digest(),
+    };
     if let Some(ots_path) = f.one("--ots") {
-        check_ots(f, ots_path, &cp, &mut r)?;
+        check_ots(f, ots_path, &stamped, &mut r)?;
     }
     if let Some(tsr) = f.one("--tsr") {
-        verify_tsr(f, tsr, &cp, &mut r)?;
+        verify_tsr(f, tsr, &stamped, &mut r)?;
     }
 
     match existed_by(&r.evidence) {
@@ -544,22 +604,36 @@ fn verify(f: &Flags) -> Result<ExitCode, Fail> {
         match (KeyStatus::Revoked { at }).accepts(&r.evidence) {
             Ok(()) => r.ok(
                 "revoked key",
-                &format!("signed before its revocation at {}", utc(at)),
+                &format!("signature proven before its revocation at {}", utc(at)),
             ),
             Err(e) => r.fail("revoked key", &e.to_string()),
         }
     }
 
-    Ok(if r.failed {
-        println!("CHECKPOINT FAILED");
-        ExitCode::FAILURE
-    } else if r.incomplete {
-        println!("CHECKPOINT OK, TIMESTAMP INCOMPLETE");
-        ExitCode::from(EXIT_INCOMPLETE)
-    } else {
-        println!("CHECKPOINT VERIFIED");
-        ExitCode::SUCCESS
-    })
+    let missing = unmet(f, &r)?;
+    Ok(verdict(&r, &missing))
+}
+
+fn verdict(r: &Report, missing: &[&str]) -> ExitCode {
+    if r.failed {
+        println!("RESULT: FAILED");
+        return ExitCode::FAILURE;
+    }
+    if !missing.is_empty() {
+        println!("RESULT: REQUIREMENT NOT MET: {}", missing.join(", "));
+        return ExitCode::FAILURE;
+    }
+    if r.incomplete {
+        println!("RESULT: INCOMPLETE — a timestamp is still pending or unconfirmed");
+        return ExitCode::from(EXIT_INCOMPLETE);
+    }
+    match (r.witnessed, r.timestamped) {
+        (true, true) => println!("RESULT: FULL VERIFICATION COMPLETE — signature, independent witnesses, independent timestamp"),
+        (true, false) => println!("RESULT: INDEPENDENTLY WITNESSED — no independent timestamp was checked"),
+        (false, true) => println!("RESULT: TIMESTAMP VERIFIED — no independent witness was checked"),
+        (false, false) => println!("RESULT: SIGNATURE VERIFIED ONLY — the operator's own signature; nothing independent was checked"),
+    }
+    ExitCode::SUCCESS
 }
 
 fn check_witnesses(
@@ -597,7 +671,8 @@ fn check_witnesses(
                     names.join("; ")
                 ),
             );
-            r.evidence.push(TimeEvidence::Witnesses(w.seen_by()));
+            r.witnessed = true;
+            r.evidence.push(TimeEvidence::witnesses(w.seen_by()));
         }
         Err(e) => r.fail("witnesses", &e.to_string()),
     }
@@ -646,18 +721,47 @@ fn check_prev(prev: &str, cp: &Checkpoint, r: &mut Report) -> Result<(), Fail> {
     Ok(())
 }
 
-fn check_ots(f: &Flags, ots_path: &str, cp: &Checkpoint, r: &mut Report) -> Result<(), Fail> {
+/// The two digests a timestamp may be over: the log-signed note, which dates
+/// the signature, or the body alone, which dates only the content.
+struct Stamped {
+    signature: Option<[u8; 32]>,
+    content: [u8; 32],
+}
+
+impl Stamped {
+    fn covers(&self, digest: &[u8; 32]) -> Option<Covers> {
+        if self.signature.as_ref() == Some(digest) {
+            Some(Covers::Signature)
+        } else if *digest == self.content {
+            Some(Covers::Content)
+        } else {
+            None
+        }
+    }
+}
+
+fn describe(covers: Covers) -> &'static str {
+    match covers {
+        Covers::Signature => "covers the log's signature",
+        Covers::Content => "covers the body only, not the signature",
+    }
+}
+
+fn check_ots(f: &Flags, ots_path: &str, stamped: &Stamped, r: &mut Report) -> Result<(), Fail> {
     let raw = std::fs::read(ots_path).map_err(|e| format!("cannot read {ots_path}: {e}"))?;
     let proof = match DetachedTimestamp::parse(&raw) {
+        Ok(p) => p,
         Err(e) => {
             r.fail("OpenTimestamps", &e.to_string());
             return Ok(());
         }
-        Ok(p) if p.digest() != cp.digest() => {
-            r.fail("OpenTimestamps", "the proof is for another digest");
-            return Ok(());
-        }
-        Ok(p) => p,
+    };
+    let Some(covers) = stamped.covers(&proof.digest()) else {
+        r.fail(
+            "OpenTimestamps",
+            "the proof is for neither this signed note nor its body",
+        );
+        return Ok(());
     };
     let (height, header) = match (f.one("--block-height"), f.one("--block-header")) {
         (Some(h), Some(hdr)) => (h, hdr),
@@ -673,19 +777,39 @@ fn check_ots(f: &Flags, ots_path: &str, cp: &Checkpoint, r: &mut Report) -> Resu
     let header: [u8; 80] = unhex(header)?
         .try_into()
         .map_err(|_| "--block-header must be 80 bytes of hex")?;
-    match proof.verify_bitcoin(height, &header) {
+    let checked = match proof.verify_bitcoin(height, &header) {
+        Ok(h) => h,
+        Err(e) => {
+            r.fail("OpenTimestamps", &e.to_string());
+            return Ok(());
+        }
+    };
+    let Some(trusted) = f.one("--block-hash") else {
+        r.pending(
+            "OpenTimestamps",
+            &format!(
+                "header valid for block {} ({}), but nothing confirmed it is on the main chain; \
+                 give --block-hash from `bitcoin-cli getblockhash {}` on your own node",
+                checked.height, checked.block_hash, checked.height
+            ),
+        );
+        return Ok(());
+    };
+    match checked.confirm(trusted) {
         Ok(v) => {
             r.ok(
                 "OpenTimestamps",
                 &format!(
-                    "VERIFIED in Bitcoin block {} ({}) at {}; confirm that hash is block {} on your own node",
+                    "in Bitcoin block {} ({}) at {}; {}",
                     v.height,
                     v.block_hash,
                     utc(v.block_time),
-                    v.height
+                    describe(covers)
                 ),
             );
-            r.evidence.push(TimeEvidence::Bitcoin(v.block_time));
+            r.timestamped = true;
+            r.bitcoin = true;
+            r.evidence.push(TimeEvidence::bitcoin(v.block_time, covers));
         }
         Err(e) => r.fail("OpenTimestamps", &e.to_string()),
     }
@@ -704,15 +828,14 @@ fn report_ots_status(status: &Status, r: &mut Report) {
         Status::Anchored { heights } => r.pending(
             "OpenTimestamps",
             &format!(
-                "anchored at block {heights:?}; give --block-height and --block-header to verify"
+                "anchored at block {heights:?}; give --block-height, --block-header and --block-hash to verify"
             ),
         ),
-        Status::Verified(_) => unreachable!("status() never verifies"),
     }
 }
 
 #[cfg(feature = "preview-tsa")]
-fn verify_tsr(f: &Flags, tsr: &str, cp: &Checkpoint, r: &mut Report) -> Result<(), Fail> {
+fn verify_tsr(f: &Flags, tsr: &str, stamped: &Stamped, r: &mut Report) -> Result<(), Fail> {
     use calybris_core::tsa::{verify_response, PinnedTsa};
     let raw = std::fs::read(tsr).map_err(|e| format!("cannot read {tsr}: {e}"))?;
     let pins = f
@@ -728,26 +851,53 @@ fn verify_tsr(f: &Flags, tsr: &str, cp: &Checkpoint, r: &mut Report) -> Result<(
         .map(str::parse)
         .transpose()
         .map_err(|_| "--nonce must be a number")?;
-    match verify_response(&raw, &cp.digest(), nonce, &pins) {
-        Ok(v) => {
-            r.ok(
-                "RFC 3161",
-                &format!(
-                    "{} by {} (accuracy {} s)",
-                    utc(v.gen_time),
-                    v.signer,
-                    v.accuracy_seconds
-                ),
-            );
-            r.evidence.push(TimeEvidence::Rfc3161(v.existed_by()));
+    // Try the signed note first; fall back to the body, for tokens made
+    // before stamps covered the signature.
+    let attempts = [
+        stamped.signature.map(|d| (d, Covers::Signature)),
+        Some((stamped.content, Covers::Content)),
+    ];
+    let mut last_err = None;
+    for (digest, covers) in attempts.into_iter().flatten() {
+        match verify_response(&raw, &digest, nonce, &pins) {
+            Ok(v) => {
+                r.ok(
+                    "RFC 3161",
+                    &format!(
+                        "{} by {} (accuracy {} s); {}",
+                        utc(v.gen_time),
+                        v.signer,
+                        v.accuracy_seconds,
+                        describe(covers)
+                    ),
+                );
+                r.timestamped = true;
+                r.evidence
+                    .push(TimeEvidence::rfc3161(v.existed_by(), covers));
+                if covers == Covers::Content {
+                    r.note(
+                        "RFC 3161",
+                        "restamp with `checkpoint tsa-request` to date the signature too",
+                    );
+                }
+                return Ok(());
+            }
+            Err(calybris_core::tsa::TsaError::ImprintMismatch) => {
+                last_err = Some(calybris_core::tsa::TsaError::ImprintMismatch);
+            }
+            Err(e) => {
+                r.fail("RFC 3161", &e.to_string());
+                return Ok(());
+            }
         }
-        Err(e) => r.fail("RFC 3161", &e.to_string()),
     }
+    let e = last_err.map_or_else(|| "no digest to check".to_owned(), |e| e.to_string());
+    r.fail("RFC 3161", &e);
     Ok(())
 }
 
 #[cfg(not(feature = "preview-tsa"))]
-fn verify_tsr(_: &Flags, _: &str, _: &Checkpoint, _: &mut Report) -> Result<(), Fail> {
+fn verify_tsr(_: &Flags, _: &str, _: &Stamped, _: &mut Report) -> Result<(), Fail> {
     Err("built without the preview-tsa feature; --tsr is unavailable".into())
 }
 
@@ -777,6 +927,9 @@ const VALUED: &[&str] = &[
     "--tsr",
     "--tsa-cert",
     "--revoked-at",
+    "--block-hash",
+    "--require",
+    "--allow-calendar",
 ];
 
 /// Entry point for `checkpoint …` and `witness …`; `args` excludes the
@@ -820,13 +973,17 @@ pub const USAGE: &str = "\
 \x20 calybris-verify checkpoint create   <wal> --origin ORIGIN --key LOG.skey [--prev PREV] [--out FILE]
 \x20 calybris-verify checkpoint request  <wal> --note FILE --old N
 \x20 calybris-verify witness cosign      <request> --key W.skey --log ORIGIN=LOG.vkey --state STATE.json [--append-to NOTE]
-\x20 calybris-verify checkpoint stamp    <note> [--calendar URL ...]
-\x20 calybris-verify checkpoint upgrade  <note.ots>
-\x20 calybris-verify checkpoint tsa-request <note>
+\x20 calybris-verify checkpoint stamp    <note> --log-key LOG.vkey [--calendar URL ...]
+\x20 calybris-verify checkpoint upgrade  <note.signed.ots> [--allow-calendar PATTERN ...]
+\x20 calybris-verify checkpoint tsa-request <note> --log-key LOG.vkey
 \x20 calybris-verify checkpoint verify   <note> --log-key LOG.vkey [--witness W.vkey ... --threshold K]
-\x20                                     [--wal WAL] [--prev PREV] [--ots F --block-height H --block-header HEX]
+\x20                                     [--wal WAL] [--prev PREV]
+\x20                                     [--ots F --block-height H --block-header HEX --block-hash HASH]
 \x20                                     [--tsr F --tsa-cert PEM --nonce N] [--revoked-at UNIX]
-\x20 Exit code 3: no check failed, but a timestamp is still pending.";
+\x20                                     [--require witnessed|timestamped|bitcoin|full]
+\x20 The result names what was established: SIGNATURE VERIFIED ONLY, INDEPENDENTLY
+\x20 WITNESSED, TIMESTAMP VERIFIED or FULL VERIFICATION COMPLETE. Exit code 1 if a
+\x20 check failed or a --require was not met; 3 if a timestamp is still pending.";
 
 #[cfg(test)]
 mod tests {

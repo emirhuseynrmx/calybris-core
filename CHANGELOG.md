@@ -26,12 +26,15 @@ four questions it answers, are in `docs/TRUST.md`.
 - **`audit`** — witness quorums (`WitnessPolicy`), an auditor that follows one
   log and refuses forks, transferable split-view evidence, record inclusion
   against a witnessed checkpoint, time evidence from witnesses, RFC 3161 and
-  Bitcoin, and `KeyStatus`, under which a revoked key counts only for what is
+  Bitcoin, each marked as covering the content or the signature (`Covers`),
+  and `KeyStatus`, under which a revoked key counts only for what is
   proven to predate its revocation.
 - **`ots`** — OpenTimestamps: the reference `.ots` format read and written in
   canonical order, calendar submission and upgrade, and verification against a
   Bitcoin block header at a verifier-supplied height, with an explicit Pending,
-  Anchored or Verified status.
+  Anchored status. A Bitcoin block dates nothing until its header passes a
+  2^64 work floor and `BitcoinHeader::confirm` matches its hash against a
+  trusted source.
 - **`tsa`** (new feature `preview-tsa`) — RFC 3161 requests and verification
   of responses against pinned TSA certificates: imprint, nonce, CMS signed
   attributes, RSA PKCS#1 v1.5 and ECDSA P-256/P-384 signatures, timeStamping key

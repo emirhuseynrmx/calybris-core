@@ -215,7 +215,8 @@ fn an_operator_two_witnesses_and_an_auditor_agree_on_one_history() {
     assert!(out.status.success(), "{}", stdout(&out));
     let text = stdout(&out);
     assert!(text.contains("2 of 2 required"), "{text}");
-    assert!(text.contains("CHECKPOINT VERIFIED"), "{text}");
+    assert!(!text.contains("FULL VERIFICATION"), "{text}");
+    assert!(text.contains("RESULT: INDEPENDENTLY WITNESSED"), "{text}");
 
     // The log grows; the next checkpoint names the last and extends it.
     append(Path::new(&wal), 11, 15, 100_000);
@@ -324,8 +325,12 @@ fn a_pending_timestamp_is_reported_as_pending_with_exit_code_3() {
     let text = stdout(&out);
     assert_eq!(out.status.code(), Some(3), "{text}");
     assert!(text.contains("PENDING  OpenTimestamps"), "{text}");
-    assert!(text.contains("TIMESTAMP INCOMPLETE"), "{text}");
-    assert!(!text.contains("VERIFIED in Bitcoin"), "{text}");
+    assert!(text.contains("RESULT: INCOMPLETE"), "{text}");
+    assert!(!text.contains("in Bitcoin block"), "{text}");
+    assert!(
+        text.contains("covers the body only") || text.contains("have not committed"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -348,5 +353,89 @@ fn a_revoked_key_counts_only_before_its_revocation() {
         stdout(&out).contains("after its key was revoked"),
         "{}",
         stdout(&out)
+    );
+}
+
+/// The review finding: the operator's own signature must not read as an
+/// independent verification, and asking for independence must fail without it.
+#[test]
+fn a_signature_alone_is_reported_as_exactly_that_and_fails_a_requirement() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+
+    let alone = cli(&[
+        "checkpoint",
+        "verify",
+        &s.p("c.checkpoint"),
+        "--log-key",
+        &s.p("log.vkey"),
+    ]);
+    assert_eq!(alone.status.code(), Some(0));
+    assert!(
+        stdout(&alone).contains("RESULT: SIGNATURE VERIFIED ONLY"),
+        "{}",
+        stdout(&alone)
+    );
+    assert!(!stdout(&alone).contains("FULL VERIFICATION"));
+
+    for req in ["witnessed", "timestamped", "bitcoin", "full"] {
+        let out = cli(&[
+            "checkpoint",
+            "verify",
+            &s.p("c.checkpoint"),
+            "--log-key",
+            &s.p("log.vkey"),
+            "--require",
+            req,
+        ]);
+        assert_eq!(out.status.code(), Some(1), "--require {req}");
+        assert!(
+            stdout(&out).contains("REQUIREMENT NOT MET"),
+            "{}",
+            stdout(&out)
+        );
+    }
+
+    // Witnessed, but no timestamp: `full` still fails, `witnessed` passes.
+    for w in ["w1", "w2"] {
+        assert!(s.cosign(w, &wal, "c.checkpoint", 0, 1_000).status.success());
+    }
+    assert_eq!(
+        s.verify("c.checkpoint", &["--require", "witnessed"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let out = s.verify("c.checkpoint", &["--require", "full"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stdout(&out).contains("REQUIREMENT NOT MET: full"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn an_upgrade_skips_calendars_off_the_allowlist_and_says_how_to_admit_them() {
+    let s = Setup::new();
+    let mut proof = DetachedTimestamp::new([7; 32]);
+    let commitment = proof.prepare_submission([1; 16]);
+    let uri = b"https://my.calendar.example";
+    let mut body = vec![0x00, 0x83, 0xdf, 0xe3, 0x0d, 0x2e, 0xf9, 0x0c, 0x8e];
+    body.push(u8::try_from(uri.len() + 1).unwrap());
+    body.push(u8::try_from(uri.len()).unwrap());
+    body.extend_from_slice(uri);
+    proof.merge_calendar_response(&commitment, &body).unwrap();
+    let path = s.p("custom.ots");
+    std::fs::write(&path, proof.serialize()).unwrap();
+
+    let out = cli(&["checkpoint", "upgrade", &path]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("skipping") && err.contains("--allow-calendar"),
+        "{err}"
     );
 }

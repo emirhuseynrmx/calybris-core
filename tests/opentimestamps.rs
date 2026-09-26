@@ -63,6 +63,36 @@ fn a_2015_proof_verifies_against_the_bitcoin_block_it_names() {
     );
     // 2015-05-28 15:41:18 UTC.
     assert_eq!(v.block_time, 1_432_827_678);
+
+    // Evidence only once a trusted source names the same block.
+    let confirmed = v
+        .confirm("000000000000000003E892881A8CDCDC117C06D444057C98B6F04A9EE75A2319")
+        .unwrap();
+    assert_eq!(confirmed.block_time, 1_432_827_678);
+    assert_eq!(
+        v.confirm("00000000000000000d27a82e56e6c2e0c0e1d7a4c2c9f4d6a9d4b3d8e8f6d5c4"),
+        Err(OtsError::NotOnChain)
+    );
+}
+
+/// The review finding: a header anyone can write, carrying the proof's real
+/// Merkle root and an easy target, ground in a few hundred hashes. Before the
+/// work floor it passed every check a header can have on its own.
+#[test]
+fn a_forged_low_difficulty_header_with_the_right_merkle_root_is_refused() {
+    let proof = DetachedTimestamp::parse(&fixture("hello-world.txt.ots")).unwrap();
+    let mut forged = header();
+    forged[72..76].copy_from_slice(&0x207f_ffff_u32.to_le_bytes()); // regtest target
+    let found = (0_u32..1_000_000).any(|nonce| {
+        forged[76..80].copy_from_slice(&nonce.to_le_bytes());
+        let hash: [u8; 32] = Sha256::digest(Sha256::digest(forged)).into();
+        hash[31] < 0x7f
+    });
+    assert!(found, "a regtest-difficulty header takes a few hashes");
+    assert_eq!(
+        proof.verify_bitcoin(358_391, &forged),
+        Err(OtsError::InsufficientWork)
+    );
 }
 
 #[test]

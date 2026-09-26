@@ -181,8 +181,11 @@ Research: witness cosigning — Syta et al.,
 OpenTimestamps proofs in the reference client's `.ots` format: parse, write,
 submit a checkpoint digest to public calendars, fold in their upgrades, and
 verify a proof against a Bitcoin block header. A proof is Pending, Anchored or
-Verified, and only a header the verifier supplies, with the height it was
-fetched at, makes it Verified.
+confirmed: a header the verifier supplies, with the height it was fetched
+at and a work floor, is checked first, and the block counts only once
+`BitcoinHeader::confirm` matches its hash against a source the verifier
+trusts. Stamp `SignedNote::signed_by`, the log-signed note, so the timestamp
+dates the signature too.
 
 What it does not claim: that a header is on the main chain. Compare the block
 hash with a node you trust.

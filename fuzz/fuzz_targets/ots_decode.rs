@@ -17,6 +17,9 @@ fuzz_target!(|data: &[u8]| {
     let again = DetachedTimestamp::parse(&canonical).expect("a serialized proof parses");
     assert_eq!(again, proof);
     assert_eq!(again.serialize(), canonical);
-    assert!(!matches!(proof.status(), Status::Verified(_)));
+    assert!(matches!(
+        proof.status(),
+        Status::Pending { .. } | Status::Anchored { .. }
+    ));
     let _ = proof.pending();
 });
