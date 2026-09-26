@@ -2,6 +2,8 @@
 
 The automated tests establish protocol behavior. They are not an external
 cryptographic audit, and a maintainer-operated witness is not independent.
+The key procedures step by step are in [KEY_MANAGEMENT.md](KEY_MANAGEMENT.md)
+§4–6; this page is the operating runbook around them.
 
 ## Log key custody and rotation
 
@@ -35,9 +37,9 @@ power-loss guarantee. Run one deployment owner per canonical state-file path;
 do not alias the path through alternate links.
 
 Back up the witness key and state together. Record heads in a separate,
-authenticated append-only store. A corrupt state file fails closed. A missing
-file or an old but valid backup cannot be distinguished locally from a fresh
-witness: freeze that identity. Recover to heads agreed with external pinned
+authenticated append-only store. A corrupt or missing state file fails closed: `witness cosign` refuses it,
+and `witness init` never overwrites a state. An old but valid backup cannot be
+distinguished locally from the latest state: freeze that identity. Recover to heads agreed with external pinned
 checkpoints, or retire the key and enroll a new witness identity. Never reuse
 the old key with an empty state. Published witness policies must explicitly
 activate the new public key; changing keys does not automatically migrate trust.

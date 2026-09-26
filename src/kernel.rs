@@ -787,8 +787,14 @@ impl PolicySnapshot {
 
     /// Build and validate a legacy-compatible snapshot.
     ///
-    /// This constructor remains available for deterministic replay of older artifacts.
-    /// New production policy boundaries should use [`try_new_trusted`](Self::try_new_trusted).
+    /// **For new code, use [`try_new_trusted`](Self::try_new_trusted).** This
+    /// constructor exists so that policies written by earlier 1.x releases
+    /// replay to the same digests, and it accepts what a new policy should
+    /// not: a model with ID zero, which is also what a rejected decision
+    /// selects, and catalogs larger than the `u16` counters in a decision can
+    /// count. It also keeps the models in the order given, so the same catalog
+    /// listed in two orders has two policy digests. The Python and C bindings
+    /// only ever use the trusted constructor.
     pub fn try_new(
         policy_epoch: u64,
         catalog_epoch: u64,

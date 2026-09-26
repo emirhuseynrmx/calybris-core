@@ -43,7 +43,7 @@ fn main() {
         (6, "gemini-flash"),
     ];
 
-    let snapshot = PolicySnapshot::try_new(3, 17, 9_600, 5_500, 3_500, 2, models)
+    let snapshot = PolicySnapshot::try_new_trusted(3, 17, 9_600, 5_500, 3_500, 2, models)
         .expect("valid model catalog");
 
     let wal_path = PathBuf::from("llm_routing_demo.jsonl");

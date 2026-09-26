@@ -117,14 +117,18 @@ cargo run --example verify_wal      # requires wal feature
 
 ```rust
 use calybris_core::kernel::*;
-use calybris_core::verify::{audit_bundle, verify_decision, VerifyResult};
+use calybris_core::verify::{verified_audit_bundle, verify_decision, VerifyResult};
 
-let policy = PolicySnapshot::try_new(/* epoch, limits, models */)?;
+// `try_new_trusted`, not the legacy `try_new`: it reserves model ID 0 and
+// orders the catalog canonically.
+let policy = PolicySnapshot::try_new_trusted(/* epoch, limits, models */)?;
 let input = KernelInput { /* sequence, tokens, constraints */ };
 let decision = policy.prescribe(input);
 
 assert_eq!(verify_decision(&policy, input, &decision), VerifyResult::Valid);
-assert!(audit_bundle(&policy, input, &decision).replay_valid);
+// Fail-closed: an error, not a bundle with `replay_valid == false` as the
+// bare `audit_bundle` would return.
+let bundle = verified_audit_bundle(&policy, input, &decision)?;
 ```
 
 See `examples/quickstart.rs` and [docs.rs](https://docs.rs/calybris-core).

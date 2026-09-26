@@ -65,9 +65,12 @@ One witness only knows what it was shown. Two things close the rest:
 The witness writes its state before it returns a cosignature, through an atomic
 compare-and-swap (`witness::FileStore` for a process on disk), so a crash or a
 race cannot make it sign two inconsistent checkpoints while state is retained.
-Deleting it or restoring a valid old backup erases that protection. An external
-pinned head is required to detect backup rollback; never restart the same
-witness key with empty state after loss. Tests demonstrate this limitation.
+A missing or unreadable state is refused rather than taken for a new witness
+(`FileStore::open`; `witness init` never overwrites a state). A valid old
+backup put back is different: the file alone cannot show it is old, so an
+external pinned head is required to detect that rollback, and the same witness
+key is never restarted with empty or old state. `tests/trust_operations.rs`
+demonstrates both.
 
 Persistence synchronizes the temporary file before atomic replacement. Unix
 also synchronizes the parent directory, subject to the filesystem's durability
@@ -191,9 +194,16 @@ calybris-verify checkpoint request decisions.wal.jsonl --note checkpoints/000002
 Each witness, holding its own key and state:
 
 ```sh
+calybris-verify witness init --state w1.state.json      # once, when the witness starts
 calybris-verify witness cosign req.txt --key w1.skey --log decisions.example.com/log=log.vkey \
     --state w1.state.json --append-to checkpoints/000002.checkpoint
 ```
+
+The state file is the witness's memory and fails closed: `cosign` refuses
+when it is missing or unreadable, and `init` never overwrites one. A witness
+restored from an older backup would cosign a fork of what it forgot; see
+[KEY_MANAGEMENT.md](KEY_MANAGEMENT.md) §5 for backups, and for retiring a
+witness whose state is lost.
 
 `req.txt` is a C2SP tlog-witness request body, so it can equally be sent to a
 witness that speaks the protocol over HTTP.
@@ -224,7 +234,16 @@ calybris-verify checkpoint verify checkpoints/000002.checkpoint --log-key log.vk
     --require full
 ```
 
-The last line names what was established, and nothing more:
+Or without Calybris at all: `scripts/verify_bundle.py` checks the log
+signature, the cosignatures, the stamped bytes, the WAL chain and the Merkle
+root with nothing but Python's standard library, written from the
+specifications. `tests/fixtures/bundle` is a bundle both programs check.
+
+```sh
+python3 scripts/verify_bundle.py checkpoints/ --note 000002.checkpoint --witness w1.vkey
+```
+
+The last line of `checkpoint verify` names what was established, and nothing more:
 
 | Result | Meaning |
 |---|---|
@@ -233,13 +252,41 @@ The last line names what was established, and nothing more:
 | `TIMESTAMP VERIFIED` | An RFC 3161 token or a confirmed Bitcoin block dates it; no witnesses. |
 | `FULL VERIFICATION COMPLETE` | The pinned log signature, configured witness quorum and at least one external timestamp. |
 
-`FULL` does not replay a decision against its policy, prove the honesty of its
-input data, certify that configured witnesses have different operators, or
-check certificate revocation online. WAL-root verification runs only when
-`--wal` is supplied. Decision/receipt replay is a separate verification step.
-The verifier cannot infer organisational independence from a public key.
-
 `--require witnessed|timestamped|bitcoin|full` makes a missing level a failure.
+
+### What `FULL VERIFICATION COMPLETE` covers
+
+Every one of these, and only these:
+
+1. The note is signed by the log key you gave with `--log-key`.
+2. At least `--threshold` of the witness keys you gave cosigned it. Each of
+   them had, before cosigning, checked that it extends every checkpoint of
+   this log it cosigned before.
+3. An independent timestamp verified: an RFC 3161 token checked against a
+   TSA certificate you pinned, or an OpenTimestamps proof in a Bitcoin block
+   whose hash you confirmed with `--block-hash`. The output says whether it
+   covers the log's signature or only the body.
+4. Each optional check you asked for passed: `--wal` (the WAL's first entries
+   reproduce the checkpoint root and their hash chain holds), `--prev` (the
+   checkpoint names its predecessor), `--revoked-at` (the signature is dated
+   before the revocation).
+
+It does **not** establish:
+
+- That the decisions in the log were computed correctly. That is replay:
+  each WAL entry's decision recomputed under its policy
+  (`wal::replay_audited_wal`, `examples/verify_wal.rs`) or each receipt
+  verified. A witnessed, timestamped log of wrong decisions is still wrong.
+- That the policy was the approved one; that is policy provenance
+  (`provenance`, [KEY_MANAGEMENT.md](KEY_MANAGEMENT.md) §2).
+- That the witnesses are run by different parties, or that the keys you
+  passed are the right ones. Which keys to trust is your input; the verifier
+  cannot infer organisational independence from a public key.
+- That a pinned TSA certificate has not been revoked since: revocation is not
+  checked online ([KEY_MANAGEMENT.md](KEY_MANAGEMENT.md) §6).
+- That the input data behind the decisions was honest.
+- Anything about records after the checkpoint's size.
+
 Exit codes: 0 no check failed and every requirement was met; 1 a check failed
 or a requirement was not; 2 usage; 3 nothing failed but a timestamp is still
 pending, or its block is not confirmed.

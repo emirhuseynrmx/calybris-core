@@ -50,8 +50,8 @@ fn main() {
         (30, "IEX-dark"),
     ];
 
-    let policy =
-        PolicySnapshot::try_new(7, 42, 9_600, 7_000, 4_000, 4, venues).expect("valid venue policy");
+    let policy = PolicySnapshot::try_new_trusted(7, 42, 9_600, 7_000, 4_000, 4, venues)
+        .expect("valid venue policy");
 
     let budget = BudgetEngine::new();
     budget.ensure_tenant("desk-alpha", 2_000_000 * USD);

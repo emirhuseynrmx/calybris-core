@@ -135,6 +135,11 @@ path = "examples/gen_proof_surface_vectors.rs"
 required-features = ["wal", "provenance"]
 
 [[example]]
+name = "trust_costs"
+path = "examples/trust_costs.rs"
+required-features = ["wal", "preview-pq", "preview-tsa"]
+
+[[example]]
 name = "quickstart"
 path = "examples/quickstart.rs"
 
