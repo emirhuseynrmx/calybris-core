@@ -94,8 +94,17 @@ pub struct ExplorationRecord {
 }
 
 impl ExplorationRecord {
+    /// The exact probability of this choice, for off-policy estimates
+    /// ([`crate::ope::evaluate_exact`]). `None` only for a record whose
+    /// fraction is not a probability, which [`explore`] never writes.
+    #[must_use]
+    pub fn propensity(&self) -> Option<crate::ope::Propensity> {
+        crate::ope::Propensity::new(self.propensity_numerator, self.propensity_denominator)
+    }
+
     /// The probability in basis points, rounded to the nearest and never below
-    /// one, as [`Selection`] holds it.
+    /// one, as [`Selection`] holds it. Lossy below a basis point and between
+    /// whole ones: estimate from [`ExplorationRecord::propensity`] instead.
     #[must_use]
     pub fn propensity_bps(&self) -> u16 {
         let bps = (u128::from(self.propensity_numerator) * u128::from(BASIS_POINTS)
