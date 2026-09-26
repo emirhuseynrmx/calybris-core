@@ -124,13 +124,17 @@ SOURCE_SCOPED_SUFFIXES = {
     # certificates, a Bitcoin header: the byte-exact inputs the trust-layer
     # tests and fuzz targets are pinned to.
     ".body": ("tests/fixtures/",),
-    ".checkpoint": ("fuzz/seeds/",),
+    ".checkpoint": ("tests/fixtures/", "fuzz/seeds/"),
     ".cnf": ("tests/fixtures/",),
     ".crt": ("tests/fixtures/",),
     ".hex": ("tests/fixtures/",),
     ".ots": ("tests/fixtures/", "fuzz/seeds/"),
     ".tsq": ("tests/fixtures/",),
     ".tsr": ("tests/fixtures/", "fuzz/seeds/"),
+    # A checkpoint bundle as `calybris-verify` writes it: the log-signed note
+    # and the public keys, checked by both the tool and scripts/verify_bundle.py.
+    ".signed": ("tests/fixtures/",),
+    ".vkey": ("tests/fixtures/",),
     # The Go program that generated the C2SP interop vectors, so they can be
     # regenerated rather than taken on trust.
     ".go": ("tests/interop/",),

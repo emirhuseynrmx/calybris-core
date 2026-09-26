@@ -117,6 +117,12 @@ impl Setup {
                 "--out",
                 &s.p(w),
             ]);
+            ok(&[
+                "witness",
+                "init",
+                "--state",
+                &s.p(&format!("{w}.state.json")),
+            ]);
         }
         s
     }
@@ -437,5 +443,439 @@ fn an_upgrade_skips_calendars_off_the_allowlist_and_says_how_to_admit_them() {
     assert!(
         err.contains("skipping") && err.contains("--allow-calendar"),
         "{err}"
+    );
+}
+
+/// A witness whose state file is gone refuses to cosign instead of starting
+/// again from nothing, and `witness init` never overwrites a state.
+#[test]
+fn a_witness_without_its_state_file_refuses_and_init_never_resets_one() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    assert!(s
+        .cosign("w1", &wal, "c.checkpoint", 0, 1_000)
+        .status
+        .success());
+
+    let state = s.p("w1.state.json");
+    let again = cli(&["witness", "init", "--state", &state]);
+    assert_eq!(again.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+
+    std::fs::remove_file(&state).unwrap();
+    append(Path::new(&wal), 4, 6, 100_000);
+    s.checkpoint(&wal, "d.checkpoint", None);
+    let out = s.cosign("w1", &wal, "d.checkpoint", 0, 2_000);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("is missing") && err.contains("witness init"),
+        "{err}"
+    );
+    assert!(
+        !Path::new(&state).exists(),
+        "the refusal must not create a state"
+    );
+}
+
+/// Every way the tool is told no: each command, what it must exit with, and
+/// what it must say. A wrong input is exit 1 with a reason, a malformed
+/// command line exit 2 with the usage; a failed check inside `verify` is a
+/// FAILED line, never a crash or a pass.
+#[test]
+fn every_refusal_exits_with_its_code_and_says_why() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 4, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    let short = s.p("short.wal.jsonl");
+    append(Path::new(&short), 1, 2, 100_000);
+    let other = s.p("other.wal.jsonl");
+    append(Path::new(&other), 1, 4, 555_000);
+    s.checkpoint(&short, "small.checkpoint", None);
+    let note = s.p("c.checkpoint");
+    let vkey = s.p("log.vkey");
+    let garbage = s.p("garbage.txt");
+    std::fs::write(&garbage, "not a key or a note\n").unwrap();
+    let missing = s.p("missing.checkpoint");
+    let w1_vkey = s.p("w1.vkey");
+    let small = s.p("small.checkpoint");
+    let tsr = format!(
+        "{}/tests/fixtures/rfc3161/rsa.tsr",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let tsa_cert = format!(
+        "{}/tests/fixtures/rfc3161/rsa.crt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    fn verify<'a>(note: &'a str, vkey: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+        let mut a = vec!["checkpoint", "verify", note, "--log-key", vkey];
+        a.extend_from_slice(extra);
+        a
+    }
+
+    let cases: Vec<(Vec<&str>, i32, &str)> = vec![
+        (vec!["checkpoint"], 2, "missing subcommand"),
+        (vec!["checkpoint", "nope"], 2, "unknown command"),
+        (vec!["witness", "verify"], 2, "unknown command"),
+        (vec!["checkpoint", "verify", "--bogus"], 2, "unknown option"),
+        (
+            vec!["checkpoint", "verify", "--log-key"],
+            2,
+            "needs a value",
+        ),
+        (vec!["checkpoint", "verify"], 1, "exactly one file"),
+        (
+            vec!["checkpoint", "verify", &note],
+            1,
+            "--log-key is required",
+        ),
+        (
+            vec!["checkpoint", "verify", &missing, "--log-key", &vkey],
+            1,
+            "cannot read",
+        ),
+        (
+            vec!["checkpoint", "verify", &garbage, "--log-key", &vkey],
+            1,
+            "",
+        ),
+        (
+            vec!["checkpoint", "verify", &note, "--log-key", &garbage],
+            1,
+            "",
+        ),
+        (
+            vec![
+                "checkpoint",
+                "keygen",
+                "--name",
+                "x",
+                "--kind",
+                "nope",
+                "--out",
+                &garbage,
+            ],
+            1,
+            "--kind",
+        ),
+        (
+            vec![
+                "checkpoint",
+                "create",
+                &missing,
+                "--origin",
+                ORIGIN,
+                "--key",
+                &vkey,
+            ],
+            1,
+            "WAL",
+        ),
+        (
+            vec![
+                "checkpoint",
+                "create",
+                &wal,
+                "--origin",
+                ORIGIN,
+                "--key",
+                &garbage,
+            ],
+            1,
+            "",
+        ),
+        (
+            vec![
+                "checkpoint",
+                "create",
+                &short,
+                "--origin",
+                ORIGIN,
+                "--key",
+                &vkey,
+                "--prev",
+                &note,
+            ],
+            1,
+            "does not extend",
+        ),
+        (
+            vec![
+                "checkpoint",
+                "create",
+                &wal,
+                "--origin",
+                "other.example/log",
+                "--key",
+                &vkey,
+                "--prev",
+                &note,
+            ],
+            1,
+            "another log",
+        ),
+        (
+            vec!["checkpoint", "request", &wal, "--note", &note, "--old", "x"],
+            1,
+            "--old must be a number",
+        ),
+        (
+            vec!["checkpoint", "request", &wal, "--note", &note, "--old", "9"],
+            1,
+            "larger than the checkpoint",
+        ),
+        (
+            vec![
+                "checkpoint",
+                "request",
+                &short,
+                "--note",
+                &note,
+                "--old",
+                "0",
+            ],
+            1,
+            "not a checkpoint of this WAL",
+        ),
+        (
+            vec![
+                "checkpoint",
+                "tsa-request",
+                &note,
+                "--log-key",
+                &vkey,
+                "--nonce",
+                "x",
+            ],
+            1,
+            "--nonce",
+        ),
+        (vec!["checkpoint", "upgrade", &garbage], 1, ""),
+        (
+            verify(&note, &vkey, &["--threshold", "x", "--witness", &w1_vkey]),
+            1,
+            "--threshold",
+        ),
+        (verify(&note, &vkey, &["--witness", &garbage]), 1, ""),
+        (
+            verify(&note, &vkey, &["--revoked-at", "x"]),
+            1,
+            "Unix seconds",
+        ),
+        (
+            verify(&note, &vkey, &["--require", "everything"]),
+            1,
+            "--require takes",
+        ),
+        (
+            verify(&note, &vkey, &["--wal", &short]),
+            1,
+            "FAILED   WAL: has 2 entries",
+        ),
+        (
+            verify(&note, &vkey, &["--wal", &other]),
+            1,
+            "do not reproduce the checkpoint root",
+        ),
+        (
+            verify(&note, &vkey, &["--prev", &small]),
+            1,
+            "does not name --prev",
+        ),
+        (
+            verify(&note, &vkey, &["--ots", &garbage]),
+            1,
+            "FAILED   OpenTimestamps",
+        ),
+        (verify(&note, &vkey, &["--tsr", &tsr]), 1, "--tsa-cert"),
+        (
+            verify(&note, &vkey, &["--tsr", &tsr, "--tsa-cert", &tsa_cert]),
+            1,
+            "FAILED   RFC 3161",
+        ),
+        (
+            verify(&note, &vkey, &["--revoked-at", "1"]),
+            1,
+            "FAILED   revoked key",
+        ),
+    ];
+    for (args, code, says) in &cases {
+        let out = cli(args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.status.code(), Some(*code), "{args:?}\n{text}");
+        assert!(text.contains(says), "{args:?} should say {says:?}\n{text}");
+    }
+    // The prev link that is larger than the checkpoint it precedes.
+    let out = cli(&[
+        "checkpoint",
+        "verify",
+        &s.p("small.checkpoint"),
+        "--log-key",
+        &vkey,
+        "--prev",
+        &note,
+    ]);
+    assert!(
+        stdout(&out).contains("larger than this checkpoint"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_tsa_request_is_written_for_the_signed_note_with_its_nonce() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    let note = s.p("c.checkpoint");
+    let out = cli(&[
+        "checkpoint",
+        "tsa-request",
+        &note,
+        "--log-key",
+        &s.p("log.vkey"),
+        "--nonce",
+        "42",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout(&out).trim(), "42");
+    let tsq = std::fs::read(format!("{note}.signed.tsq")).unwrap();
+    let signed = std::fs::read(format!("{note}.signed")).unwrap();
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(&signed);
+    assert!(
+        tsq.windows(32).any(|w| w == digest.as_slice()),
+        "the request carries the digest"
+    );
+    // Without --nonce, a random one is chosen and printed.
+    let out = cli(&[
+        "checkpoint",
+        "tsa-request",
+        &note,
+        "--log-key",
+        &s.p("log.vkey"),
+    ]);
+    assert!(
+        stdout(&out).trim().parse::<u64>().is_ok(),
+        "{}",
+        stdout(&out)
+    );
+}
+
+/// A calendar that cannot be reached costs the timestamp and nothing else:
+/// the tool says so, exits 1 and writes no proof.
+#[test]
+fn an_unreachable_calendar_writes_no_proof() {
+    if Command::new("curl").arg("--version").output().is_err() {
+        return;
+    }
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let calendar = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let note = s.p("c.checkpoint");
+    let out = cli(&[
+        "checkpoint",
+        "stamp",
+        &note,
+        "--log-key",
+        &s.p("log.vkey"),
+        "--calendar",
+        &calendar,
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no calendar accepted"));
+    assert!(!Path::new(&format!("{note}.signed.ots")).exists());
+}
+
+/// Without `--now` a witness dates its cosignature by the system clock.
+#[test]
+fn a_witness_dates_by_the_clock_when_not_told_the_time() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    let req = ok(&[
+        "checkpoint",
+        "request",
+        &wal,
+        "--note",
+        &s.p("c.checkpoint"),
+        "--old",
+        "0",
+    ]);
+    let req_path = s.p("c.req");
+    std::fs::write(&req_path, req).unwrap();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    ok(&[
+        "witness",
+        "cosign",
+        &req_path,
+        "--key",
+        &s.p("w1.skey"),
+        "--log",
+        &format!("{ORIGIN}={}", s.p("log.vkey")),
+        "--state",
+        &s.p("w1.state.json"),
+        "--append-to",
+        &s.p("c.checkpoint"),
+    ]);
+    let note = SignedNote::parse(&std::fs::read_to_string(s.p("c.checkpoint")).unwrap()).unwrap();
+    let w1 = calybris_core::checkpoint::NoteVerifier::parse(
+        std::fs::read_to_string(s.p("w1.vkey")).unwrap().trim(),
+    )
+    .unwrap();
+    let t = note.cosignature_time(&w1).unwrap();
+    assert!(t >= before && t < before + 600, "{t} vs {before}");
+}
+
+/// The bundle in `tests/fixtures/bundle` is checked twice, by two programs
+/// that share no code: here by this tool, and in `scripts/tests` by
+/// `scripts/verify_bundle.py`, which needs nothing but Python.
+#[test]
+fn the_committed_bundle_verifies_with_the_tool_as_it_does_without_it() {
+    let dir = format!("{}/tests/fixtures/bundle", env!("CARGO_MANIFEST_DIR"));
+    let f = |name: &str| format!("{dir}/{name}");
+    let out = cli(&[
+        "checkpoint",
+        "verify",
+        &f("000001.checkpoint"),
+        "--log-key",
+        &f("log.vkey"),
+        "--witness",
+        &f("witness.vkey"),
+        "--wal",
+        &f("decisions.wal.jsonl"),
+        "--require",
+        "witnessed",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(stdout(&out).contains("RESULT: INDEPENDENTLY WITNESSED"));
+    let note =
+        SignedNote::parse(&std::fs::read_to_string(f("000001.checkpoint")).unwrap()).unwrap();
+    let log = calybris_core::checkpoint::NoteVerifier::parse(
+        std::fs::read_to_string(f("log.vkey")).unwrap().trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        note.signed_by(&log).unwrap(),
+        std::fs::read_to_string(f("000001.checkpoint.signed")).unwrap()
     );
 }

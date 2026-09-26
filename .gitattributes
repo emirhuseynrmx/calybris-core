@@ -6,4 +6,5 @@ fuzz/seeds/** -text
 # turned LF into CRLF would change every digest they were stamped with.
 tests/fixtures/ots/** -text
 tests/fixtures/rfc3161/** -text
+tests/fixtures/bundle/** -text
 tests/fixtures/c2sp_go_vectors.json -text
