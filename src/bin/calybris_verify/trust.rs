@@ -123,26 +123,30 @@ fn write_file(path: &str, bytes: &[u8]) -> Result<(), Fail> {
 /// RIGHTS), and only then is the secret written. If any step fails the file
 /// is removed again.
 fn write_new_secret(path: &str, bytes: &[u8]) -> Result<(), Fail> {
-    use std::io::Write as _;
     let mut open = std::fs::OpenOptions::new();
     open.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
-    let mut file = open
+    let file = open
         .open(path)
         .map_err(|e| format!("cannot create {path}: {e}"))?;
-    #[cfg(windows)]
-    if let Err(e) = restrict_to_owner(path) {
-        drop(file);
+    // `fill_secret` owns the file, so it is closed before it is removed.
+    let filled = fill_secret(file, path, bytes);
+    if filled.is_err() {
         let _ = std::fs::remove_file(path);
-        return Err(e);
     }
-    let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    written.map_err(|e| {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-        format!("cannot write {path}: {e}")
-    })
+    filled
+}
+
+/// Restricts the new, still empty `file` to its owner where the platform
+/// needs a separate step for that, then writes the secret and syncs.
+fn fill_secret(mut file: std::fs::File, path: &str, bytes: &[u8]) -> Result<(), Fail> {
+    use std::io::Write as _;
+    #[cfg(windows)]
+    restrict_to_owner(path)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("cannot write {path}: {e}"))
 }
 
 /// Replaces the access list of `path` with a single entry giving its owner
