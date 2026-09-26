@@ -38,7 +38,9 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use calybris_core::audit::{existed_by, Covers, KeyStatus, TimeEvidence, WitnessPolicy};
-use calybris_core::checkpoint::{Checkpoint, LogSigner, NoteVerifier, SignedNote, WitnessSigner};
+use calybris_core::checkpoint::{
+    Checkpoint, LogSigner, NoteSignature, NoteVerifier, SignedNote, WitnessSigner,
+};
 use calybris_core::merkle::MerkleTree;
 use calybris_core::ots::{self, DetachedTimestamp, Status};
 use calybris_core::witness::{AddCheckpoint, FileStore, Witness};
@@ -109,6 +111,95 @@ fn read_key_text(path: &str) -> Result<String, Fail> {
 
 fn write_file(path: &str, bytes: &[u8]) -> Result<(), Fail> {
     std::fs::write(path, bytes).map_err(|e| format!("cannot write {path}: {e}"))
+}
+
+/// Creates `path`, which must not exist yet, so that only its owner can read
+/// it, then writes `bytes` to it and syncs.
+///
+/// On Unix the file is created with mode `0600` in the same call that creates
+/// it, so it is never readable by anyone else whatever the umask. On Windows
+/// it is created empty, its inherited access is replaced by one entry for its
+/// owner (`icacls /inheritance:r /grant:r *S-1-3-4:F`, S-1-3-4 being OWNER
+/// RIGHTS), and only then is the secret written. If any step fails the file
+/// is removed again.
+fn write_new_secret(path: &str, bytes: &[u8]) -> Result<(), Fail> {
+    use std::io::Write as _;
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+    let mut file = open
+        .open(path)
+        .map_err(|e| format!("cannot create {path}: {e}"))?;
+    #[cfg(windows)]
+    if let Err(e) = restrict_to_owner(path) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    written.map_err(|e| {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        format!("cannot write {path}: {e}")
+    })
+}
+
+/// Replaces the access list of `path` with a single entry giving its owner
+/// full control, through the system's own `icacls`.
+#[cfg(windows)]
+fn restrict_to_owner(path: &str) -> Result<(), Fail> {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let icacls = Path::new(&root).join("System32").join("icacls.exe");
+    let out = Command::new(&icacls)
+        .args([path, "/inheritance:r", "/grant:r", "*S-1-3-4:F", "/q"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", icacls.display()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot restrict {path} to its owner: {}{}",
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Writes a new key pair: the secret through [`write_new_secret`], the public
+/// key with `create_new` too. Neither file may exist; an existing key is
+/// never replaced. If the public key cannot be written, the secret just
+/// written is removed, so a failed keygen leaves neither file behind.
+fn write_key_pair(skey_path: &str, skey: &str, vkey_path: &str, vkey: &str) -> Result<(), Fail> {
+    for path in [skey_path, vkey_path] {
+        if std::fs::symlink_metadata(path).is_ok() {
+            return Err(format!(
+                "{path} already exists; keygen never replaces a key"
+            ));
+        }
+    }
+    write_new_secret(skey_path, format!("{skey}\n").as_bytes())?;
+    let public = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(vkey_path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            file.write_all(format!("{vkey}\n").as_bytes())?;
+            file.sync_all()
+        });
+    if let Err(e) = public {
+        let removed = std::fs::remove_file(skey_path);
+        return Err(match removed {
+            Ok(()) => format!("cannot write {vkey_path}: {e}; removed {skey_path}"),
+            Err(r) => format!(
+                "cannot write {vkey_path}: {e}; and cannot remove {skey_path}: {r}. \
+                 Delete it: its public key was never written"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -190,10 +281,12 @@ fn keygen(f: &Flags) -> Result<ExitCode, Fail> {
         }
         other => return Err(format!("--kind must be log or witness, not {other}")),
     };
-    write_file(&format!("{out}.skey"), format!("{skey}\n").as_bytes())?;
-    write_file(&format!("{out}.vkey"), format!("{vkey}\n").as_bytes())?;
+    write_key_pair(&format!("{out}.skey"), &skey, &format!("{out}.vkey"), &vkey)?;
     println!("{vkey}");
-    eprintln!("wrote {out}.skey (secret: keep it off shared disks) and {out}.vkey (public)");
+    eprintln!(
+        "wrote {out}.skey (secret, readable by its owner only: keep it off shared disks) \
+         and {out}.vkey (public)"
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -277,10 +370,99 @@ fn init(f: &Flags) -> Result<ExitCode, Fail> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The note `--append-to` names, as read before the witness signs: the path,
+/// its bytes, and the note they hold.
+struct AppendTarget<'a> {
+    path: &'a str,
+    read: String,
+    note: SignedNote,
+}
+
+/// Reads the `--append-to` note and checks it can take this witness's
+/// cosignature of `req`: the same checkpoint text, and no cosignature from
+/// this key yet. Done before signing, so a wrong file is refused while the
+/// witness state is still untouched.
+fn append_target<'a>(
+    path: &'a str,
+    req: &AddCheckpoint,
+    signer: &WitnessSigner,
+) -> Result<AppendTarget<'a>, Fail> {
+    let read = read_text(path)?;
+    let note = SignedNote::parse(&read).map_err(|e| format!("{path}: {e}"))?;
+    let requested = SignedNote::parse(&req.note).map_err(|e| format!("the request: {e}"))?;
+    if note.text() != requested.text() {
+        return Err(format!(
+            "{path} is not the checkpoint in the request; nothing was signed"
+        ));
+    }
+    let me = signer.verifier();
+    if note
+        .signatures()
+        .iter()
+        .any(|s| s.name == me.name() && s.key_hash == me.key_hash())
+    {
+        return Err(format!(
+            "{path} already carries a signature from {}; nothing was signed",
+            me.name()
+        ));
+    }
+    if note.signatures().len() >= calybris_core::checkpoint::MAX_SIGNATURES {
+        return Err(format!(
+            "{path} has no room for another signature; nothing was signed"
+        ));
+    }
+    Ok(AppendTarget { path, read, note })
+}
+
+/// Adds `sig` to the target note and replaces the file in one rename, but
+/// only if the file still holds what [`append_target`] read: a note changed
+/// meanwhile is left as it is, and the cosignature (already on standard
+/// output) is not written anywhere else.
+fn append_cosignature(target: AppendTarget<'_>, sig: NoteSignature) -> Result<(), Fail> {
+    let AppendTarget {
+        path,
+        read,
+        mut note,
+    } = target;
+    if read_text(path)? != read {
+        return Err(format!(
+            "{path} changed while the witness was signing, so it was left as it is; \
+             the cosignature is on standard output"
+        ));
+    }
+    note.add_signature(sig)
+        .map_err(|e| format!("{path}: {e}"))?;
+    replace_file(path, note.render().as_bytes())
+}
+
+/// Replaces `path` with `bytes` through a new file beside it and a rename, so
+/// a reader sees the old note or the new one and never a partial write.
+fn replace_file(path: &str, bytes: &[u8]) -> Result<(), Fail> {
+    use std::io::Write as _;
+    let tmp = format!("{path}.{}.tmp", hex(&random::<8>()?));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot write {path}: {e}")
+    })
+}
+
 fn cosign(f: &Flags) -> Result<ExitCode, Fail> {
     let req = AddCheckpoint::parse(&read_text(f.target()?)?).map_err(|e| e.to_string())?;
     let signer =
         WitnessSigner::from_skey(&read_key_text(f.need("--key")?)?).map_err(|e| e.to_string())?;
+    let target = f
+        .one("--append-to")
+        .map(|path| append_target(path, &req, &signer))
+        .transpose()?;
     let state = f.need("--state")?;
     let store = FileStore::open(state)
         .map_err(|e| format!("{e}\n(a new witness starts with `witness init --state {state}`)"))?;
@@ -300,10 +482,9 @@ fn cosign(f: &Flags) -> Result<ExitCode, Fail> {
     match witness.add_checkpoint(&req, now) {
         Ok(sig) => {
             print!("{}", sig.line());
-            if let Some(path) = f.one("--append-to") {
-                let mut note = SignedNote::parse(&read_text(path)?).map_err(|e| e.to_string())?;
-                note.add_signature(sig).map_err(|e| e.to_string())?;
-                write_file(path, note.render().as_bytes())?;
+            if let Some(target) = target {
+                let path = target.path;
+                append_cosignature(target, sig)?;
                 eprintln!("cosignature appended to {path}");
             }
             Ok(ExitCode::SUCCESS)
@@ -1019,6 +1200,165 @@ mod tests {
     }
 
     use calybris_core::merkle::TreeHead;
+
+    fn keygen_in(dir: &Path, kind: &str) -> Result<ExitCode, Fail> {
+        let out = dir.join("k");
+        keygen(&flags(&[
+            "--name",
+            "k.example",
+            "--kind",
+            kind,
+            "--out",
+            out.to_str().unwrap(),
+        ]))
+    }
+
+    #[test]
+    fn keygen_writes_a_secret_only_its_owner_can_read() {
+        for kind in ["log", "witness"] {
+            let dir = tempfile::tempdir().unwrap();
+            keygen_in(dir.path(), kind).unwrap();
+            let skey = dir.path().join("k.skey");
+            let text = std::fs::read_to_string(&skey).unwrap();
+            assert!(text.starts_with("PRIVATE+KEY+k.example+"), "{text}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(&skey).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{kind}: mode {mode:o}");
+            }
+            #[cfg(windows)]
+            {
+                // No inherited entry is left: only the one for its owner.
+                let out = Command::new("icacls").arg(&skey).output().unwrap();
+                let acl = String::from_utf8_lossy(&out.stdout);
+                assert!(out.status.success(), "{acl}");
+                assert!(!acl.contains("(I)"), "{acl}");
+            }
+        }
+    }
+
+    #[test]
+    fn keygen_never_replaces_either_file_of_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        keygen_in(dir.path(), "witness").unwrap();
+        let skey = std::fs::read(dir.path().join("k.skey")).unwrap();
+        let vkey = std::fs::read(dir.path().join("k.vkey")).unwrap();
+        let err = keygen_in(dir.path(), "witness").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read(dir.path().join("k.skey")).unwrap(), skey);
+        assert_eq!(std::fs::read(dir.path().join("k.vkey")).unwrap(), vkey);
+
+        // A public key alone at the path is not replaced either, and no
+        // secret is written beside it.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("k.vkey"), b"somebody's key\n").unwrap();
+        assert!(keygen_in(other.path(), "log").is_err());
+        assert!(!other.path().join("k.skey").exists());
+        assert_eq!(
+            std::fs::read(other.path().join("k.vkey")).unwrap(),
+            b"somebody's key\n"
+        );
+    }
+
+    #[test]
+    fn a_keygen_that_fails_halfway_leaves_no_secret_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let skey = dir.path().join("k.skey");
+        // The public key's directory does not exist, so the secret is
+        // written and the public key then fails.
+        let vkey = dir.path().join("missing").join("k.vkey");
+        let err = write_key_pair(
+            skey.to_str().unwrap(),
+            "PRIVATE+KEY+k.example+00000000+AA",
+            vkey.to_str().unwrap(),
+            "k.example+00000000+AA",
+        )
+        .unwrap_err();
+        assert!(err.contains("removed"), "{err}");
+        assert!(!skey.exists());
+        assert!(!vkey.exists());
+
+        // A note that cannot be replaced is reported, with nothing left.
+        let note = dir.path().join("missing").join("c.checkpoint");
+        let err = replace_file(note.to_str().unwrap(), b"note").unwrap_err();
+        assert!(err.starts_with("cannot write"), "{err}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        // A secret that cannot be created leaves nothing either.
+        let nowhere = dir.path().join("missing").join("k.skey");
+        assert!(write_new_secret(nowhere.to_str().unwrap(), b"secret").is_err());
+        assert!(!nowhere.exists());
+    }
+
+    /// A note that changes between the check before signing and the write
+    /// after it is left as the other writer made it.
+    #[test]
+    fn a_note_changed_while_the_witness_signs_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let (note, _) = note_in(dir.path());
+        let text = std::fs::read_to_string(&note).unwrap();
+        let req = AddCheckpoint {
+            old_size: 0,
+            proof: Vec::new(),
+            note: text.clone(),
+        };
+        let w = WitnessSigner::from_seed("w.example", &[5; 32]).unwrap();
+        let other = WitnessSigner::from_seed("other.example", &[6; 32]).unwrap();
+        let body = SignedNote::parse(&text).unwrap().text().to_owned();
+
+        let target = append_target(&note, &req, &w).unwrap();
+        let mut changed = SignedNote::parse(&text).unwrap();
+        changed
+            .add_signature(other.cosign(&body, 1).unwrap())
+            .unwrap();
+        std::fs::write(&note, changed.render()).unwrap();
+        let err = append_cosignature(target, w.cosign(&body, 2).unwrap()).unwrap_err();
+        assert!(
+            err.contains("changed while the witness was signing"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), changed.render());
+
+        // Read again, it takes the cosignature beside the other one.
+        let target = append_target(&note, &req, &w).unwrap();
+        append_cosignature(target, w.cosign(&body, 2).unwrap()).unwrap();
+        let done = SignedNote::parse(&std::fs::read_to_string(&note).unwrap()).unwrap();
+        assert_eq!(done.cosignature_time(w.verifier()), Ok(2));
+        assert_eq!(done.cosignature_time(other.verifier()), Ok(1));
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    }
+
+    #[test]
+    fn an_append_target_that_is_not_a_note_or_is_full_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (note, _) = note_in(dir.path());
+        let text = std::fs::read_to_string(&note).unwrap();
+        let req = AddCheckpoint {
+            old_size: 0,
+            proof: Vec::new(),
+            note: text.clone(),
+        };
+        let w = WitnessSigner::from_seed("w.example", &[5; 32]).unwrap();
+        let junk = dir.path().join("junk");
+        std::fs::write(&junk, "not a note\n").unwrap();
+        assert!(append_target(junk.to_str().unwrap(), &req, &w).is_err());
+
+        let body = SignedNote::parse(&text).unwrap().text().to_owned();
+        let mut full = SignedNote::parse(&text).unwrap();
+        for i in 1..calybris_core::checkpoint::MAX_SIGNATURES {
+            let seed = [u8::try_from(i).unwrap(); 32];
+            let s = WitnessSigner::from_seed(&format!("w{i}.example"), &seed).unwrap();
+            full.add_signature(s.cosign(&body, 1).unwrap()).unwrap();
+        }
+        std::fs::write(&note, full.render()).unwrap();
+        let err = append_target(&note, &req, &w).err().unwrap();
+        assert!(err.contains("no room"), "{err}");
+    }
 
     fn flags(args: &[&str]) -> Flags {
         let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();

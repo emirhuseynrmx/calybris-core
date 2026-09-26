@@ -200,7 +200,14 @@ calybris-verify witness cosign req.txt --key w1.skey --log decisions.example.com
 ```
 
 The state file is the witness's memory and fails closed: `cosign` refuses
-when it is missing or unreadable, and `init` never overwrites one. A witness
+when it is missing or unreadable, and `init` never overwrites one. The witness
+refuses to cosign with a clock reading zero (C2SP tlog-witness forbids a
+cosignature without a time), and `verify` does not count such a
+cosignature. `--append-to` is checked before anything is signed: the note
+must be the checkpoint in the request and carry no signature from this
+witness yet. The note is then replaced in one rename, and left alone if it
+changed while the witness was signing; the cosignature is on standard output
+either way. A witness
 restored from an older backup would cosign a fork of what it forgot; see
 [KEY_MANAGEMENT.md](KEY_MANAGEMENT.md) §5 for backups, and for retiring a
 witness whose state is lost.

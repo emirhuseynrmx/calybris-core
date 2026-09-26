@@ -251,6 +251,19 @@ impl Setup {
     /// Asks witness `w` to cosign `note`, proving from `old`; returns the
     /// raw CLI output.
     fn cosign(&self, w: &str, wal: &str, note: &str, old: u64, now: u64) -> Output {
+        self.cosign_into(w, wal, note, old, now, note)
+    }
+
+    /// As [`Setup::cosign`], with the cosignature appended to `target`.
+    fn cosign_into(
+        &self,
+        w: &str,
+        wal: &str,
+        note: &str,
+        old: u64,
+        now: u64,
+        target: &str,
+    ) -> Output {
         let req = ok(&[
             "checkpoint",
             "request",
@@ -275,7 +288,7 @@ impl Setup {
             "--now",
             &now.to_string(),
             "--append-to",
-            &self.p(note),
+            &self.p(target),
         ])
     }
 
@@ -577,6 +590,79 @@ fn a_witness_without_its_state_file_refuses_and_init_never_resets_one() {
         !Path::new(&state).exists(),
         "the refusal must not create a state"
     );
+}
+
+/// `--append-to` takes a cosignature only into the note it was made for. The
+/// wrong note, or the right one already cosigned by this witness, is refused
+/// before anything is signed: the file is not touched and the witness state
+/// does not move, so the right request still succeeds afterwards.
+#[test]
+fn a_cosignature_is_appended_only_to_the_checkpoint_it_signs() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    let c_wal = s.p("c.wal.jsonl");
+    std::fs::copy(&wal, &c_wal).unwrap();
+    append(Path::new(&wal), 4, 6, 100_000);
+    s.checkpoint(&wal, "d.checkpoint", None);
+    let d = std::fs::read(s.p("d.checkpoint")).unwrap();
+
+    let out = s.cosign_into("w1", &c_wal, "c.checkpoint", 0, 1_000, "d.checkpoint");
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("is not the checkpoint in the request"),
+        "{err}"
+    );
+    assert!(out.stdout.is_empty(), "nothing may be signed");
+    assert_eq!(std::fs::read(s.p("d.checkpoint")).unwrap(), d);
+
+    // The state did not move: the same request, into the right note, works.
+    assert!(s
+        .cosign("w1", &c_wal, "c.checkpoint", 0, 1_000)
+        .status
+        .success());
+    let c = std::fs::read(s.p("c.checkpoint")).unwrap();
+
+    // A second cosignature from the same witness is refused up front too.
+    let out = s.cosign("w1", &c_wal, "c.checkpoint", 3, 1_500);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("already carries a signature"), "{err}");
+    assert!(out.stdout.is_empty());
+    assert_eq!(std::fs::read(s.p("c.checkpoint")).unwrap(), c);
+
+    // No temporary file is left beside the notes.
+    let leftovers: Vec<_> = std::fs::read_dir(s.dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// A witness whose clock reads zero refuses, as C2SP tlog-witness requires,
+/// and does so before recording the checkpoint.
+#[test]
+fn a_witness_refuses_to_cosign_at_time_zero_and_keeps_its_state() {
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    let before = std::fs::read(s.p("c.checkpoint")).unwrap();
+    let out = s.cosign("w1", &wal, "c.checkpoint", 0, 0);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("REFUSED (500)") && err.contains("clock"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(s.p("c.checkpoint")).unwrap(), before);
+    assert!(s
+        .cosign("w1", &wal, "c.checkpoint", 0, 1_000)
+        .status
+        .success());
 }
 
 /// Every way the tool is told no: each command, what it must exit with, and

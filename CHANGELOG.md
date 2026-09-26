@@ -81,6 +81,24 @@ four questions it answers, are in `docs/TRUST.md`.
   `tests/fuzz_seeds.rs`, and the canonical bytes match the reference
   `python-opentimestamps` library's for every proof in the repository.
 
+- `checkpoint keygen` wrote the secret key with `std::fs::write`, so under a
+  usual umask it was readable by other users, and a second run replaced an
+  existing key. It now creates the `.skey` with mode `0600` (on Windows,
+  restricted to its owner with `icacls` before the secret is written),
+  never replaces a `.skey` or `.vkey`, and removes the `.skey` if the
+  `.vkey` cannot be written.
+- `witness cosign --append-to` appended to whatever note it was given. It now
+  refuses, before signing and with the witness state untouched, a note that
+  is not the checkpoint in the request or already carries this witness's
+  signature; it replaces the note through a rename, and leaves it as it is
+  if it changed while the witness was signing.
+- A `cosignature/v1` time of zero, which C2SP tlog-witness forbids, or above
+  `2^63 - 1`, which tlog-cosignature forbids, is neither made
+  (`WitnessSigner::cosign`) nor accepted (`SignedNote::cosignature_time`,
+  `scripts/verify_bundle.py`): `CheckpointError::BadTimestamp`. A witness
+  whose clock gives such a time refuses before recording the checkpoint
+  (`WitnessError::BadClock`, HTTP 500).
+
 ### Command line
 
 - `calybris-verify checkpoint keygen | create | request | stamp | upgrade |

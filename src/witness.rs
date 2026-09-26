@@ -140,6 +140,11 @@ pub enum WitnessError {
     BadProof,
     #[error("witness state: {0}")]
     Store(String),
+    /// The witness's own clock gave a time a cosignature cannot carry: zero,
+    /// or above `2^63 - 1`. Refused before the state moves, so the witness
+    /// has not recorded a checkpoint it never cosigned.
+    #[error("witness clock reads {0}, which a cosignature cannot carry")]
+    BadClock(u64),
 }
 
 impl WitnessError {
@@ -152,7 +157,7 @@ impl WitnessError {
             Self::UnknownLog(_) => 404,
             Self::Conflict { .. } => 409,
             Self::BadProof => 422,
-            Self::Store(_) => 500,
+            Self::Store(_) | Self::BadClock(_) => 500,
         }
     }
 
@@ -431,6 +436,9 @@ impl<S: WitnessStore> Witness<S> {
         request: &AddCheckpoint,
         now: u64,
     ) -> Result<NoteSignature, WitnessError> {
+        if now == 0 || now > i64::MAX as u64 {
+            return Err(WitnessError::BadClock(now));
+        }
         let note = SignedNote::parse(&request.note).map_err(WitnessError::BadCheckpoint)?;
         let checkpoint = note.checkpoint().map_err(WitnessError::BadCheckpoint)?;
         let origin = checkpoint.origin().to_owned();
@@ -571,6 +579,24 @@ mod tests {
         assert!(w
             .add_checkpoint(&request(&fork, 9, note_for(&new, &fork)), 3)
             .is_err());
+    }
+
+    #[test]
+    fn a_clock_a_cosignature_cannot_carry_is_refused_before_the_state_moves() {
+        let log = log();
+        let mut w = witness();
+        let d = leaves(3);
+        for bad in [0, i64::MAX as u64 + 1] {
+            let err = w
+                .add_checkpoint(&request(&d, 0, note_for(&log, &d)), bad)
+                .unwrap_err();
+            assert_eq!(err, WitnessError::BadClock(bad));
+            assert_eq!(err.http_status(), 500);
+            assert_eq!(w.store().latest(ORIGIN).unwrap(), None);
+        }
+        // The same request is then served, from the state it started with.
+        w.add_checkpoint(&request(&d, 0, note_for(&log, &d)), 1)
+            .unwrap();
     }
 
     #[test]

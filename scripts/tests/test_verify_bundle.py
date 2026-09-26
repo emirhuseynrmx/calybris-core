@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import shutil
@@ -99,3 +100,50 @@ def test_a_witness_it_was_not_signed_by_fails(tmp_path: Path) -> None:
     log_key = (bundle / "log.vkey").read_text(encoding="utf-8")
     (bundle / "other.vkey").write_text(log_key, encoding="utf-8")
     assert verify_bundle.main([str(bundle), "--witness", "other.vkey"]) == 1  # skipcq: BAN-B101
+
+
+# The curve internals, for signing below.
+P, L, BASE, MUL = (
+    verify_bundle._P,  # skipcq: PYL-W0212
+    verify_bundle._L,  # skipcq: PYL-W0212
+    verify_bundle._BASE,  # skipcq: PYL-W0212
+    verify_bundle._mul,  # skipcq: PYL-W0212
+)
+
+
+def _encode(point: tuple[int, int, int, int]) -> bytes:
+    inv = pow(point[2], P - 2, P)
+    x, y = point[0] * inv % P, point[1] * inv % P
+    return (y | (x & 1) << 255).to_bytes(32, "little")
+
+
+def _sign(seed: bytes, message: bytes) -> tuple[bytes, bytes]:
+    """RFC 8032 signing, only to make cosignatures the verifier must refuse."""
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little") & ((1 << 254) - 8) | (1 << 254)
+    public = _encode(MUL(a, BASE))
+    r = int.from_bytes(hashlib.sha512(h[32:] + message).digest(), "little") % L
+    big_r = _encode(MUL(r, BASE))
+    k = int.from_bytes(hashlib.sha512(big_r + public + message).digest(), "little")
+    return public, big_r + ((r + k * a) % L).to_bytes(32, "little")
+
+
+def test_the_test_signer_reproduces_rfc_8032() -> None:
+    seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+    public, signature = _sign(seed, b"")
+    assert (public.hex(), signature.hex()) == (RFC8032[0][0], RFC8032[0][2])  # skipcq: BAN-B101
+
+
+@pytest.mark.parametrize(
+    ("when", "accepted"), [(0, False), (1, True), (2**63 - 1, True), (2**63, False)]
+)
+def test_a_cosignature_time_of_zero_or_above_2_63_is_refused(when: int, accepted: bool) -> None:
+    body = "fixture-log\n1\n" + "A" * 43 + "=\n"
+    message = f"cosignature/v1\ntime {when}\n{body}".encode()
+    public, signature = _sign(bytes(32), message)
+    raw = b"\x04" + public
+    key_hash = hashlib.sha256(b"w.example\n" + raw).digest()[:4].hex()
+    key = verify_bundle.Key(f"w.example+{key_hash}+{base64.b64encode(raw).decode()}")
+    sig = when.to_bytes(8, "big") + signature
+    expected = when if accepted else None
+    assert verify_bundle.cosigned_at(body, sig, key) == expected  # skipcq: BAN-B101

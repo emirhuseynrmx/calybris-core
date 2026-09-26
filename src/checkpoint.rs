@@ -48,6 +48,8 @@ pub const MAX_SIGNATURES: usize = 100;
 
 const SIGNATURE_PREFIX: &str = "\u{2014} ";
 const COSIGNATURE_HEADER: &str = "cosignature/v1\ntime ";
+/// Largest `cosignature/v1` time C2SP tlog-cosignature allows.
+const MAX_COSIGNATURE_TIME: u64 = i64::MAX as u64;
 
 /// Why a checkpoint, note or key was refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -73,6 +75,12 @@ pub enum CheckpointError {
     NotSigned(String),
     #[error("signature from {0} does not verify")]
     BadSignature(String),
+    /// A `cosignature/v1` time of zero, or above `2^63 - 1`. C2SP
+    /// tlog-witness forbids a witness to omit the time, and
+    /// tlog-cosignature caps it; such a cosignature is neither made nor
+    /// accepted.
+    #[error("cosignature time {0} is zero or above 2^63 - 1")]
+    BadTimestamp(u64),
 }
 
 /// A log's state as C2SP tlog-checkpoint text: origin, size, root, extensions.
@@ -411,7 +419,10 @@ impl SignedNote {
     }
 
     /// Checks a witness's `cosignature/v1` and returns the time, in Unix
-    /// seconds, at which the witness says it signed.
+    /// seconds, at which the witness says it signed. A time of zero is
+    /// refused even when the signature over it verifies: C2SP tlog-witness
+    /// forbids a witness to omit the time, so such a line says nothing about
+    /// when the checkpoint was seen.
     pub fn cosignature_time(&self, key: &NoteVerifier) -> Result<u64, CheckpointError> {
         if key.algorithm != ALG_COSIGNATURE_V1 {
             return Err(CheckpointError::WrongAlgorithm(key.algorithm));
@@ -434,6 +445,9 @@ impl SignedNote {
 }
 
 fn cosignature_message(timestamp: u64, text: &str) -> Result<String, CheckpointError> {
+    if timestamp == 0 || timestamp > MAX_COSIGNATURE_TIME {
+        return Err(CheckpointError::BadTimestamp(timestamp));
+    }
     // Not `lines()`: it would also strip a trailing `\r`, so a CRLF copy
     // would parse as the same value. The format is LF only.
     // skipcq: RS-W1217
@@ -702,8 +716,9 @@ impl WitnessSigner {
     }
 
     /// The cosignature line over `text` (a checkpoint body) at `timestamp`,
-    /// in Unix seconds. This only signs; a witness decides first whether it
-    /// should (see `witness`).
+    /// in Unix seconds, which must be neither zero nor above `2^63 - 1`
+    /// ([`CheckpointError::BadTimestamp`]). This only signs; a witness
+    /// decides first whether it should (see `witness`).
     pub fn cosign(&self, text: &str, timestamp: u64) -> Result<NoteSignature, CheckpointError> {
         let message = cosignature_message(timestamp, text)?;
         let mut signature = Vec::with_capacity(72);
@@ -796,6 +811,47 @@ mod tests {
             parsed.verify(stranger.verifier()),
             Err(CheckpointError::NotSigned(_))
         ));
+    }
+
+    #[test]
+    fn a_zero_or_out_of_range_cosignature_time_is_neither_made_nor_accepted() {
+        let log = LogSigner::from_seed("log", &[1; 32]).unwrap();
+        let witness = WitnessSigner::from_seed("witness.example", &[3; 32]).unwrap();
+        let note = log.sign(&cp(4));
+        for bad in [0, MAX_COSIGNATURE_TIME + 1, u64::MAX] {
+            assert_eq!(
+                witness.cosign(note.text(), bad),
+                Err(CheckpointError::BadTimestamp(bad))
+            );
+        }
+        let last = witness.cosign(note.text(), MAX_COSIGNATURE_TIME).unwrap();
+        let mut ok = note.clone();
+        ok.add_signature(last).unwrap();
+        assert_eq!(
+            ok.cosignature_time(witness.verifier()),
+            Ok(MAX_COSIGNATURE_TIME)
+        );
+
+        // A line some other signer made at time zero verifies as Ed25519,
+        // and is still refused.
+        for bad in [0, MAX_COSIGNATURE_TIME + 1] {
+            let message = format!("{COSIGNATURE_HEADER}{bad}\n{}", note.text());
+            let mut signature = bad.to_be_bytes().to_vec();
+            signature.extend_from_slice(&witness.key.sign(message.as_bytes()).to_bytes());
+            let mut forged = note.clone();
+            forged
+                .add_signature(NoteSignature {
+                    name: witness.verifier().name.clone(),
+                    key_hash: witness.verifier().key_hash,
+                    signature,
+                })
+                .unwrap();
+            let parsed = SignedNote::parse(&forged.render()).unwrap();
+            assert_eq!(
+                parsed.cosignature_time(witness.verifier()),
+                Err(CheckpointError::BadTimestamp(bad))
+            );
+        }
     }
 
     #[test]

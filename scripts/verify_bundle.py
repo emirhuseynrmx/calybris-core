@@ -144,10 +144,16 @@ def signature_by(signatures: list, key: Key) -> tuple[bytes, str] | None:
 
 
 def cosigned_at(body: str, sig: bytes, key: Key) -> int | None:
-    """The time a cosignature/v1 states, if it verifies."""
+    """The time a cosignature/v1 states, if it verifies.
+
+    A time of zero is refused (C2SP tlog-witness: a witness MUST NOT omit
+    it), as is one above 2^63 - 1 (tlog-cosignature).
+    """
     if len(sig) != 72:
         return None
     (when,) = struct.unpack(">Q", sig[:8])
+    if when == 0 or when >= 2**63:
+        return None
     message = f"cosignature/v1\ntime {when}\n".encode() + body.encode()
     return when if ed25519_verify(key.public, message, sig[8:]) else None
 

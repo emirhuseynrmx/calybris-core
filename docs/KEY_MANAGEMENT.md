@@ -139,7 +139,11 @@ incident evidence around these procedures are in
 
 **Generate** it with `calybris-verify checkpoint keygen --kind log`, which
 draws 32 bytes from the operating system's CSPRNG, or derive it from a seed
-your KMS releases (`LogSigner::from_seed`). The library signs with the key in
+your KMS releases (`LogSigner::from_seed`). `keygen` creates the `.skey`
+readable by its owner only (mode `0600` on Unix, set as the file is created;
+on Windows one access entry for the owner, set with `icacls` before the
+secret is written), refuses to replace an existing `.skey` or `.vkey`, and
+removes the `.skey` again if the `.vkey` cannot be written. The library signs with the key in
 memory; it has no HSM interface, so a key that must never leave an HSM needs a
 signer outside Calybris that produces the same C2SP signature line.
 
