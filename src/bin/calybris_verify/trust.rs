@@ -5,6 +5,7 @@
 //! calybris-verify checkpoint keygen   --name NAME --kind log|witness --out PREFIX
 //! calybris-verify checkpoint create   <wal> --origin ORIGIN --key LOG.skey [--prev PREV] [--out FILE] [--hmac-key-hex HEX]
 //! calybris-verify checkpoint request  <wal> --note FILE --old N [--hmac-key-hex HEX]
+//! calybris-verify witness init        --state STATE.json
 //! calybris-verify witness cosign      <request> --key W.skey --log ORIGIN=LOG.vkey --state STATE.json [--now UNIX] [--append-to NOTE]
 //! calybris-verify checkpoint stamp    <note> --log-key LOG.vkey [--calendar URL ...]
 //! calybris-verify checkpoint upgrade  <note.signed.ots> [--allow-calendar PATTERN ...]
@@ -268,11 +269,22 @@ fn request(f: &Flags) -> Result<ExitCode, Fail> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Starts a new witness's state file; never overwrites one.
+fn init(f: &Flags) -> Result<ExitCode, Fail> {
+    let state = f.need("--state")?;
+    FileStore::create(state)?;
+    eprintln!("wrote {state}: an empty witness state; back it up with the witness key");
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cosign(f: &Flags) -> Result<ExitCode, Fail> {
     let req = AddCheckpoint::parse(&read_text(f.target()?)?).map_err(|e| e.to_string())?;
     let signer =
         WitnessSigner::from_skey(&read_key_text(f.need("--key")?)?).map_err(|e| e.to_string())?;
-    let mut witness = Witness::new(signer, FileStore::new(f.need("--state")?));
+    let state = f.need("--state")?;
+    let store = FileStore::open(state)
+        .map_err(|e| format!("{e}\n(a new witness starts with `witness init --state {state}`)"))?;
+    let mut witness = Witness::new(signer, store);
     for spec in f.all("--log") {
         let (origin, path) = spec.split_once('=').ok_or("--log takes ORIGIN=VKEYFILE")?;
         let key = NoteVerifier::parse(&read_key_text(path)?).map_err(|e| e.to_string())?;
@@ -302,6 +314,10 @@ fn cosign(f: &Flags) -> Result<ExitCode, Fail> {
         }
     }
 }
+
+/// How `stamp` and `upgrade` reach a calendar: fetch `url`, posting `body`
+/// when given; `Ok(None)` for a 404. [`curl`] in the tool, a stand-in in tests.
+type Fetch<'a> = &'a dyn Fn(&str, Option<&[u8]>) -> Result<Option<Vec<u8>>, Fail>;
 
 /// Runs `curl` with `args`, feeding `body` on stdin when given. `None` for a
 /// 404, the calendar's way of saying "not yet".
@@ -389,6 +405,10 @@ fn signed_bytes(f: &Flags, path: &str) -> Result<(String, String), Fail> {
 }
 
 fn stamp(f: &Flags) -> Result<ExitCode, Fail> {
+    stamp_with(f, &curl)
+}
+
+fn stamp_with(f: &Flags, fetch: Fetch<'_>) -> Result<ExitCode, Fail> {
     let path = f.target()?;
     let (signed_path, signed) = signed_bytes(f, path)?;
     let mut proof = DetachedTimestamp::new(Sha256::digest(signed.as_bytes()).into());
@@ -401,7 +421,7 @@ fn stamp(f: &Flags) -> Result<ExitCode, Fail> {
     };
     let mut accepted = 0;
     for cal in calendars {
-        match curl(&ots::calendar_submit_path(cal), Some(&commitment)) {
+        match fetch(&ots::calendar_submit_path(cal), Some(&commitment)) {
             Ok(Some(body)) => match proof.merge_calendar_response(&commitment, &body) {
                 Ok(()) => accepted += 1,
                 Err(e) => eprintln!("{cal}: unusable answer: {e}"),
@@ -421,6 +441,10 @@ fn stamp(f: &Flags) -> Result<ExitCode, Fail> {
 }
 
 fn upgrade(f: &Flags) -> Result<ExitCode, Fail> {
+    upgrade_with(f, &curl)
+}
+
+fn upgrade_with(f: &Flags, fetch: Fetch<'_>) -> Result<ExitCode, Fail> {
     let path = f.target()?;
     let raw = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let mut proof = DetachedTimestamp::parse(&raw).map_err(|e| e.to_string())?;
@@ -437,7 +461,7 @@ fn upgrade(f: &Flags) -> Result<ExitCode, Fail> {
                 continue;
             }
         };
-        match curl(&url, None) {
+        match fetch(&url, None) {
             Ok(Some(body)) => match proof.merge_calendar_response(&commitment, &body) {
                 Ok(()) => changed = true,
                 Err(e) => eprintln!("{uri}: unusable answer: {e}"),
@@ -931,6 +955,7 @@ pub fn run(command: &str, args: &[String]) -> ExitCode {
         ("checkpoint", "upgrade") => upgrade(&flags),
         ("checkpoint", "tsa-request") => tsa_request(&flags),
         ("checkpoint", "verify") => verify(&flags),
+        ("witness", "init") => init(&flags),
         ("witness", "cosign") => cosign(&flags),
         _ => return usage_error(&format!("unknown command {command} {sub}")),
     };
@@ -953,6 +978,7 @@ pub const USAGE: &str = "\
 \x20 calybris-verify checkpoint keygen   --name NAME --kind log|witness --out PREFIX
 \x20 calybris-verify checkpoint create   <wal> --origin ORIGIN --key LOG.skey [--prev PREV] [--out FILE]
 \x20 calybris-verify checkpoint request  <wal> --note FILE --old N
+\x20 calybris-verify witness init        --state STATE.json
 \x20 calybris-verify witness cosign      <request> --key W.skey --log ORIGIN=LOG.vkey --state STATE.json [--append-to NOTE]
 \x20 calybris-verify checkpoint stamp    <note> --log-key LOG.vkey [--calendar URL ...]
 \x20 calybris-verify checkpoint upgrade  <note.signed.ots> [--allow-calendar PATTERN ...]
@@ -990,5 +1016,422 @@ mod tests {
         assert_eq!(f.one("--threshold"), Some("2"));
         assert!(Flags::parse(&["--bogus".to_owned()], VALUED).is_err());
         assert!(Flags::parse(&["--key".to_owned()], VALUED).is_err());
+    }
+
+    use calybris_core::merkle::TreeHead;
+
+    fn flags(args: &[&str]) -> Flags {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        Flags::parse(&args, VALUED).unwrap()
+    }
+
+    fn fixture(path: &str) -> String {
+        format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// A signed checkpoint note and its log key, written into `dir`.
+    fn note_in(dir: &Path) -> (String, String) {
+        let log = LogSigner::from_seed("decisions.example/log", &[1; 32]).unwrap();
+        let cp = Checkpoint::new(
+            "decisions.example/log",
+            TreeHead {
+                size: 3,
+                root: [7; 32],
+            },
+        )
+        .unwrap();
+        let note = dir.join("c.checkpoint");
+        let vkey = dir.join("log.vkey");
+        std::fs::write(&note, log.sign(&cp).render()).unwrap();
+        std::fs::write(&vkey, log.verifier().to_vkey()).unwrap();
+        (
+            note.to_str().unwrap().to_owned(),
+            vkey.to_str().unwrap().to_owned(),
+        )
+    }
+
+    /// A calendar's answer: `ops`, then a pending attestation naming `uri`.
+    fn pending_answer(ops: &[u8], uri: &str) -> Vec<u8> {
+        let mut body = ops.to_vec();
+        body.push(0x00);
+        body.extend_from_slice(&[0x83, 0xdf, 0xe3, 0x0d, 0x2e, 0xf9, 0x0c, 0x8e]);
+        body.push(u8::try_from(uri.len() + 1).unwrap());
+        body.push(u8::try_from(uri.len()).unwrap());
+        body.extend_from_slice(uri.as_bytes());
+        body
+    }
+
+    /// An upgrade: SHA-256, then a Bitcoin attestation at `height` (< 128).
+    fn anchored_answer(height: u8) -> Vec<u8> {
+        let mut body = vec![0x08, 0x00];
+        body.extend_from_slice(&[0x05, 0x88, 0x96, 0x0d, 0x73, 0xd7, 0x19, 0x01]);
+        body.extend_from_slice(&[1, height]);
+        body
+    }
+
+    const ALICE: &str = "https://alice.btc.calendar.opentimestamps.org";
+    const BOB: &str = "https://bob.btc.calendar.opentimestamps.org";
+
+    #[test]
+    fn stamp_keeps_what_calendars_accept_and_fails_when_none_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (note, vkey) = note_in(dir.path());
+        let fetch = |url: &str, body: Option<&[u8]>| -> Result<Option<Vec<u8>>, Fail> {
+            assert_eq!(body.map(<[u8]>::len), Some(32), "a commitment is posted");
+            match url {
+                "https://a.example/digest" => Ok(Some(pending_answer(&[], ALICE))),
+                "https://b.example/digest" => Ok(Some(b"\xff".to_vec())),
+                "https://c.example/digest" => Ok(None),
+                _ => Err("connection refused".into()),
+            }
+        };
+        let mut args = vec![note.as_str(), "--log-key", vkey.as_str()];
+        for c in [
+            "https://a.example",
+            "https://b.example/",
+            "https://c.example",
+            "https://d.example",
+        ] {
+            args.extend(["--calendar", c]);
+        }
+        let code = stamp_with(&flags(&args), &fetch).unwrap();
+        assert_eq!(code, ExitCode::from(EXIT_INCOMPLETE));
+        let proof = DetachedTimestamp::parse(&std::fs::read(format!("{note}.signed.ots")).unwrap())
+            .unwrap();
+        assert_eq!(
+            proof.status(),
+            Status::Pending {
+                calendars: vec![ALICE.to_owned()]
+            }
+        );
+        let signed = std::fs::read_to_string(format!("{note}.signed")).unwrap();
+        assert_eq!(
+            proof.digest(),
+            <[u8; 32]>::from(Sha256::digest(signed.as_bytes()))
+        );
+
+        let nobody = |_: &str, _: Option<&[u8]>| -> Result<Option<Vec<u8>>, Fail> { Ok(None) };
+        let err = stamp_with(&flags(&[&note, "--log-key", &vkey]), &nobody).unwrap_err();
+        assert!(err.contains("no calendar accepted"), "{err}");
+        // A key that did not sign the note stamps nothing.
+        let other = dir.path().join("other.vkey");
+        let stranger = LogSigner::from_seed("decisions.example/log", &[2; 32]).unwrap();
+        std::fs::write(&other, stranger.verifier().to_vkey()).unwrap();
+        assert!(stamp_with(
+            &flags(&[&note, "--log-key", other.to_str().unwrap()]),
+            &nobody
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn upgrade_merges_an_anchoring_answer_and_skips_calendars_it_does_not_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.ots");
+        let path = path.to_str().unwrap();
+        let mut proof = DetachedTimestamp::new([9; 32]);
+        let commitment = proof.prepare_submission([3; 16]);
+        for (i, uri) in [ALICE, BOB, "https://evil.example"].into_iter().enumerate() {
+            // A distinct first operation per calendar, as real calendars answer.
+            let ops = [0xf0, 1, u8::try_from(i).unwrap(), 0x08];
+            proof
+                .merge_calendar_response(&commitment, &pending_answer(&ops, uri))
+                .unwrap();
+        }
+        std::fs::write(path, proof.serialize()).unwrap();
+        let before = std::fs::read(path).unwrap();
+
+        let nothing_yet = |url: &str, body: Option<&[u8]>| -> Result<Option<Vec<u8>>, Fail> {
+            assert!(body.is_none());
+            assert!(!url.contains("evil"), "an untrusted calendar was asked");
+            if url.starts_with(ALICE) {
+                Ok(Some(b"\xff".to_vec()))
+            } else if url.starts_with(BOB) {
+                Ok(None)
+            } else {
+                Err("unreachable".into())
+            }
+        };
+        let code = upgrade_with(&flags(&[path]), &nothing_yet).unwrap();
+        assert_eq!(code, ExitCode::from(EXIT_INCOMPLETE));
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            before,
+            "nothing new, nothing written"
+        );
+
+        let alice_commits = |url: &str, _: Option<&[u8]>| -> Result<Option<Vec<u8>>, Fail> {
+            Ok(url.starts_with(ALICE).then(|| anchored_answer(5)))
+        };
+        let code = upgrade_with(&flags(&[path]), &alice_commits).unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+        let upgraded = DetachedTimestamp::parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(upgraded.status(), Status::Anchored { heights: vec![5] });
+
+        std::fs::write(path, b"not a proof").unwrap();
+        assert!(upgrade_with(&flags(&[path]), &alice_commits).is_err());
+        assert!(upgrade_with(&flags(&["/nonexistent/p.ots"]), &alice_commits).is_err());
+    }
+
+    /// The whole Bitcoin path against a real proof: the 2015 hello-world
+    /// stamp in block 358391, whose header is a fixture.
+    #[test]
+    fn a_real_bitcoin_proof_is_confirmed_only_with_the_right_block_hash() {
+        let ots_path = fixture("ots/hello-world.txt.ots");
+        let digest: [u8; 32] =
+            Sha256::digest(std::fs::read(fixture("ots/hello-world.txt")).unwrap()).into();
+        let header = std::fs::read_to_string(fixture("ots/block358391.hex")).unwrap();
+        let header = header.trim();
+        let proof = DetachedTimestamp::parse(&std::fs::read(&ots_path).unwrap()).unwrap();
+        let hash = proof
+            .verify_bitcoin(358_391, &unhex(header).unwrap().try_into().unwrap())
+            .unwrap()
+            .block_hash;
+        let stamped = Stamped {
+            signature: Some(digest),
+            content: [0; 32],
+        };
+        let run = |args: &[&str], stamped: &Stamped| {
+            let mut r = Report::default();
+            let res = check_ots(&flags(args), &ots_path, stamped, &mut r);
+            (res, r)
+        };
+        let bitcoin = ["--block-height", "358391", "--block-header", header];
+
+        let (res, r) = run(&[&bitcoin[..], &["--block-hash", &hash]].concat(), &stamped);
+        res.unwrap();
+        assert!(r.timestamped && r.bitcoin && !r.failed && !r.incomplete);
+        assert_eq!(r.evidence[0].covers, Covers::Signature);
+        assert_eq!(verdict(&r, &[]), ExitCode::SUCCESS);
+
+        let body_only = Stamped {
+            signature: None,
+            content: digest,
+        };
+        let (res, r) = run(
+            &[&bitcoin[..], &["--block-hash", &hash]].concat(),
+            &body_only,
+        );
+        res.unwrap();
+        assert_eq!(r.evidence[0].covers, Covers::Content);
+
+        let (_, r) = run(&bitcoin, &stamped);
+        assert!(
+            r.incomplete && !r.timestamped,
+            "an unconfirmed header dates nothing"
+        );
+        let (_, r) = run(
+            &[&bitcoin[..], &["--block-hash", &"00".repeat(32)]].concat(),
+            &stamped,
+        );
+        assert!(r.failed);
+        let (_, r) = run(
+            &["--block-height", "358390", "--block-header", header],
+            &stamped,
+        );
+        assert!(r.failed);
+        let (_, r) = run(&[], &stamped);
+        assert!(r.incomplete, "anchored, but no header given");
+        let other = Stamped {
+            signature: Some([1; 32]),
+            content: [2; 32],
+        };
+        let (_, r) = run(&bitcoin, &other);
+        assert!(r.failed, "a proof for another file");
+
+        for bad in [
+            &["--block-height", "358391"][..],
+            &["--block-height", "x", "--block-header", header],
+            &["--block-height", "1", "--block-header", "zz"],
+            &["--block-height", "1", "--block-header", "00"],
+        ] {
+            assert!(run(bad, &stamped).0.is_err(), "{bad:?}");
+        }
+        let mut r = Report::default();
+        assert!(check_ots(&flags(&[]), "/nonexistent.ots", &stamped, &mut r).is_err());
+        let garbage = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(garbage.path(), b"junk").unwrap();
+        check_ots(
+            &flags(&[]),
+            garbage.path().to_str().unwrap(),
+            &stamped,
+            &mut r,
+        )
+        .unwrap();
+        assert!(r.failed);
+    }
+
+    #[test]
+    fn a_pending_proof_is_reported_as_pending() {
+        let mut proof = DetachedTimestamp::new([9; 32]);
+        let commitment = proof.prepare_submission([3; 16]);
+        proof
+            .merge_calendar_response(&commitment, &pending_answer(&[], ALICE))
+            .unwrap();
+        let mut r = Report::default();
+        report_ots_status(&proof.status(), &mut r);
+        assert!(r.incomplete && !r.timestamped);
+        print_status(&proof.status());
+        print_status(&Status::Anchored { heights: vec![1] });
+    }
+
+    #[cfg(feature = "preview-tsa")]
+    #[test]
+    fn a_pinned_token_dates_what_it_covers_and_nothing_else() {
+        let tsr = fixture("rfc3161/rsa.tsr");
+        let cert = fixture("rfc3161/rsa.crt");
+        let digest: [u8; 32] =
+            Sha256::digest(std::fs::read(fixture("rfc3161/body.txt")).unwrap()).into();
+        let run = |args: &[&str], stamped: &Stamped, tsr: &str| {
+            let mut r = Report::default();
+            let res = verify_tsr(&flags(args), tsr, stamped, &mut r);
+            (res, r)
+        };
+        let pinned = ["--tsa-cert", cert.as_str()];
+        let signed = Stamped {
+            signature: Some(digest),
+            content: [0; 32],
+        };
+        let (res, r) = run(&pinned, &signed, &tsr);
+        res.unwrap();
+        assert!(r.timestamped && !r.failed);
+        assert_eq!(r.evidence[0].covers, Covers::Signature);
+
+        let body = Stamped {
+            signature: Some([1; 32]),
+            content: digest,
+        };
+        let (_, r) = run(&pinned, &body, &tsr);
+        assert!(r.timestamped);
+        assert_eq!(r.evidence[0].covers, Covers::Content);
+
+        let neither = Stamped {
+            signature: None,
+            content: [2; 32],
+        };
+        let (_, r) = run(&pinned, &neither, &tsr);
+        assert!(r.failed && !r.timestamped);
+        let (_, r) = run(&[&pinned[..], &["--nonce", "1"]].concat(), &signed, &tsr);
+        assert!(r.failed, "a nonce the request did not carry");
+        let (_, r) = run(
+            &["--tsa-cert", &fixture("rfc3161/wrongkey.crt")],
+            &signed,
+            &tsr,
+        );
+        assert!(r.failed);
+
+        assert!(run(&[], &signed, &tsr).0.is_err(), "no pinned certificate");
+        assert!(
+            run(&[&pinned[..], &["--nonce", "x"]].concat(), &signed, &tsr)
+                .0
+                .is_err()
+        );
+        assert!(
+            run(&["--tsa-cert", &tsr], &signed, &tsr).0.is_err(),
+            "not a PEM"
+        );
+        assert!(run(&pinned, &signed, "/nonexistent.tsr").0.is_err());
+    }
+
+    /// Every combination of what was checked, and every requirement: the
+    /// result line and exit code never claim more than was established.
+    #[test]
+    fn the_verdict_names_exactly_what_was_established() {
+        for bits in 0..32_u8 {
+            let r = Report {
+                failed: bits & 1 != 0,
+                incomplete: bits & 2 != 0,
+                witnessed: bits & 4 != 0,
+                timestamped: bits & 8 != 0,
+                bitcoin: bits & 16 != 0,
+                evidence: Vec::new(),
+            };
+            for req in [
+                "witnessed",
+                "timestamped",
+                "bitcoin",
+                "full",
+                "witnessed,timestamped",
+            ] {
+                let missing = unmet(&flags(&["--require", req]), &r).unwrap();
+                let met = match req {
+                    "witnessed" => r.witnessed,
+                    "timestamped" => r.timestamped,
+                    "bitcoin" => r.bitcoin,
+                    _ => r.witnessed && r.timestamped,
+                };
+                assert_eq!(missing.is_empty(), met, "{req} with {bits:05b}");
+                let code = verdict(&r, &missing);
+                let expected = if r.failed || !met {
+                    ExitCode::FAILURE
+                } else if r.incomplete {
+                    ExitCode::from(EXIT_INCOMPLETE)
+                } else {
+                    ExitCode::SUCCESS
+                };
+                assert_eq!(code, expected, "{req} with {bits:05b}");
+            }
+            assert!(unmet(&flags(&[]), &r).unwrap().is_empty());
+        }
+        assert!(unmet(&flags(&["--require", "everything"]), &Report::default()).is_err());
+    }
+
+    #[test]
+    fn curl_reads_a_body_a_404_and_refuses_anything_else() {
+        use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+        if Command::new("curl").arg("--version").output().is_err() {
+            eprintln!("no curl on this machine; skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line.split(' ').nth(1).unwrap().to_owned();
+                let mut length = 0;
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let (status, reply) = match path.as_str() {
+                    "/digest" => ("200 OK", body),
+                    "/timestamp/ab" => ("404 Not Found", Vec::new()),
+                    _ => ("500 Internal Server Error", Vec::new()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    reply.len()
+                )
+                .unwrap();
+                stream.write_all(&reply).unwrap();
+            }
+        });
+        assert_eq!(
+            curl(&format!("{base}/digest"), Some(b"posted\nbytes")).unwrap(),
+            Some(b"posted\nbytes".to_vec())
+        );
+        assert_eq!(curl(&format!("{base}/timestamp/ab"), None).unwrap(), None);
+        let err = curl(&format!("{base}/other"), None).unwrap_err();
+        assert!(err.contains("HTTP 500"), "{err}");
+        server.join().unwrap();
+
+        // Nothing listens on a port that was just released.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/digest", closed.local_addr().unwrap());
+        drop(closed);
+        assert!(curl(&url, Some(b"x")).unwrap_err().starts_with("curl "));
     }
 }

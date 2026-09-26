@@ -229,8 +229,15 @@ impl WitnessStore for MemoryStore {
 /// Every compare-and-swap takes an exclusive lock on a sibling lock file,
 /// re-reads the file under it, and replaces the file by an atomic rename after
 /// `fsync`, so two witness processes sharing the file cannot both win, and a
-/// crash leaves either the old state or the new one. Losing this file is
-/// what would let the witness be rolled back: keep it with the witness key.
+/// crash leaves either the old state or the new one.
+///
+/// The file is the witness's memory, and it fails closed. A missing file is
+/// an error, never an empty state: a witness that forgot what it cosigned
+/// would cosign any history. A new witness starts with
+/// [`FileStore::create`], which refuses to overwrite a file that exists. A
+/// file that does not parse is refused and left as it is. Restoring an older
+/// copy cannot be detected from the file alone; see `docs/TRUST.md` on
+/// witness state.
 #[cfg(feature = "serde")]
 #[derive(Clone, Debug)]
 pub struct FileStore {
@@ -246,20 +253,58 @@ struct StoredHead {
 
 #[cfg(feature = "serde")]
 impl FileStore {
-    /// A store at `path`. The file need not exist yet.
-    #[must_use]
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
+    /// Starts the state of a new witness at `path`: no log cosigned yet.
+    /// Refuses when `path` exists, so it can never reset a witness.
+    pub fn create(path: impl Into<std::path::PathBuf>) -> Result<Self, String> {
+        let store = Self { path: path.into() };
+        let _lock = store.lock()?;
+        if store.path.exists() {
+            return Err(format!(
+                "{} already exists; a witness's state is never recreated",
+                store.path.display()
+            ));
+        }
+        store.write_all(&BTreeMap::new())?;
+        Ok(store)
+    }
+
+    /// Opens the state of an existing witness. Fails when the file is missing
+    /// or does not parse.
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, String> {
+        let store = Self { path: path.into() };
+        store.read_all()?;
+        Ok(store)
+    }
+
+    fn lock(&self) -> Result<std::fs::File, String> {
+        use fs2::FileExt as _;
+        let mut lock_path = self.path.clone().into_os_string();
+        lock_path.push(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|e| e.to_string())?;
+        lock.lock_exclusive().map_err(|e| e.to_string())?;
+        Ok(lock)
     }
 
     fn read_all(&self) -> Result<BTreeMap<String, TreeHead>, String> {
         let raw = match std::fs::read(&self.path) {
             Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "{} is missing: a witness that lost its state must not start again \
+                     from nothing; restore the latest copy, or retire this witness key",
+                    self.path.display()
+                ))
+            }
             Err(e) => return Err(e.to_string()),
         };
-        let stored: BTreeMap<String, StoredHead> =
-            serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+        let stored: BTreeMap<String, StoredHead> = serde_json::from_slice(&raw)
+            .map_err(|e| format!("{} does not parse: {e}", self.path.display()))?;
         stored
             .into_iter()
             .map(|(origin, h)| {
@@ -320,17 +365,7 @@ impl WitnessStore for FileStore {
         expected: Option<TreeHead>,
         new: TreeHead,
     ) -> Result<bool, String> {
-        use fs2::FileExt as _;
-        let mut lock_path = self.path.clone().into_os_string();
-        lock_path.push(".lock");
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .map_err(|e| e.to_string())?;
-        lock.lock_exclusive().map_err(|e| e.to_string())?;
+        let _lock = self.lock()?;
         let mut heads = self.read_all()?;
         if heads.get(origin).copied() != expected {
             return Ok(false);
@@ -754,14 +789,16 @@ mod tests {
         let d = leaves(9);
         let signer = || WitnessSigner::from_seed("w", &[9; 32]).unwrap();
 
-        let mut w = Witness::new(signer(), FileStore::new(&path));
+        assert!(FileStore::open(&path).is_err(), "no state yet");
+        let mut w = Witness::new(signer(), FileStore::create(&path).unwrap());
         w.add_log(ORIGIN, log.verifier().clone());
         w.add_checkpoint(&request(&d[..6], 0, note_for(&log, &d[..6])), 1)
             .unwrap();
         drop(w);
+        assert!(FileStore::create(&path).is_err(), "never recreated");
 
         // A new process with the same file remembers size 6.
-        let mut w = Witness::new(signer(), FileStore::new(&path));
+        let mut w = Witness::new(signer(), FileStore::open(&path).unwrap());
         w.add_log(ORIGIN, log.verifier().clone());
         let mut fork = d.clone();
         fork[0] = leaf_hash(b"rewritten");
@@ -772,26 +809,36 @@ mod tests {
         w.add_checkpoint(&request(&d, 6, note_for(&log, &d)), 3)
             .unwrap();
         assert_eq!(
-            FileStore::new(&path).latest(ORIGIN).unwrap().unwrap().size,
+            FileStore::open(&path)
+                .unwrap()
+                .latest(ORIGIN)
+                .unwrap()
+                .unwrap()
+                .size,
             9
         );
 
         std::fs::write(&path, b"{not json").unwrap();
-        assert!(FileStore::new(&path).latest(ORIGIN).is_err());
+        assert!(FileStore::open(&path).is_err());
+        assert!(w.store().latest(ORIGIN).is_err());
     }
 
-    /// A key cannot recover erased memory. Keep an external pin.
+    /// A key cannot recover erased memory. A lost state is refused; an older
+    /// copy put back cannot be told from the real one by the file alone, so
+    /// the rollback half still needs an external pin (other witnesses, or an
+    /// auditor holding the latest checkpoint).
     #[cfg(feature = "serde")]
     #[test]
-    fn state_loss_and_backup_rollback_need_an_external_trust_anchor() {
+    fn state_loss_is_refused_and_backup_rollback_needs_an_external_trust_anchor() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let log = log();
         let d = leaves(9);
+        FileStore::create(&path).unwrap();
         let make = || {
             let mut w = Witness::new(
                 WitnessSigner::from_seed("w", &[9; 32]).unwrap(),
-                FileStore::new(&path),
+                FileStore::open(&path).unwrap(),
             );
             w.add_log(ORIGIN, log.verifier().clone());
             w
@@ -812,22 +859,28 @@ mod tests {
         assert!(make()
             .add_checkpoint(&request(&fork, 3, note_for(&log, &fork)), 3)
             .is_ok());
+        // Losing the file entirely is refused, never taken for a new witness.
+        let mut w = make();
         std::fs::remove_file(&path).unwrap();
-        assert!(make()
-            .add_checkpoint(&request(&fork, 0, note_for(&log, &fork)), 4)
-            .is_ok());
+        assert!(matches!(
+            w.add_checkpoint(&request(&fork, 0, note_for(&log, &fork)), 4),
+            Err(WitnessError::Store(_))
+        ));
+        assert!(FileStore::open(&path).is_err());
     }
 
     #[cfg(feature = "serde")]
     #[test]
     fn a_state_write_failure_returns_no_signature() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing-parent/state.json");
+        let parent = dir.path().join("state-dir");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("state.json");
         let log = log();
-        let mut w = Witness::new(
-            WitnessSigner::from_seed("w", &[9; 32]).unwrap(),
-            FileStore::new(&path),
-        );
+        let store = FileStore::create(&path).unwrap();
+        // The disk under the witness goes away before it records anything.
+        std::fs::remove_dir_all(&parent).unwrap();
+        let mut w = Witness::new(WitnessSigner::from_seed("w", &[9; 32]).unwrap(), store);
         w.add_log(ORIGIN, log.verifier().clone());
         let d = leaves(3);
         assert!(w
