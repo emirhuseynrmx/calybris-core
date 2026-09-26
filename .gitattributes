@@ -1,3 +1,11 @@
 # The fuzz corpus is byte-exact input. Line-ending translation would change
 # what the fuzzer is seeded with, and would corrupt the binary seed outright.
 fuzz/seeds/** -text
+
+# Timestamped and signed fixtures are hashed byte for byte: a checkout that
+# turned LF into CRLF would change every digest they were stamped with.
+tests/fixtures/ots/** -text
+tests/fixtures/rfc3161/** -text
+tests/fixtures/trust-demo/** -text
+tests/fixtures/bundle/** -text
+tests/fixtures/c2sp_go_vectors.json -text

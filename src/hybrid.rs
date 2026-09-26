@@ -18,6 +18,15 @@
 //! 32-byte seeds the caller generates and stores; this module never reads a
 //! random number generator.
 //!
+//! Batches: an ML-DSA-65 signature is 3,309 bytes and costs far more to make
+//! than an Ed25519 one, so signing every decision on its own does not scale.
+//! [`HybridSigner::sign_batch`] puts the digests of a batch in an RFC 9162
+//! Merkle tree and signs the tree's head once, under its own tag `calyhbt1`;
+//! each item gets an inclusion proof of `log₂ n` hashes. An item verifies only
+//! when its proof leads to the signed root *and* both halves of the one
+//! signature verify, so a forger has to break the hybrid signature or find a
+//! SHA-256 collision, as for an item signed alone.
+//!
 //! **The ML-DSA implementation used here (RustCrypto `ml-dsa`) has not been
 //! independently audited.** That is why this sits behind its own feature,
 //! `preview-pq`, rather than inside `preview`.
@@ -26,6 +35,9 @@
 //! arXiv:2512.00110.
 
 use ed25519_dalek::Signer as _;
+use sha2::{Digest, Sha256};
+
+use crate::merkle::{all_inclusion_proofs, leaf_hash, root_of, verify_inclusion, Hash, TreeHead};
 use ml_dsa::signature::Keypair as _;
 use ml_dsa::{
     EncodedSignature, EncodedVerifyingKey, MlDsa65, Signature as PqSignature, VerifyingKey,
@@ -36,6 +48,9 @@ pub const HYBRID_TAG: &[u8; 8] = b"calyhyb1";
 
 /// FIPS 204 context string bound into the ML-DSA half.
 pub const ML_DSA_CONTEXT: &[u8] = b"calybris";
+
+/// Domain tag for the head of a signed batch.
+pub const BATCH_TAG: &[u8; 8] = b"calyhbt1";
 
 /// Why a hybrid signature did not verify.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -51,6 +66,10 @@ pub enum HybridError {
     MlDsaInvalid,
     #[error("ML-DSA signing failed")]
     SigningFailed,
+    #[error("a batch needs at least one digest")]
+    EmptyBatch,
+    #[error("the item's proof does not lead to the signed batch root")]
+    NotInBatch,
 }
 
 /// The two public keys a verifier has to trust, together.
@@ -123,6 +142,116 @@ impl HybridSigner {
             ml_dsa_65: pq.encode().as_slice().to_vec(),
         })
     }
+}
+
+/// One hybrid signature over a whole batch of digests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BatchSignature {
+    /// How many digests the batch holds.
+    pub size: u64,
+    /// RFC 9162 root of the tree whose leaves are the digests.
+    pub root: Hash,
+    /// Hybrid signature over [`batch_digest`] of `size` and `root`.
+    pub signature: HybridSignature,
+}
+
+/// Where one digest sits in a signed batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BatchItem {
+    pub index: u64,
+    /// Inclusion proof from the item to the batch root, leaf upwards.
+    pub proof: Vec<Hash>,
+}
+
+/// `SHA-256("calyhbt1" ‖ size as u64 big-endian ‖ root)`: what a batch's
+/// hybrid signature signs.
+#[must_use]
+pub fn batch_digest(size: u64, root: &Hash) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(BATCH_TAG);
+    h.update(size.to_be_bytes());
+    h.update(root);
+    h.finalize().into()
+}
+
+impl HybridSigner {
+    /// Signs every digest in `digests` with a single hybrid signature, and
+    /// returns it with one [`BatchItem`] per digest, in order.
+    pub fn sign_batch(
+        &self,
+        digests: &[[u8; 32]],
+    ) -> Result<(BatchSignature, Vec<BatchItem>), HybridError> {
+        if digests.is_empty() {
+            return Err(HybridError::EmptyBatch);
+        }
+        let leaves: Vec<Hash> = digests.iter().map(|d| leaf_hash(d)).collect();
+        let size = leaves.len() as u64;
+        let root = root_of(&leaves);
+        let signature = self.sign(&batch_digest(size, &root))?;
+        let items = all_inclusion_proofs(&leaves)
+            .into_iter()
+            .enumerate()
+            .map(|(i, proof)| BatchItem {
+                index: i as u64,
+                proof,
+            })
+            .collect();
+        Ok((
+            BatchSignature {
+                size,
+                root,
+                signature,
+            },
+            items,
+        ))
+    }
+}
+
+/// A batch whose hybrid signature has been checked once; its items can then
+/// be checked with a few hashes each.
+#[derive(Debug)]
+pub struct VerifiedBatch<'a> {
+    batch: &'a BatchSignature,
+}
+
+impl VerifiedBatch<'_> {
+    /// Checks that `digest` is item `item.index` of this batch.
+    pub fn verify_item(&self, digest: &[u8; 32], item: &BatchItem) -> Result<(), HybridError> {
+        let head = TreeHead {
+            size: self.batch.size,
+            root: self.batch.root,
+        };
+        verify_inclusion(&head, item.index, &leaf_hash(digest), &item.proof)
+            .map_err(|_| HybridError::NotInBatch)
+    }
+}
+
+/// Checks a batch's hybrid signature, both halves.
+pub fn verify_batch<'a>(
+    public: &HybridPublicKey,
+    batch: &'a BatchSignature,
+) -> Result<VerifiedBatch<'a>, HybridError> {
+    if batch.size == 0 {
+        return Err(HybridError::EmptyBatch);
+    }
+    verify(
+        public,
+        &batch_digest(batch.size, &batch.root),
+        &batch.signature,
+    )?;
+    Ok(VerifiedBatch { batch })
+}
+
+/// Checks one item of a batch: the batch signature and the item's proof.
+pub fn verify_batch_item(
+    public: &HybridPublicKey,
+    digest: &[u8; 32],
+    item: &BatchItem,
+    batch: &BatchSignature,
+) -> Result<(), HybridError> {
+    verify_batch(public, batch)?.verify_item(digest, item)
 }
 
 /// Valid only when both halves verify against `public` for `digest`.
@@ -257,6 +386,60 @@ mod tests {
         let mut pk = s.public_key();
         pk.ed25519 = bad;
         assert_eq!(verify(&pk, &d, &sig), Err(HybridError::MalformedEd25519));
+    }
+
+    #[test]
+    fn every_item_of_a_batch_verifies_under_one_signature() {
+        let s = signer();
+        let digests: Vec<[u8; 32]> = (0..37_u8).map(|i| [i; 32]).collect();
+        let (batch, items) = s.sign_batch(&digests).unwrap();
+        assert_eq!(batch.size, 37);
+        assert_eq!(items.len(), 37);
+        let verified = verify_batch(&s.public_key(), &batch).unwrap();
+        for (d, item) in digests.iter().zip(&items) {
+            verified.verify_item(d, item).unwrap();
+        }
+        verify_batch_item(&s.public_key(), &digests[5], &items[5], &batch).unwrap();
+    }
+
+    #[test]
+    fn a_batch_refuses_outsiders_moved_items_and_forged_roots() {
+        let s = signer();
+        let digests: Vec<[u8; 32]> = (0..8_u8).map(|i| [i; 32]).collect();
+        let (batch, items) = s.sign_batch(&digests).unwrap();
+        let v = verify_batch(&s.public_key(), &batch).unwrap();
+        assert_eq!(
+            v.verify_item(&[99; 32], &items[0]),
+            Err(HybridError::NotInBatch)
+        );
+        assert_eq!(
+            v.verify_item(&digests[1], &items[0]),
+            Err(HybridError::NotInBatch)
+        );
+
+        // A root the signer never signed.
+        let mut forged = batch.clone();
+        forged.root = leaf_hash(&[99; 32]);
+        assert!(verify_batch(&s.public_key(), &forged).is_err());
+        let mut resized = batch.clone();
+        resized.size = 9;
+        assert!(verify_batch(&s.public_key(), &resized).is_err());
+        let mut empty = batch;
+        empty.size = 0;
+        assert_eq!(
+            verify_batch(&s.public_key(), &empty).unwrap_err(),
+            HybridError::EmptyBatch
+        );
+        assert_eq!(s.sign_batch(&[]).unwrap_err(), HybridError::EmptyBatch);
+    }
+
+    #[test]
+    fn a_batch_signature_is_not_a_plain_signature_over_its_root() {
+        let s = signer();
+        let (batch, items) = s.sign_batch(&[[4; 32]]).unwrap();
+        assert!(items[0].proof.is_empty());
+        assert_eq!(batch.root, leaf_hash(&[4; 32]));
+        assert!(verify(&s.public_key(), &batch.root, &batch.signature).is_err());
     }
 
     #[test]

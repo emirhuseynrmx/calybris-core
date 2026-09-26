@@ -6,7 +6,13 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 unmaintained = "workspace"
-ignore = []
+ignore = [
+    # Marvin: timing leaks in RSA *private-key* operations (decryption and
+    # signing). `rsa` is used only by the `preview-tsa` feature, and only to
+    # verify a TSA's signature with its public key, which the advisory does not
+    # affect. No release fixes it; drop this line once one does.
+    { id = "RUSTSEC-2023-0071", reason = "rsa is used for public-key signature verification only" },
+]
 
 [licenses]
 allow = [

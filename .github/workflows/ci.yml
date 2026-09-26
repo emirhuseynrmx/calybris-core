@@ -10,6 +10,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same pull request supersedes a run still in progress;
+# pushes to main and scheduled runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   msrv:
     name: MSRV (1.85.0)
@@ -139,6 +145,11 @@ jobs:
       - name: Doc
         run: cargo doc --locked --no-deps
 
+      - name: OpenTimestamps official implementation comparison
+        run: |
+          python -m pip install opentimestamps==0.4.5
+          python scripts/check_ots_reference.py
+
       - name: Examples
         env:
           CALYBRIS_WAL_HMAC_KEY_HEX: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
@@ -248,6 +259,8 @@ jobs:
   fuzz:
     name: Fuzz targets (nightly)
     runs-on: ubuntu-latest
+    # About ten minutes; a hang fails here instead of after six hours.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -263,7 +276,8 @@ jobs:
       - name: Build every target
         run: |
           for target in snapshot_decode receipt_decode wal_decode \
-                        outcome_decode policy_decode kernel_decide; do
+                        outcome_decode policy_decode kernel_decide \
+                        note_decode ots_decode tsa_decode; do
             cargo fuzz build "$target"
           done
 
@@ -281,7 +295,8 @@ jobs:
       - name: Run each target
         run: |
           for target in snapshot_decode receipt_decode wal_decode \
-                        outcome_decode policy_decode kernel_decide; do
+                        outcome_decode policy_decode kernel_decide \
+                        note_decode ots_decode tsa_decode; do
             cargo fuzz run "$target" -- -max_total_time=60 -print_final_stats=1
           done
 

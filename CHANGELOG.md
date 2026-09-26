@@ -5,6 +5,197 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-26
+
+A trust layer that stops the operator from being the only party vouching for
+which log is the log and when each record was written. Every addition is a
+preview feature; no decision, digest or stable API changes. The design, and the
+four questions it answers, are in `docs/TRUST.md`.
+
+### Preview features
+
+- **Release hardening** — canonical OTS fork order is normalized on parsing
+  and mutation; the CI crash is pinned and compared against the official
+  Python implementation. Exact exploration fractions reach IPS/SNIPS without
+  basis-point loss; invalid fractions, clips and numeric overflow are rejected.
+  OPE exposes sample/ESS diagnostics with documented assumptions. Cached
+  Merkle trees serve verified WAL snapshots and historical prefix proofs.
+  Rotation, state-loss, concurrent-process and real TSA CLI regressions cover
+  operational boundaries; see `docs/TRUST_OPERATIONS.md`.
+
+- **`checkpoint`** — tree heads as C2SP tlog-checkpoint text, signed as C2SP
+  notes by the log and cosigned by witnesses (`cosignature/v1`). Keys use the Go
+  `note` verifier-key format. Byte-for-byte agreement with the Go reference
+  packages is pinned by `tests/c2sp_interop.rs`.
+- **`witness`** — an independent witness speaking C2SP tlog-witness: it
+  cosigns a checkpoint only with a consistency proof from the last one it
+  cosigned, records its state through a compare-and-swap before signing, and
+  maps each refusal to the protocol's HTTP status. `FileStore` keeps that
+  state durably for a witness process and fails closed: `FileStore::create`
+  never overwrites a state, and `FileStore::open` refuses a missing or
+  unreadable one instead of starting the witness again from nothing.
+  Power-loss durability depends on the platform and storage, and a state put
+  back from an older copy still needs external pins (other witnesses, an
+  auditor holding the latest checkpoint).
+- **`audit`** — witness quorums (`WitnessPolicy`), an auditor that follows one
+  log and refuses forks, transferable split-view evidence, record inclusion
+  against a witnessed checkpoint, time evidence from witnesses, RFC 3161 and
+  Bitcoin, each marked as covering the content or the signature (`Covers`),
+  and `KeyStatus`, under which a revoked key counts only for what is
+  proven to predate its revocation.
+- **`ots`** — OpenTimestamps: the reference `.ots` format read and written in
+  canonical order, calendar submission and upgrade, and verification against a
+  Bitcoin block header at a verifier-supplied height, with an explicit Pending,
+  Anchored status. A Bitcoin block dates nothing until its header passes a
+  2^64 work floor and `BitcoinHeader::confirm` matches its hash against a
+  trusted source.
+- **`tsa`** (new feature `preview-tsa`) — RFC 3161 requests and verification
+  of responses against pinned TSA certificates: imprint, nonce, CMS signed
+  attributes, RSA PKCS#1 v1.5 and ECDSA P-256/P-384 signatures, timeStamping key
+  usage and validity at `genTime`.
+- **`hybrid`** — `HybridSigner::sign_batch`, `verify_batch`: one hybrid
+  signature over the Merkle root of many digests (tag `calyhbt1`), each with an
+  inclusion proof.
+- **`merkle`** — `all_inclusion_proofs`, every leaf's proof in `O(n log n)`;
+  `MerkleTree`, which keeps every complete subtree's hash so that a root or
+  proof for any size costs `O(log² n)`: about 2 µs at ten million records,
+  where recomputing takes over a second.
+- **`ope`**, **`exploration`** — exact propensities end to end.
+  `ExplorationRecord::propensity` returns the exact fraction, and
+  `ope::evaluate_exact` estimates from it; the basis points an `Outcome`
+  records can be 22 times off at low exploration rates. `estimate` refuses a
+  clip that is not a positive, finite weight, both estimators exclude outcomes
+  that do not validate, and `Estimate::warnings` flags few records, a low
+  effective sample size, unsupported choices and clipping.
+  **Preview API change:** `LoggedChoice::propensity_bps: u16` is now
+  `propensity: Propensity`, and `estimate` / `evaluate` return
+  `Result<Estimate, OpeError>` instead of `Option<Estimate>`.
+
+### Fixed before release
+
+- `audit`, `ots`: a Bitcoin block's own time was taken as the time a
+  signature existed, and could date a signature made after a key's
+  revocation to before it: the miner sets that time, and consensus only asks
+  that it exceed the median of the eleven blocks before. A Bitcoin anchor now
+  dates by height (`TimeSource::Bitcoin { height }`, `audit::anchored_by`),
+  counts against a revocation only at or below the chain height recorded at
+  the revocation (`KeyStatus::Revoked { at, bitcoin_height }`,
+  `calybris-verify … --revoked-at-height`), and `existed_by` / `signed_by`
+  read clocks only: witnesses and RFC 3161.
+  **Preview API change:** `KeyStatus::Revoked` gains `bitcoin_height`
+  (`KeyStatus::revoked_at(t)` for none), and `TimeEvidence::bitcoin` takes
+  the height.
+- `tsa`: a signing certificate whose extended key usage allowed other
+  purposes besides `timeStamping` was accepted, and the ESS signing
+  certificate attribute was not checked. The usage must now be
+  `timeStamping` alone (RFC 3161 §2.3), and a `signingCertificate` (SHA-1)
+  or `signingCertificateV2` attribute must name the pinned certificate
+  (RFC 3161 §2.4.1, RFC 5816): `TsaError::NoSigningCertificate`,
+  `TsaError::SigningCertificateMismatch`. FreeTSA's and DigiCert's tokens
+  pass both.
+- `audit`: a cosignature dated in the future made `Auditor::with_max_age`
+  see a fresh checkpoint (`now - time` saturated to zero). Cosignatures dated
+  more than `DEFAULT_MAX_CLOCK_SKEW` (five minutes) ahead are not counted:
+  `verify_checkpoint_at`, `Auditor::with_max_clock_skew`,
+  `AuditError::CosignedInTheFuture`, and the same in `calybris-verify`.
+- `exploration`: `word % n` favoured some results by about one part in
+  10^15, so the recorded propensities were not exact in the strict sense.
+  Draws are now uniform by rejection sampling; a draw that was not rejected
+  is unchanged, so existing records replay.
+- `scripts/verify_bundle.py` said an `.ots` file "is a proof" when it had
+  only read which digest the file names. It now says the proof is not
+  verified there and points to `ots verify`.
+
+- `ots`: a proof whose fork branches arrived out of canonical order parsed to
+  a value that differed from the one its own serialization parsed to. CI's
+  `ots_decode` fuzz target found it. Nodes now keep attestations and
+  operations in the reference client's order however they arrive; the input
+  is kept as a fuzz seed and checked on every platform by
+  `tests/fuzz_seeds.rs`, and the canonical bytes match the reference
+  `python-opentimestamps` library's for every proof in the repository.
+
+- `checkpoint keygen` wrote the secret key with `std::fs::write`, so under a
+  usual umask it was readable by other users, and a second run replaced an
+  existing key. It now creates the `.skey` with mode `0600` (on Windows,
+  restricted to its owner with `icacls` before the secret is written),
+  never replaces a `.skey` or `.vkey`, and if either cannot be written
+  removes whatever it had created, a partly written `.vkey` included.
+- `witness cosign --append-to` appended to whatever note it was given. It now
+  refuses, before signing and with the witness state untouched, a note that
+  is not the checkpoint in the request or already carries this witness's
+  signature. Witnesses appending to one note at once no longer lose each
+  other's lines: each reads the note again under an exclusive lock on
+  `<note>.lock`, adds its cosignature to what is there, and replaces the note
+  through a rename. A note that became another checkpoint meanwhile is left
+  as it is.
+- A `cosignature/v1` time of zero, which C2SP tlog-witness forbids, or above
+  `2^63 - 1`, which tlog-cosignature forbids, is neither made
+  (`WitnessSigner::cosign`) nor accepted (`SignedNote::cosignature_time`,
+  `scripts/verify_bundle.py`): `CheckpointError::BadTimestamp`. A witness
+  whose clock gives such a time refuses before recording the checkpoint
+  (`WitnessError::BadClock`, HTTP 500).
+
+### Command line
+
+- `calybris-verify checkpoint keygen | create | request | stamp | upgrade |
+  tsa-request | verify` and `calybris-verify witness init | cosign`, built with
+  `preview`. `stamp` and `upgrade` reach OpenTimestamps calendars through the
+  system `curl`; `verify` is offline and exits 3 while a timestamp is pending.
+- `scripts/verify_bundle.py` checks a checkpoint bundle with nothing but
+  Python's standard library, written from the specifications and sharing no
+  code with the crate: Ed25519 (RFC 8032), C2SP notes and cosignatures, the
+  WAL hash chain and the RFC 9162 root. `tests/fixtures/bundle` is checked by
+  it and by `calybris-verify`.
+
+### Checks
+
+- The 10,000-case property run took half an hour, almost all of it in
+  `tests/split_view.rs` signing with unoptimized curve arithmetic. The
+  test profile now optimizes `curve25519-dalek`, `ed25519-dalek` and `sha2`
+  (this crate itself is unchanged), and the run takes about a minute and a
+  half. A newer push to a pull request cancels the CI, Security and Kani
+  runs it supersedes, and the long jobs have time limits, so a hang fails
+  instead of holding a runner for six hours.
+
+- `tests/acvp_ml_dsa.rs`: NIST ACVP ML-DSA-65 vectors for key generation,
+  deterministic signing with a context, and verification, through the calls
+  `hybrid` makes. Conformance, not an audit; `docs/AUDIT_SCOPE.md` is the scope
+  for one.
+- `tests/split_view.rs`: property test of forks shown to real witnesses in
+  every order.
+- `tests/rfc3161.rs`, `tests/opentimestamps.rs`: tokens from OpenSSL, FreeTSA
+  and DigiCert; reference-client proofs and Bitcoin block 358391.
+- Fuzz targets `note_decode`, `ots_decode`, `tsa_decode`.
+- `tests/trust_operations.rs`: a witness's state corrupted, lost and restored
+  from a stale backup, witnesses running at once, and a log key rotated
+  through a checkpoint both keys sign. `tests/trust_edges.rs`: the layer's
+  refusals at its edges. The command line's every refusal, stamping and
+  upgrading against stand-in calendars, and a real Bitcoin proof through
+  `verify`.
+- `tests/ope_reference.rs`: the estimators against a reference computed from
+  their definitions, across propensity regimes and reward distributions.
+
+### Documentation
+
+- `docs/KEY_MANAGEMENT.md`: checkpoint log keys (generation, rotation,
+  compromise), witness keys and state, and pinned TSA certificates.
+- `docs/TRUST.md`: exactly what `FULL VERIFICATION COMPLETE` establishes, and
+  what it does not (it does not replay decisions).
+- `docs/BENCHMARKS.md`: what the headline figure covers, the cost of a logged
+  decision, and the trust layer measured at up to ten million records
+  (`examples/trust_costs.rs`).
+- `PolicySnapshot::try_new`, `verify::audit_bundle` and the examples point new
+  code at `try_new_trusted` and the fail-closed `verified_audit_bundle`.
+
+### Dependencies
+
+- `preview` now also enables `provenance` and pulls in `base64`, `ripemd` and,
+  for the binary's key generation and nonces, `getrandom` (not on wasm32).
+- `preview-tsa` pulls in the RustCrypto `der`, `x509-cert`, `cms`, `x509-tsp`,
+  `spki`, `rsa`, `p256` and `p384` crates. RUSTSEC-2023-0071 (`rsa`, private-key
+  timing) is recorded as not applicable in `deny.toml` and `.cargo/audit.toml`:
+  only public-key verification is used.
+
 ## [1.2.0] - 2026-09-25
 
 1.2.0 answers the questions a decision raises after it is made — what would it

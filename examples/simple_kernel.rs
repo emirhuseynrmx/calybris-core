@@ -41,7 +41,7 @@ fn main() {
     ];
 
     let snapshot =
-        PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 0, models).expect("valid policy");
+        PolicySnapshot::try_new_trusted(1, 1, 9600, 5500, 3500, 0, models).expect("valid policy");
 
     let input = KernelInput {
         request_sequence: 1,

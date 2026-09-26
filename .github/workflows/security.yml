@@ -11,6 +11,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same pull request supersedes a run still in progress;
+# pushes to main and scheduled runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   semgrep:
     name: Semgrep SAST
@@ -88,6 +94,8 @@ jobs:
   adversarial:
     name: Extended adversarial tests
     runs-on: ubuntu-latest
+    # Usually a few minutes; a hang fails here instead of after six hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -140,6 +148,8 @@ jobs:
   miri:
     name: Miri (UB detection)
     runs-on: ubuntu-latest
+    # Usually under ten minutes; a hang fails here instead of after six hours.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -162,10 +172,12 @@ jobs:
 
       - name: Miri library tests
         # The preview modules skipped below (counterfactual, exploration,
-        # hybrid and the exhaustive Merkle sweeps) contain no unsafe code and
-        # are pure computation; under Miri's interpreter their loops of kernel
-        # runs, HMAC draws and ML-DSA signatures take hours without exercising
-        # anything the rest of this job does not. They run natively in CI.
+        # hybrid, checkpoint, witness, audit and the exhaustive Merkle sweeps)
+        # contain no unsafe code and are pure computation; under Miri's
+        # interpreter their loops of kernel runs, HMAC draws, Ed25519 and
+        # ML-DSA signatures take hours without exercising anything the rest of
+        # this job does not, and the witness file store takes an OS file lock
+        # Miri does not model. They run natively in CI.
         run: >
           cargo miri test --locked --lib --all-features --
           --skip wal::
@@ -187,6 +199,11 @@ jobs:
           --skip hybrid::
           --skip merkle::tests::every_
           --skip merkle::tests::root_matches_the_naive_definition
+          --skip merkle::tests::all_inclusion_proofs
+          --skip merkle::tests::a_cached_tree_gives_every
+          --skip checkpoint::
+          --skip witness::
+          --skip audit::
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
 

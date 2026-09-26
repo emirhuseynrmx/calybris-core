@@ -148,3 +148,53 @@ fn every_kernel_seed_is_long_enough_to_reach_the_kernel() {
         );
     }
 }
+
+#[cfg(feature = "preview")]
+#[test]
+fn every_note_seed_parses_as_a_note_or_a_witness_request() {
+    use calybris_core::checkpoint::SignedNote;
+    use calybris_core::witness::AddCheckpoint;
+    for (name, bytes) in seeds_for("note_decode") {
+        let text = String::from_utf8(bytes).expect("note seeds are text");
+        assert!(
+            SignedNote::parse(&text).is_ok() || AddCheckpoint::parse(&text).is_ok(),
+            "note_decode/{name} is neither a signed note nor an add-checkpoint request",
+        );
+    }
+}
+
+/// Also the fuzz target's property, so a seed that once crashed it keeps
+/// failing here, where it runs on every platform: what parses serializes to
+/// a proof that parses back equal. `unsorted-fork.ots` is the input CI's
+/// fuzzer found with a fork's branches out of canonical order.
+#[cfg(feature = "preview")]
+#[test]
+fn every_ots_seed_parses_as_a_proof_and_round_trips() {
+    use calybris_core::ots::DetachedTimestamp;
+    for (name, bytes) in seeds_for("ots_decode") {
+        let proof = DetachedTimestamp::parse(&bytes)
+            .unwrap_or_else(|e| panic!("ots_decode/{name} is not an OpenTimestamps proof: {e}"));
+        let canonical = proof.serialize();
+        let again = DetachedTimestamp::parse(&canonical)
+            .unwrap_or_else(|e| panic!("ots_decode/{name} does not parse after serializing: {e}"));
+        assert_eq!(again, proof, "ots_decode/{name} changes on a round trip");
+        assert_eq!(again.serialize(), canonical, "ots_decode/{name}");
+    }
+}
+
+/// The target pins the RSA and P-256 fixture certificates and asks about a
+/// fixed digest, so a seed cannot verify there; what matters is that it
+/// reaches past the DER envelope, which a granted response does.
+#[cfg(feature = "preview-tsa")]
+#[test]
+fn every_tsa_seed_is_a_granted_timestamp_response() {
+    use der::Decode as _;
+    for (name, bytes) in seeds_for("tsa_decode") {
+        let resp = x509_tsp::TimeStampResp::from_der(&bytes)
+            .unwrap_or_else(|e| panic!("tsa_decode/{name} is not a TimeStampResp: {e}"));
+        assert!(
+            resp.time_stamp_token.is_some(),
+            "tsa_decode/{name} carries no token"
+        );
+    }
+}

@@ -197,7 +197,11 @@ impl AuditBundle {
     }
 }
 
-/// Build an [`AuditBundle`] for a decision.
+/// Build an [`AuditBundle`] for a decision, whether or not it replays.
+///
+/// A decision that does not replay still gets a bundle, with
+/// `replay_valid == false`; nothing refuses it. At a trust boundary use
+/// [`verified_audit_bundle`], which returns an error instead.
 pub fn audit_bundle(
     snapshot: &PolicySnapshot,
     input: KernelInput,

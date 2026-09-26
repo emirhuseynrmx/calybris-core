@@ -39,6 +39,9 @@ SOURCE_ROOT_FILES = {
     "pyproject.toml",
 }
 SOURCE_ROOTS = {
+    # `.cargo/audit.toml`: the one advisory cargo audit is told to ignore, and
+    # why. Without it the security job fails on a source build.
+    ".cargo",
     ".github",
     "assets",
     "benches",
@@ -117,6 +120,28 @@ SOURCE_SCOPED_SUFFIXES = {
     ".h": ("calybris-ffi/",),
     # One seed, for the target that reads raw integers rather than JSON.
     ".bin": ("fuzz/seeds/",),
+    # Checkpoints, OpenTimestamps proofs, RFC 3161 requests, responses and
+    # certificates, a Bitcoin header: the byte-exact inputs the trust-layer
+    # tests and fuzz targets are pinned to.
+    ".body": ("tests/fixtures/",),
+    ".checkpoint": ("tests/fixtures/", "fuzz/seeds/"),
+    ".cnf": ("tests/fixtures/",),
+    ".crt": ("tests/fixtures/",),
+    ".hex": ("tests/fixtures/",),
+    ".ots": ("tests/fixtures/", "fuzz/seeds/"),
+    ".tsq": ("tests/fixtures/",),
+    ".tsr": ("tests/fixtures/", "fuzz/seeds/"),
+    # A checkpoint bundle as `calybris-verify` writes it: the log-signed note
+    # and the public keys, checked by both the tool and scripts/verify_bundle.py.
+    ".signed": ("tests/fixtures/",),
+    # The RFC 3161 nonce a demo request carried, kept with its token.
+    ".nonce": ("tests/fixtures/",),
+    ".vkey": ("tests/fixtures/",),
+    # The Go program that generated the C2SP interop vectors, so they can be
+    # regenerated rather than taken on trust.
+    ".go": ("tests/interop/",),
+    ".mod": ("tests/interop/",),
+    ".sum": ("tests/interop/",),
 }
 SOURCE_REQUIRED_FILES = {
     "Cargo.toml",

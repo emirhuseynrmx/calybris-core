@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
 
-    let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models)?;
+    let snapshot = PolicySnapshot::try_new_trusted(1, 1, 9600, 5500, 3500, 2, models)?;
 
     let input = KernelInput {
         request_sequence: 1,

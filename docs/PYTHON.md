@@ -12,7 +12,7 @@
 
 **Mental model:** Python is a first-class integration surface over the Rust
 trust boundary, not a second implementation. The API is stable as of 1.0.0;
-pin `calybris==1.0.0` in production anyway, so that a rebuild is a decision
+pin an exact version (`calybris==1.3.0`) in production anyway, so that a rebuild is a decision
 rather than a surprise.
 
 Production exceptions share one stable base:
@@ -118,6 +118,8 @@ Production rules:
   embedded in an artifact.
 - Store `WalAnchor` outside the WAL file.
 - Use `append_verified`, not an unaudited log write.
+- Use `verified_audit_bundle`, which raises when a decision does not replay,
+  not `audit_bundle`, which returns a bundle with `replay_valid` false.
 - Supply canonical byte encodings for domain state.
 
 ### `calybris_commerce`

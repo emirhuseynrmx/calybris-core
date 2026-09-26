@@ -18,6 +18,25 @@
 **A deterministic decision engine: it selects under explicit constraints, and makes
 the decision verifiable afterwards.**
 
+## In 30 seconds
+
+Software makes choices for businesses all day: which supplier gets the order,
+which carrier ships the parcel, which AI model answers the customer. When
+someone later asks *"why that one?"*, most systems can only show a log that
+anyone with access could have edited.
+
+Calybris makes those choices by rules you write down — budget, risk,
+deadline — and keeps a receipt for every one. Months later, on another
+computer, the receipt reproduces exactly the same decision. Change a single
+record and the numbers stop matching.
+
+New in 1.3.0: you do not have to take the operator's word for it either.
+A public timestamping service and the Bitcoin blockchain can date the log, and
+other organisations can co-sign it, so nobody — including whoever runs it —
+can rewrite the past or backdate a decision without it showing.
+
+**Try it in your browser, nothing to install:** [calybris.tech/try](https://calybris.tech/try/)
+
 Given a frozen catalog, a policy snapshot, and a typed request, Calybris returns
 one action plus an audit bundle that replays to the same answer.
 
@@ -48,7 +67,7 @@ your inputs.
 
 ```toml
 [dependencies]
-calybris-core = "1.0"
+calybris-core = "1.3"
 ```
 
 ```rust
@@ -81,7 +100,8 @@ let models = vec![
         output_cost_microunits_per_million_tokens: 125,
     },
 ];
-let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models)?;
+// `try_new_trusted` for new code; `try_new` exists to replay older policies.
+let snapshot = PolicySnapshot::try_new_trusted(1, 1, 9600, 5500, 3500, 2, models)?;
 
 let input = KernelInput {
     request_sequence: 1,
@@ -163,7 +183,25 @@ truth.
 | `persistence` | Atomic snapshots and WAL-verified generation checkpoints |
 | `async_wal` / `instrument` | Tokio WAL *(feature `async`)*, tracing spans *(feature `observability`)* |
 
-## In this release — 1.2.0
+## In this release — 1.3.0
+
+Up to 1.2.0, Calybris assumed one party is honest about which log is *the* log and
+when each record was written: whoever runs it. 1.3.0 removes that assumption.
+Every decision, digest and receipt is exactly what 1.2.0 made; the additions
+sit behind the `preview` flags (see [docs/PREVIEW.md](docs/PREVIEW.md)), and
+[docs/TRUST.md](docs/TRUST.md) walks through all of it.
+
+| | |
+|---|---|
+| **Who else saw this log?** | `checkpoint` + `witness` — the log's state as a signed C2SP checkpoint, co-signed by witnesses that sign only a checkpoint extending everything they signed before. The formats are the ones Go's checksum database and Sigsum witnesses already use, pinned byte for byte against the Go reference. |
+| **Was I shown the same log as everyone else?** | `audit` — a quorum of witnesses you trust; two conflicting checkpoints become proof anyone can check. A property test plays forked histories against real witnesses in every order. |
+| **When did it exist?** | `tsa` (feature `preview-tsa`) verifies RFC 3161 tokens against a TSA certificate you pin; `ots` verifies OpenTimestamps proofs against a Bitcoin block header, and says *Pending* until one exists. Tested with FreeTSA, DigiCert and a 2015 Bitcoin proof. |
+| **If a signing key is stolen** | Witnesses keep the past from being rewritten, timestamps keep it from being backdated, and `audit::KeyStatus` counts a revoked key only for signatures that independent evidence dates before its revocation. |
+| **From the command line** | `calybris-verify checkpoint create / stamp / verify` and `witness cosign`: sign, witness, timestamp and audit a WAL without writing code. `verify` names exactly what it established, from *signature only* to *full verification*, and `--require` fails when independence is missing. |
+| **What is not there yet** | The witnesses are the mechanism, not yet the parties: today no one but the maintainer runs a witness for a Calybris log. RFC 3161 authorities and Bitcoin are independent already. |
+| **Post-quantum, in bulk** | `hybrid::HybridSigner::sign_batch` — one hybrid signature for a whole batch. NIST ACVP vectors pin the ML-DSA-65 calls; the implementation is still **unaudited** ([docs/AUDIT_SCOPE.md](docs/AUDIT_SCOPE.md)). |
+
+## Added in 1.2.0
 
 Every 1.0 decision, digest and receipt is unchanged. What 1.2.0 adds are the
 questions a decision raises afterwards, behind the `preview` feature flag

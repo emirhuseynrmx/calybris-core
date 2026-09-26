@@ -40,7 +40,7 @@ fn main() {
             output_cost_microunits_per_million_tokens: 125,
         },
     ];
-    let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models).unwrap();
+    let snapshot = PolicySnapshot::try_new_trusted(1, 1, 9600, 5500, 3500, 2, models).unwrap();
 
     let path = PathBuf::from("replay_audit_demo.jsonl");
     let _ = std::fs::remove_file(&path);

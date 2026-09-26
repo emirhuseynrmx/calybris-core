@@ -39,7 +39,7 @@ fn main() {
     ];
 
     let snapshot =
-        PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models).expect("valid policy");
+        PolicySnapshot::try_new_trusted(1, 1, 9600, 5500, 3500, 2, models).expect("valid policy");
 
     // WAL for tamper-evident audit trail
     let wal_path = PathBuf::from("demo_routing.wal.jsonl");

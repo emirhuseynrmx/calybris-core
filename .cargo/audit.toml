@@ -1,0 +1,6 @@
+# Read by `cargo audit` in .github/workflows/security.yml.
+[advisories]
+# Marvin: timing leaks in RSA private-key operations. `rsa` is used only by
+# the `preview-tsa` feature to verify a TSA's signature with its public key,
+# which the advisory does not affect. See deny.toml for the same entry.
+ignore = ["RUSTSEC-2023-0071"]

@@ -16,7 +16,7 @@ artifacts on one auditable version.
    cargo test --locked --workspace --all-targets --all-features
    cargo test --locked --no-default-features
    cargo package --locked
-   python scripts/release_contract.py --tag v1.0.0
+   python scripts/release_contract.py --tag v1.3.0
    python -m maturin build --release --locked --out dist
    python -m pip install dist/calybris-*.whl --force-reinstall
    python -m pytest python/tests -q
@@ -32,8 +32,8 @@ artifacts on one auditable version.
 
    ```bash
    git status --short
-   git tag -s v1.0.0 -m "Calybris 1.0.0"
-   git push origin v1.0.0
+   git tag -s v1.3.0 -m "Calybris 1.3.0"
+   git push origin v1.3.0
    ```
 
 2. Wait for the tag-triggered Release workflow to pass. It re-runs security and
@@ -46,16 +46,16 @@ artifacts on one auditable version.
    of the same tag:
 
    ```bash
-   git switch --detach v1.0.0
-   python scripts/release_contract.py --tag v1.0.0
+   git switch --detach v1.3.0
+   python scripts/release_contract.py --tag v1.3.0
    cargo publish --locked
    ```
 
 ## Verify
 
 ```bash
-cargo install calybris-core --version 1.0.0
-python -m pip install calybris==1.0.0
-gh attestation verify calybris-1.0.0-*.whl -R emirhuseynrmx/calybris-core
+cargo install calybris-core --version 1.3.0
+python -m pip install calybris==1.3.0
+gh attestation verify calybris-1.3.0-*.whl -R emirhuseynrmx/calybris-core
 sha256sum --check SHA256SUMS
 ```
