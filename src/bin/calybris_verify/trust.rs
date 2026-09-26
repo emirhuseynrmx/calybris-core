@@ -580,7 +580,7 @@ fn verify(f: &Flags) -> Result<ExitCode, Fail> {
     if let Some(prev) = f.one("--prev") {
         let (_, prev_cp) = open_note(prev)?;
         let expected = prev_line(&prev_cp.body());
-        if cp.extensions().iter().any(|l| *l == expected) {
+        if cp.extensions().contains(&expected) {
             r.ok(
                 "prev link",
                 &format!("names checkpoint of size {}", prev_cp.size()),

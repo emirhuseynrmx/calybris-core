@@ -1,6 +1,6 @@
 [package]
 name = "calybris-core"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -47,7 +47,7 @@ full = ["wal", "async", "observability", "provenance"]
 # Additions that are released but not yet covered by the 1.x stability promise:
 # counterfactuals and decision margins, Merkle inclusion and consistency proofs,
 # keyed verifiable exploration, off-policy estimates, owned budget
-# reservations, and (unreleased) signed checkpoints, witnesses, audits and
+# reservations, and (1.3.0) signed checkpoints, witnesses, audits and
 # OpenTimestamps proofs. Each graduates to a stable feature in a later 1.x release once it
 # has been reviewed; until then its API may change in a minor release.
 # docs/PREVIEW.md says what each one does and what it does not claim.

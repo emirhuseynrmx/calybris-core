@@ -23,7 +23,7 @@ SPEC.loader.exec_module(release_contract)
 
 def test_repository_release_manifests_are_aligned() -> None:
     root = Path(__file__).parents[2]
-    assert release_contract.validate_manifests(root, "v1.2.0") == "1.2.0"  # skipcq: BAN-B101
+    assert release_contract.validate_manifests(root, "v1.3.0") == "1.3.0"  # skipcq: BAN-B101
 
 
 def test_mismatched_tag_is_rejected() -> None:
