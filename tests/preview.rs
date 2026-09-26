@@ -14,10 +14,48 @@ use calybris_core::kernel::{KernelInput, KernelModel, PolicySnapshot, ALL_PROVID
 use calybris_core::merkle::{
     consistency_proof, inclusion_proof, leaf_hash, verify_consistency, verify_inclusion, TreeHead,
 };
-use calybris_core::ope::evaluate;
+use calybris_core::ope::{evaluate, evaluate_exact, OpeError, Propensity};
 use calybris_core::outcome::{Observation, Outcome};
 
 const KEY: [u8; 32] = [42; 32];
+
+#[cfg(feature = "wal")]
+#[test]
+fn a_cached_wal_tree_proves_prefixes_and_refuses_corruption_or_wrong_key() {
+    use calybris_core::merkle::{leaf_from_entry_hash, MerkleTree};
+    use calybris_core::wal::WalWriter;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("decisions.jsonl");
+    let mut writer = WalWriter::<u64>::open_keyed(&path, &KEY).unwrap();
+    let mut leaves = Vec::new();
+    for n in 0..129 {
+        let entry = writer.append(n).unwrap();
+        leaves.push(leaf_hash(&leaf_from_entry_hash(&entry.entry_hash).unwrap()));
+    }
+    writer.flush_and_sync().unwrap();
+    drop(writer);
+    let tree = MerkleTree::from_verified_wal(&path, Some(&KEY)).unwrap();
+    assert_eq!(tree.len(), 129);
+    for size in [1, 17, 64, 128, 129] {
+        let head = tree.head(size).unwrap();
+        let proof = tree.inclusion_proof(size - 1, size).unwrap();
+        verify_inclusion(&head, size - 1, &leaves[size as usize - 1], &proof).unwrap();
+        if size > 1 {
+            verify_consistency(
+                &tree.head(1).unwrap(),
+                &head,
+                &tree.consistency_proof(1, size).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    assert!(MerkleTree::from_verified_wal(&path, Some(&[99; 32])).is_err());
+    let changed = std::fs::read_to_string(&path)
+        .unwrap()
+        .replacen("\"data\":64", "\"data\":65", 1);
+    std::fs::write(&path, changed).unwrap();
+    assert!(MerkleTree::from_verified_wal(&path, Some(&KEY)).is_err());
+}
 
 fn model(id: u32, quality: u16) -> KernelModel {
     KernelModel {
@@ -305,4 +343,79 @@ fn a_target_that_refuses_the_request_earns_nothing_for_it() {
     let e = evaluate(&target, &[(x, o)], |_| Some(1.0), None).unwrap();
     assert_eq!((e.used, e.matched, e.unsupported), (1, 0, 0));
     assert_eq!(e.ips, 0.0);
+}
+
+/// The review finding: `Selection` holds a propensity in whole basis points,
+/// never below one. At a 1 bp exploration rate over 22 near-best candidates
+/// an alternative's real probability is a small fraction of a basis point, so
+/// the rounded weight undercounts it by a factor of about twenty. Only the
+/// exact fraction, carried from the exploration record, weighs it correctly.
+#[test]
+fn at_one_basis_point_over_22_candidates_only_the_exact_propensity_weighs_correctly() {
+    let models: Vec<_> = (1..=22_u16)
+        .map(|id| model(u32::from(id), 9_000 - id))
+        .collect();
+    let logger = PolicySnapshot::try_new(1, 1, 9_000, 0, 0, 0, models.clone()).unwrap();
+    let cfg = ExplorationConfig {
+        rate_bps: 1,
+        window_microunits: 1_000_000_000,
+    };
+    let (x, record) = (0..5_000_000_u64)
+        .map(|seq| {
+            let x = input(seq);
+            (x, explore(&logger, x, cfg, &KEY).unwrap())
+        })
+        .find(|(_, r)| r.explored)
+        .expect("a 1 bp draw comes up within a few tens of thousands of requests");
+    assert_eq!(record.window_size, 22);
+    let exact = record.propensity().unwrap();
+    let selection = record.selection().unwrap();
+    assert_eq!(
+        selection.propensity_bps,
+        Some(1),
+        "recorded as one basis point"
+    );
+    assert!(exact.weight() > 20.0 * 10_000.0, "{exact:?}");
+
+    // A target policy that always takes the candidate the log explored.
+    let target_models: Vec<_> = models
+        .iter()
+        .map(|m| {
+            let mut m = *m;
+            if m.model_id == record.acted_model_id {
+                m.quality_bps = 9_500;
+            }
+            m
+        })
+        .collect();
+    let target = PolicySnapshot::try_new(1, 1, 9_000, 0, 0, 0, target_models).unwrap();
+    let mut outcome = Outcome::applied(
+        &logger,
+        &x,
+        &record.decision,
+        1,
+        Observation {
+            succeeded: Some(true),
+            ..Observation::default()
+        },
+    );
+    outcome.selection = selection;
+    outcome.validate().unwrap();
+
+    let rounded = evaluate(&target, &[(x, outcome)], |_| Some(1.0), None).unwrap();
+    let precise = evaluate_exact(&target, &[(x, outcome, exact)], |_| Some(1.0), None).unwrap();
+    assert_eq!(rounded.max_weight, 10_000.0);
+    assert!((precise.max_weight - exact.weight()).abs() < 1e-6);
+    assert!(precise.max_weight / rounded.max_weight > 20.0);
+
+    // An exact propensity that is not the one the outcome recorded is refused.
+    assert_eq!(
+        evaluate_exact(
+            &target,
+            &[(x, outcome, Propensity::ONE)],
+            |_| Some(1.0),
+            None
+        ),
+        Err(OpeError::NoUsableRecords)
+    );
 }

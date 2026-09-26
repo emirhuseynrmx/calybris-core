@@ -505,6 +505,40 @@ mod tests {
     }
 
     #[test]
+    fn log_key_rotation_preserves_witness_history_and_archival_verification() {
+        let old = log();
+        let new = LogSigner::from_seed(ORIGIN, &[42; 32]).unwrap();
+        let d = leaves(9);
+        let mut w = witness();
+        let archived = note_for(&old, &d[..3]);
+        w.add_checkpoint(&request(&d[..3], 0, archived.clone()), 1)
+            .unwrap();
+        w.add_log(ORIGIN, new.verifier().clone());
+        let grown = note_for(&new, &d);
+        w.add_checkpoint(&request(&d, 3, grown.clone()), 2).unwrap();
+        assert!(SignedNote::parse(&archived)
+            .unwrap()
+            .verify(old.verifier())
+            .is_ok());
+        assert!(SignedNote::parse(&archived)
+            .unwrap()
+            .verify(new.verifier())
+            .is_err());
+        assert!(SignedNote::parse(&grown)
+            .unwrap()
+            .verify(new.verifier())
+            .is_ok());
+        assert!(w
+            .add_checkpoint(&request(&d, 9, note_for(&old, &d)), 3)
+            .is_err());
+        let mut fork = d.clone();
+        fork[0] = leaf_hash(b"forged after rotation");
+        assert!(w
+            .add_checkpoint(&request(&fork, 9, note_for(&new, &fork)), 3)
+            .is_err());
+    }
+
+    #[test]
     fn a_growing_log_is_cosigned_step_by_step() {
         let log = log();
         let mut w = witness();
@@ -744,6 +778,62 @@ mod tests {
 
         std::fs::write(&path, b"{not json").unwrap();
         assert!(FileStore::new(&path).latest(ORIGIN).is_err());
+    }
+
+    /// A key cannot recover erased memory. Keep an external pin.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn state_loss_and_backup_rollback_need_an_external_trust_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let log = log();
+        let d = leaves(9);
+        let make = || {
+            let mut w = Witness::new(
+                WitnessSigner::from_seed("w", &[9; 32]).unwrap(),
+                FileStore::new(&path),
+            );
+            w.add_log(ORIGIN, log.verifier().clone());
+            w
+        };
+        make()
+            .add_checkpoint(&request(&d[..3], 0, note_for(&log, &d[..3])), 1)
+            .unwrap();
+        let backup = std::fs::read(&path).unwrap();
+        make()
+            .add_checkpoint(&request(&d, 3, note_for(&log, &d)), 2)
+            .unwrap();
+        let mut fork = d.clone();
+        fork[4] = leaf_hash(b"fork after the backup");
+        assert!(make()
+            .add_checkpoint(&request(&fork, 3, note_for(&log, &fork)), 3)
+            .is_err());
+        std::fs::write(&path, backup).unwrap();
+        assert!(make()
+            .add_checkpoint(&request(&fork, 3, note_for(&log, &fork)), 3)
+            .is_ok());
+        std::fs::remove_file(&path).unwrap();
+        assert!(make()
+            .add_checkpoint(&request(&fork, 0, note_for(&log, &fork)), 4)
+            .is_ok());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_state_write_failure_returns_no_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-parent/state.json");
+        let log = log();
+        let mut w = Witness::new(
+            WitnessSigner::from_seed("w", &[9; 32]).unwrap(),
+            FileStore::new(&path),
+        );
+        w.add_log(ORIGIN, log.verifier().clone());
+        let d = leaves(3);
+        assert!(w
+            .add_checkpoint(&request(&d, 0, note_for(&log, &d)), 1)
+            .is_err());
+        assert!(!path.exists());
     }
 
     #[test]

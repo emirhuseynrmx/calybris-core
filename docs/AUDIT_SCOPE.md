@@ -20,6 +20,14 @@ and the four questions it answers are in [TRUST.md](TRUST.md).
 
 ## Claims to test
 
+Continuation scope also includes cached Merkle prefix/root/proof equivalence,
+verified WAL construction, exact-propensity deserialization and finite OPE
+results. The OTS fork-order regression is pinned as
+`crash-065f6fa91bd55aef2965abcfebdcec4eb0715d5f.ots` and compared to
+python-opentimestamps 0.4.5. Operational state loss/backup rollback is an explicit
+limitation, not a promise of automatic key recovery. Windows power-loss
+durability is not claimed; review storage assumptions separately.
+
 **Hybrid signatures**
 
 - A signature verifies only if both the Ed25519 and the ML-DSA-65 half verify

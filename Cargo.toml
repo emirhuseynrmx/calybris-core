@@ -76,9 +76,9 @@ x509-cert = { version = "0.2", optional = true, default-features = false }
 cms = { version = "0.2", optional = true }
 x509-tsp = { version = "0.1", optional = true }
 spki = { version = "0.7", optional = true }
-rsa = { version = "0.9", optional = true, default-features = false, features = ["std", "sha2"] }
-p256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std"] }
-p384 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std"] }
+rsa = { version = "0.9", optional = true, default-features = false, features = ["sha2"] }
+p256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa"] }
 ml-dsa = { version = "0.1.1", optional = true, default-features = false, features = ["alloc"] }
 file-id = { version = "0.2.3", optional = true }
 fs2 = { version = "0.4", optional = true }
@@ -137,6 +137,14 @@ required-features = ["wal", "provenance"]
 [[example]]
 name = "quickstart"
 path = "examples/quickstart.rs"
+
+[[example]]
+name = "ots_canonical"
+required-features = ["preview"]
+
+[[example]]
+name = "trust_scale"
+required-features = ["preview"]
 
 [[example]]
 name = "simple_kernel"

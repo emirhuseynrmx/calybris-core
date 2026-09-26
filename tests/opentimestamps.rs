@@ -36,6 +36,25 @@ fn header() -> [u8; 80] {
 }
 
 #[test]
+fn ci_fuzz_unsorted_forks_roundtrip_without_changing_the_proof() {
+    let raw = fixture("crash-065f6fa91bd55aef2965abcfebdcec4eb0715d5f.ots");
+    let proof = DetachedTimestamp::parse(&raw).unwrap();
+    let canonical = proof.serialize();
+    let again = DetachedTimestamp::parse(&canonical).unwrap();
+    assert_eq!(again, proof);
+    assert_eq!(again.serialize(), canonical);
+    assert_eq!(again.digest(), proof.digest());
+    assert_eq!(
+        again.timestamp().attestations(),
+        proof.timestamp().attestations()
+    );
+    assert!(matches!(
+        proof.status(),
+        Status::Pending { .. } | Status::Anchored { .. }
+    ));
+}
+
+#[test]
 fn reference_client_files_parse_and_serialize_back_byte_for_byte() {
     for name in ["hello-world.txt", "incomplete.txt", "checkpoint.body"] {
         let raw = fixture(&format!("{name}.ots"));

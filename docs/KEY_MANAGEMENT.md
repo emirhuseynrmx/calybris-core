@@ -105,10 +105,13 @@ verify_signed_policy_with_key(&policy, &signed, &trusted)?;
 1. Generate the new keypair in the HSM; publish the new public key alongside
    the old one with validity dates (a small signer registry / JWKS-style file).
 2. Sign new policies with the new key; keep the old public key available to
-   verify historically signed policies.
-3. Revoke by removing the retired public key from the trust set once no
-   in-audit policy relies on it. Because the timestamp is signed, verifiers can
-   also reject signatures dated after a key's revocation.
+   verify historically signed policies. Do not remove archival public keys
+   merely because the private key has been retired.
+3. Publish a revocation time in the verifier's trusted registry. A signed
+   caller timestamp alone cannot establish that a signature predates compromise.
+   Accept revoked-key history only with independently verified evidence
+   covering the signature (`audit::Covers::Signature`) before revocation;
+   content-only evidence is insufficient.
 
 ## 3. Receipt signing key (Ed25519)
 

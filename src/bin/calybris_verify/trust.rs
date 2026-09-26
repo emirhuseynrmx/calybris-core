@@ -38,11 +38,8 @@ use std::process::{Command, ExitCode, Stdio};
 
 use calybris_core::audit::{existed_by, Covers, KeyStatus, TimeEvidence, WitnessPolicy};
 use calybris_core::checkpoint::{Checkpoint, LogSigner, NoteVerifier, SignedNote, WitnessSigner};
-use calybris_core::merkle::{
-    consistency_proof, leaf_from_entry_hash, leaf_hash, root_of, Hash, TreeHead,
-};
+use calybris_core::merkle::MerkleTree;
 use calybris_core::ots::{self, DetachedTimestamp, Status};
-use calybris_core::wal::{visit_verified_wal, visit_verified_wal_keyed};
 use calybris_core::witness::{AddCheckpoint, FileStore, Witness};
 use sha2::{Digest, Sha256};
 
@@ -156,26 +153,9 @@ fn utc(t: u64) -> String {
     )
 }
 
-/// The Merkle leaf hashes of a WAL: one per entry, over its `entry_hash`.
-fn wal_leaves(path: &str, hmac_key: Option<&[u8]>) -> Result<Vec<Hash>, Fail> {
-    let mut leaves = Vec::new();
-    let mut bad = None;
-    let mut visit =
-        |entry: calybris_core::wal::WalEntry<serde_json::Value>| match leaf_from_entry_hash(
-            &entry.entry_hash,
-        ) {
-            Ok(data) => leaves.push(leaf_hash(&data)),
-            Err(e) => bad = Some(e.to_string()),
-        };
-    let result = match hmac_key {
-        Some(k) => visit_verified_wal_keyed(Path::new(path), k, &mut visit),
-        None => visit_verified_wal(Path::new(path), &mut visit),
-    };
-    result.map_err(|e| format!("WAL {path}: {e}"))?;
-    if let Some(e) = bad {
-        return Err(format!("WAL {path}: {e}"));
-    }
-    Ok(leaves)
+/// Validate the WAL once; reuse its cached roots for prefix/proof queries.
+fn wal_tree(path: &str, hmac_key: Option<&[u8]>) -> Result<MerkleTree, Fail> {
+    MerkleTree::from_verified_wal(Path::new(path), hmac_key).map_err(|e| format!("WAL {path}: {e}"))
 }
 
 fn hmac_key(f: &Flags) -> Result<Option<Vec<u8>>, Fail> {
@@ -219,11 +199,8 @@ fn keygen(f: &Flags) -> Result<ExitCode, Fail> {
 fn create(f: &Flags) -> Result<ExitCode, Fail> {
     let wal = f.target()?;
     let key = hmac_key(f)?;
-    let leaves = wal_leaves(wal, key.as_deref())?;
-    let head = TreeHead {
-        size: leaves.len() as u64,
-        root: root_of(&leaves),
-    };
+    let tree = wal_tree(wal, key.as_deref())?;
+    let head = tree.head(tree.len()).map_err(|e| e.to_string())?;
     let mut cp = Checkpoint::new(f.need("--origin")?, head).map_err(|e| e.to_string())?;
     if let Some(prev) = f.one("--prev") {
         let (_, prev_cp) = open_note(prev)?;
@@ -232,7 +209,7 @@ fn create(f: &Flags) -> Result<ExitCode, Fail> {
         }
         if prev_cp.size() > head.size
             || (prev_cp.size() > 0
-                && root_of(&leaves[..prev_cp.size() as usize]) != *prev_cp.root())
+                && tree.head(prev_cp.size()).map_err(|e| e.to_string())?.root != *prev_cp.root())
         {
             return Err("this WAL does not extend the --prev checkpoint".into());
         }
@@ -258,14 +235,16 @@ fn create(f: &Flags) -> Result<ExitCode, Fail> {
 
 fn request(f: &Flags) -> Result<ExitCode, Fail> {
     let wal = f.target()?;
-    let leaves = wal_leaves(wal, hmac_key(f)?.as_deref())?;
+    let tree = wal_tree(wal, hmac_key(f)?.as_deref())?;
     let note_text = read_text(f.need("--note")?)?;
     let (_, cp) = open_note(f.need("--note")?)?;
     let old: u64 = f
         .need("--old")?
         .parse()
         .map_err(|_| "--old must be a number")?;
-    if cp.size() != leaves.len() as u64 || *cp.root() != root_of(&leaves) {
+    if cp.size() != tree.len()
+        || *cp.root() != tree.head(tree.len()).map_err(|e| e.to_string())?.root
+    {
         return Err("the note is not a checkpoint of this WAL".into());
     }
     if old > cp.size() {
@@ -274,7 +253,8 @@ fn request(f: &Flags) -> Result<ExitCode, Fail> {
     let proof = if old == 0 || old == cp.size() {
         Vec::new()
     } else {
-        consistency_proof(&leaves, old).map_err(|e| e.to_string())?
+        tree.consistency_proof(old, tree.len())
+            .map_err(|e| e.to_string())?
     };
     print!(
         "{}",
@@ -528,6 +508,7 @@ impl Report {
         self.incomplete = true;
         println!("  PENDING  {what}: {detail}");
     }
+    #[cfg(feature = "preview-tsa")]
     fn note(&mut self, what: &str, detail: &str) {
         println!("  note     {what}: {detail}");
     }
@@ -680,14 +661,14 @@ fn check_witnesses(
 }
 
 fn check_wal(f: &Flags, wal: &str, cp: &Checkpoint, r: &mut Report) -> Result<(), Fail> {
-    let leaves = wal_leaves(wal, hmac_key(f)?.as_deref())?;
-    let n = cp.size() as usize;
-    if leaves.len() < n {
+    let tree = wal_tree(wal, hmac_key(f)?.as_deref())?;
+    let n = cp.size();
+    if tree.len() < n {
         r.fail(
             "WAL",
-            &format!("has {} entries, the checkpoint {n}", leaves.len()),
+            &format!("has {} entries, the checkpoint {n}", tree.len()),
         );
-    } else if root_of(&leaves[..n]) != *cp.root() {
+    } else if tree.head(n).map_err(|e| e.to_string())?.root != *cp.root() {
         r.fail(
             "WAL",
             "its first entries do not reproduce the checkpoint root",
@@ -697,7 +678,7 @@ fn check_wal(f: &Flags, wal: &str, cp: &Checkpoint, r: &mut Report) -> Result<()
             "WAL",
             &format!(
                 "its first {n} entries reproduce the root ({} entries in total)",
-                leaves.len()
+                tree.len()
             ),
         );
     }

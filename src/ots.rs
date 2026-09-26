@@ -341,6 +341,7 @@ impl Timestamp {
                 node.add_op(op, child);
             }
             if !fork {
+                node.canonicalize();
                 return Ok(node);
             }
         }
@@ -352,6 +353,15 @@ impl Timestamp {
         } else {
             self.ops.push((op, child));
         }
+        self.canonicalize();
+    }
+
+    // The format treats forks as an unordered map/set. Keep the private
+    // vectors in the same order the reference writer emits, so structural
+    // equality does not depend on the order an untrusted file used.
+    fn canonicalize(&mut self) {
+        self.attestations.sort_by_key(Attestation::sort_key);
+        self.ops.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
     }
 
     /// Adds `op` after this node, or finds it if already present, and returns
@@ -361,8 +371,12 @@ impl Timestamp {
             Some(p) => p,
             None => {
                 let next = op.apply(&self.msg).unwrap_or_default();
-                self.ops.push((op, Self::new(next)));
-                self.ops.len() - 1
+                self.ops.push((op.clone(), Self::new(next)));
+                self.canonicalize();
+                self.ops
+                    .iter()
+                    .position(|(o, _)| *o == op)
+                    .expect("just inserted")
             }
         };
         &mut self.ops[pos].1
@@ -378,6 +392,7 @@ impl Timestamp {
         for (op, child) in other.ops {
             self.add_op(op, child);
         }
+        self.canonicalize();
     }
 
     /// The proof in the reference client's canonical order.

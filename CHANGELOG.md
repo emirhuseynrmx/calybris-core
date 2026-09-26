@@ -14,6 +14,15 @@ four questions it answers, are in `docs/TRUST.md`.
 
 ### Preview features
 
+- **Release hardening** — canonical OTS fork order is normalized on parsing
+  and mutation; the CI crash is pinned and compared against the official
+  Python implementation. Exact exploration fractions reach IPS/SNIPS without
+  basis-point loss; invalid fractions, clips and numeric overflow are rejected.
+  OPE exposes sample/ESS diagnostics with documented assumptions. Cached
+  Merkle trees serve verified WAL snapshots and historical prefix proofs.
+  Rotation, state-loss, concurrent-process and real TSA CLI regressions cover
+  operational boundaries; see `docs/TRUST_OPERATIONS.md`.
+
 - **`checkpoint`** — tree heads as C2SP tlog-checkpoint text, signed as C2SP
   notes by the log and cosigned by witnesses (`cosignature/v1`). Keys use the Go
   `note` verifier-key format. Byte-for-byte agreement with the Go reference
@@ -22,7 +31,8 @@ four questions it answers, are in `docs/TRUST.md`.
   cosigns a checkpoint only with a consistency proof from the last one it
   cosigned, records its state through a compare-and-swap before signing, and
   maps each refusal to the protocol's HTTP status. `FileStore` keeps that
-  state durably for a witness process.
+  state across witness process restarts. Power-loss durability depends on
+  the platform and storage; missing or rolled-back state requires external pins.
 - **`audit`** — witness quorums (`WitnessPolicy`), an auditor that follows one
   log and refuses forks, transferable split-view evidence, record inclusion
   against a witnessed checkpoint, time evidence from witnesses, RFC 3161 and

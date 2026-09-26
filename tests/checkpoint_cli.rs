@@ -13,6 +13,103 @@ use calybris_core::wal::WalWriter;
 
 const ORIGIN: &str = "decisions.example/log";
 
+#[cfg(feature = "preview-tsa")]
+#[test]
+fn real_timestamp_fixture_reports_timestamp_only_full_and_wrong_nonce_failure() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trust-demo");
+    let file = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    let note = file("000001.checkpoint");
+    let key = file("log.vkey");
+    let tsr = file("000001.checkpoint.signed.tsr");
+    let cert = file("freetsa-tsa.crt");
+    let witness = file("witness.vkey");
+    let nonce = std::fs::read_to_string(file("000001.checkpoint.signed.nonce")).unwrap();
+    let mut args = vec![
+        "checkpoint",
+        "verify",
+        &note,
+        "--log-key",
+        &key,
+        "--tsr",
+        &tsr,
+        "--tsa-cert",
+        &cert,
+        "--nonce",
+        nonce.trim(),
+        "--require",
+        "timestamped",
+    ];
+    let out = cli(&args);
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(stdout(&out).contains("RESULT: TIMESTAMP VERIFIED"));
+    *args.last_mut().unwrap() = "full";
+    assert!(!cli(&args).status.success());
+    args.extend(["--witness", &witness]);
+    let out = cli(&args);
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(stdout(&out).contains("RESULT: FULL VERIFICATION COMPLETE"));
+    // These pins check signatures, not whether the witness operator is independent.
+    let pos = args.iter().position(|v| *v == "--nonce").unwrap();
+    args[pos + 1] = "1";
+    let out = cli(&args);
+    assert!(!out.status.success());
+    assert!(!stdout(&out).contains("FULL VERIFICATION COMPLETE"));
+}
+
+#[test]
+fn two_real_processes_cannot_cosign_forks_from_the_same_state() {
+    let s = Setup::new();
+    let mut requests = Vec::new();
+    for (name, value) in [("left", 100_000), ("right", 900_000)] {
+        let wal = s.p(&format!("{name}.wal.jsonl"));
+        let note = format!("{name}.checkpoint");
+        append(Path::new(&wal), 1, 5, value);
+        s.checkpoint(&wal, &note, None);
+        let request = ok(&[
+            "checkpoint",
+            "request",
+            &wal,
+            "--note",
+            &s.p(&note),
+            "--old",
+            "0",
+        ]);
+        let path = s.p(&format!("{name}.request"));
+        std::fs::write(&path, request).unwrap();
+        requests.push(path);
+    }
+    let children: Vec<_> = requests
+        .iter()
+        .map(|req| {
+            Command::new(env!("CARGO_BIN_EXE_calybris-verify"))
+                .args([
+                    "witness",
+                    "cosign",
+                    req,
+                    "--key",
+                    &s.p("w1.skey"),
+                    "--log",
+                    &format!("{ORIGIN}={}", s.p("log.vkey")),
+                    "--state",
+                    &s.p("shared.state.json"),
+                    "--now",
+                    "1000",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let results: Vec<_> = children
+        .into_iter()
+        .map(|c| c.wait_with_output().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|r| r.status.success()).count(), 1);
+    let failure = results.iter().find(|r| !r.status.success()).unwrap();
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("REFUSED (409)"));
+}
+
 fn policy() -> PolicySnapshot {
     let model = KernelModel {
         model_id: 1,

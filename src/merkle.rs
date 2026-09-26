@@ -327,6 +327,204 @@ pub fn verify_consistency(
     }
 }
 
+/// A tree kept in memory with the hash of every complete, aligned subtree,
+/// for a log that keeps growing and keeps being asked for proofs.
+///
+/// The free functions above recompute the subtrees a proof needs from the
+/// leaves, so each proof costs time proportional to the whole tree even
+/// though it is only `log₂ n` hashes long. Here each complete subtree is
+/// hashed once, when its last leaf arrives: [`MerkleTree::push`] is amortised
+/// constant time, and a root or proof for any size up to [`MerkleTree::len`]
+/// takes `O(log² n)` hashes. The results are identical to the free functions,
+/// which the tests check leaf for leaf. Memory is about two hashes per leaf.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MerkleTree {
+    /// `levels[k][i]` is the root of leaves `i·2^k .. (i+1)·2^k`.
+    levels: Vec<Vec<Hash>>,
+}
+
+/// Failure while building an index over a verified WAL.
+#[cfg(feature = "wal")]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum WalMerkleError {
+    #[error(transparent)]
+    Wal(#[from] crate::wal::WalError),
+    #[error(transparent)]
+    Merkle(#[from] MerkleError),
+}
+
+impl MerkleTree {
+    /// Scan and validate a WAL once, indexing its entry hashes. Subsequent
+    /// roots/proofs use the cache. Building remains O(n), with O(n) memory.
+    ///
+    /// `key` selects HMAC verification. The index is a snapshot, not a live
+    /// tailer, and verifies chain integrity, not decision-policy correctness.
+    /// Detect suffix truncation by comparing with an externally trusted head.
+    #[cfg(feature = "wal")]
+    pub fn from_verified_wal(
+        path: &std::path::Path,
+        key: Option<&[u8]>,
+    ) -> Result<Self, WalMerkleError> {
+        let mut tree = Self::new();
+        let mut bad = None;
+        let mut visit = |entry: crate::wal::WalEntry<serde_json::Value>| match leaf_from_entry_hash(
+            &entry.entry_hash,
+        ) {
+            Ok(data) => tree.push(leaf_hash(&data)),
+            Err(error) => bad = Some(error),
+        };
+        match key {
+            Some(key) => crate::wal::visit_verified_wal_keyed(path, key, &mut visit)?,
+            None => crate::wal::visit_verified_wal(path, &mut visit)?,
+        };
+        if let Some(error) = bad {
+            return Err(error.into());
+        }
+        Ok(tree)
+    }
+
+    /// Bytes reserved for cached hash arrays, excluding allocator/Vec metadata.
+    /// This is an allocation estimate, not process RSS.
+    #[must_use]
+    pub fn allocated_hash_bytes(&self) -> usize {
+        self.levels
+            .iter()
+            .map(|level| level.capacity() * std::mem::size_of::<Hash>())
+            .sum()
+    }
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The tree over already-hashed leaves.
+    #[must_use]
+    pub fn from_leaf_hashes(leaf_hashes: &[Hash]) -> Self {
+        let mut tree = Self::new();
+        for h in leaf_hashes {
+            tree.push(*h);
+        }
+        tree
+    }
+
+    /// Appends one leaf hash (see [`leaf_hash`]).
+    pub fn push(&mut self, leaf: Hash) {
+        let mut hash = leaf;
+        let mut k = 0;
+        loop {
+            if self.levels.len() == k {
+                self.levels.push(Vec::new());
+            }
+            self.levels[k].push(hash);
+            let n = self.levels[k].len();
+            if n % 2 == 1 {
+                return;
+            }
+            hash = node_hash(&self.levels[k][n - 2], &self.levels[k][n - 1]);
+            k += 1;
+        }
+    }
+
+    /// How many leaves the tree holds.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.levels.first().map_or(0, |l| l.len() as u64)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The head of the tree over the first `size` leaves.
+    pub fn head(&self, size: u64) -> Result<TreeHead, MerkleError> {
+        if size > self.len() {
+            return Err(MerkleError::BadSizes {
+                old: size,
+                new: self.len(),
+            });
+        }
+        let root = if size == 0 {
+            Sha256::digest([]).into()
+        } else {
+            self.subtree(0, size)
+        };
+        Ok(TreeHead { size, root })
+    }
+
+    /// The root of leaves `start .. start + len`, `len > 0`. In an RFC 9162
+    /// tree the left part of every split is complete and aligned, so only the
+    /// right edge recurses.
+    fn subtree(&self, start: u64, len: u64) -> Hash {
+        if len.is_power_of_two() && start % len == 0 {
+            let k = len.trailing_zeros() as usize;
+            return self.levels[k][(start / len) as usize];
+        }
+        let k = split(len);
+        node_hash(&self.subtree(start, k), &self.subtree(start + k, len - k))
+    }
+
+    /// The inclusion proof for leaf `index` in the tree of the first `size`
+    /// leaves; the same as [`inclusion_proof`].
+    pub fn inclusion_proof(&self, index: u64, size: u64) -> Result<Vec<Hash>, MerkleError> {
+        if size > self.len() {
+            return Err(MerkleError::BadSizes {
+                old: size,
+                new: self.len(),
+            });
+        }
+        if index >= size {
+            return Err(MerkleError::IndexOutOfRange { index, size });
+        }
+        let mut out = Vec::new();
+        self.path(index, 0, size, &mut out);
+        Ok(out)
+    }
+
+    fn path(&self, m: u64, start: u64, len: u64, out: &mut Vec<Hash>) {
+        if len <= 1 {
+            return;
+        }
+        let k = split(len);
+        if m < k {
+            self.path(m, start, k, out);
+            out.push(self.subtree(start + k, len - k));
+        } else {
+            self.path(m - k, start + k, len - k, out);
+            out.push(self.subtree(start, k));
+        }
+    }
+
+    /// The consistency proof from the first `old` leaves to the first `size`;
+    /// the same as [`consistency_proof`].
+    pub fn consistency_proof(&self, old: u64, size: u64) -> Result<Vec<Hash>, MerkleError> {
+        if size > self.len() || old == 0 || old > size {
+            return Err(MerkleError::BadSizes { old, new: size });
+        }
+        let mut out = Vec::new();
+        self.subproof(old, 0, size, true, &mut out);
+        Ok(out)
+    }
+
+    fn subproof(&self, m: u64, start: u64, len: u64, b: bool, out: &mut Vec<Hash>) {
+        if m == len {
+            if !b {
+                out.push(self.subtree(start, len));
+            }
+            return;
+        }
+        let k = split(len);
+        if m <= k {
+            self.subproof(m, start, k, b, out);
+            out.push(self.subtree(start + k, len - k));
+        } else {
+            self.subproof(m - k, start + k, len - k, false, out);
+            out.push(self.subtree(start, k));
+        }
+    }
+}
+
 /// The largest power of two strictly less than `n`, for `n > 1`.
 pub(crate) fn split(n: u64) -> u64 {
     debug_assert!(n > 1);
@@ -483,6 +681,49 @@ mod tests {
                 assert_eq!(*p, inclusion_proof(&d, i as u64).unwrap(), "n={n} i={i}");
             }
         }
+    }
+
+    #[test]
+    fn a_cached_tree_gives_every_root_and_proof_the_free_functions_give() {
+        let d = leaves(70);
+        let tree = MerkleTree::from_leaf_hashes(&d);
+        assert_eq!(tree.len(), 70);
+        assert_eq!(tree.head(0).unwrap().root, root_of(&[]));
+        for n in 1..=70_usize {
+            let size = n as u64;
+            assert_eq!(tree.head(size).unwrap(), head(&d[..n]), "n={n}");
+            for i in 0..size {
+                assert_eq!(
+                    tree.inclusion_proof(i, size).unwrap(),
+                    inclusion_proof(&d[..n], i).unwrap(),
+                    "n={n} i={i}"
+                );
+            }
+            for m in 1..=size {
+                assert_eq!(
+                    tree.consistency_proof(m, size).unwrap(),
+                    consistency_proof(&d[..n], m).unwrap(),
+                    "n={n} m={m}"
+                );
+            }
+        }
+        assert!(tree.head(71).is_err());
+        assert!(tree.inclusion_proof(70, 70).is_err());
+        assert!(tree.inclusion_proof(0, 71).is_err());
+        assert!(tree.consistency_proof(0, 5).is_err());
+        assert!(tree.consistency_proof(6, 5).is_err());
+    }
+
+    #[test]
+    fn a_tree_grown_leaf_by_leaf_equals_one_built_at_once() {
+        let d = leaves(33);
+        let mut grown = MerkleTree::new();
+        assert!(grown.is_empty());
+        for (i, h) in d.iter().enumerate() {
+            grown.push(*h);
+            assert_eq!(grown.head(i as u64 + 1).unwrap(), head(&d[..=i]));
+        }
+        assert_eq!(grown, MerkleTree::from_leaf_hashes(&d));
     }
 
     #[test]

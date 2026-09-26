@@ -139,6 +139,11 @@ jobs:
       - name: Doc
         run: cargo doc --locked --no-deps
 
+      - name: OpenTimestamps official implementation comparison
+        run: |
+          python -m pip install opentimestamps==0.4.5
+          python scripts/check_ots_reference.py
+
       - name: Examples
         env:
           CALYBRIS_WAL_HMAC_KEY_HEX: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f

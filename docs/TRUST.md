@@ -64,8 +64,17 @@ One witness only knows what it was shown. Two things close the rest:
 
 The witness writes its state before it returns a cosignature, through an atomic
 compare-and-swap (`witness::FileStore` for a process on disk), so a crash or a
-race cannot make it sign two inconsistent checkpoints. The state file is what
-stops rollback: keep it with the witness key.
+race cannot make it sign two inconsistent checkpoints while state is retained.
+Deleting it or restoring a valid old backup erases that protection. An external
+pinned head is required to detect backup rollback; never restart the same
+witness key with empty state after loss. Tests demonstrate this limitation.
+
+Persistence synchronizes the temporary file before atomic replacement. Unix
+also synchronizes the parent directory, subject to the filesystem's durability
+contract. Windows does not synchronize that directory: process restart is
+tested, but sudden power loss is not covered by a durable-write guarantee.
+Production operators must validate their storage or use a durable transactional
+`WitnessStore`; atomic replacement alone is not power-loss durability.
 
 The formats are C2SP [tlog-checkpoint](https://c2sp.org/tlog-checkpoint),
 [signed-note](https://c2sp.org/signed-note),
@@ -222,7 +231,13 @@ The last line names what was established, and nothing more:
 | `SIGNATURE VERIFIED ONLY` | The operator's own signature. Nothing independent was checked. |
 | `INDEPENDENTLY WITNESSED` | A quorum of the witnesses you named cosigned; no independent timestamp. |
 | `TIMESTAMP VERIFIED` | An RFC 3161 token or a confirmed Bitcoin block dates it; no witnesses. |
-| `FULL VERIFICATION COMPLETE` | Both. |
+| `FULL VERIFICATION COMPLETE` | The pinned log signature, configured witness quorum and at least one external timestamp. |
+
+`FULL` does not replay a decision against its policy, prove the honesty of its
+input data, certify that configured witnesses have different operators, or
+check certificate revocation online. WAL-root verification runs only when
+`--wal` is supplied. Decision/receipt replay is a separate verification step.
+The verifier cannot infer organisational independence from a public key.
 
 `--require witnessed|timestamped|bitcoin|full` makes a missing level a failure.
 Exit codes: 0 no check failed and every requirement was met; 1 a check failed
