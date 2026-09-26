@@ -7,4 +7,5 @@ fuzz/seeds/** -text
 tests/fixtures/ots/** -text
 tests/fixtures/rfc3161/** -text
 tests/fixtures/trust-demo/** -text
+tests/fixtures/bundle/** -text
 tests/fixtures/c2sp_go_vectors.json -text
