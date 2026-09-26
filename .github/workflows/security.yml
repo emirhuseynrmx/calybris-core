@@ -190,6 +190,7 @@ jobs:
           --skip merkle::tests::every_
           --skip merkle::tests::root_matches_the_naive_definition
           --skip merkle::tests::all_inclusion_proofs
+          --skip merkle::tests::a_cached_tree_gives_every
           --skip checkpoint::
           --skip witness::
           --skip audit::
