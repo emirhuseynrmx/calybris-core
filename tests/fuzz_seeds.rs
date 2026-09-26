@@ -163,12 +163,22 @@ fn every_note_seed_parses_as_a_note_or_a_witness_request() {
     }
 }
 
+/// Also the fuzz target's property, so a seed that once crashed it keeps
+/// failing here, where it runs on every platform: what parses serializes to
+/// a proof that parses back equal. `unsorted-fork.ots` is the input CI's
+/// fuzzer found with a fork's branches out of canonical order.
 #[cfg(feature = "preview")]
 #[test]
-fn every_ots_seed_parses_as_a_proof() {
+fn every_ots_seed_parses_as_a_proof_and_round_trips() {
+    use calybris_core::ots::DetachedTimestamp;
     for (name, bytes) in seeds_for("ots_decode") {
-        calybris_core::ots::DetachedTimestamp::parse(&bytes)
+        let proof = DetachedTimestamp::parse(&bytes)
             .unwrap_or_else(|e| panic!("ots_decode/{name} is not an OpenTimestamps proof: {e}"));
+        let canonical = proof.serialize();
+        let again = DetachedTimestamp::parse(&canonical)
+            .unwrap_or_else(|e| panic!("ots_decode/{name} does not parse after serializing: {e}"));
+        assert_eq!(again, proof, "ots_decode/{name} changes on a round trip");
+        assert_eq!(again.serialize(), canonical, "ots_decode/{name}");
     }
 }
 
