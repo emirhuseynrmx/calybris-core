@@ -519,130 +519,21 @@ fn verify(f: &Flags) -> Result<ExitCode, Fail> {
         Ok(()) => r.ok("log signature", log.name()),
         Err(e) => r.fail("log signature", &e.to_string()),
     }
-
-    let witness_files = f.all("--witness");
-    if !witness_files.is_empty() {
-        let keys = witness_files
-            .iter()
-            .map(|p| NoteVerifier::parse(&read_key_text(p)?).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let threshold: usize = f
-            .one("--threshold")
-            .map_or(Ok(keys.len()), str::parse)
-            .map_err(|_| "--threshold must be a number")?;
-        let policy = WitnessPolicy::new(keys, threshold).map_err(|e| e.to_string())?;
-        match calybris_core::audit::verify_checkpoint(&note.render(), &log, &policy) {
-            Ok(w) => {
-                let names: Vec<String> = w
-                    .cosigned
-                    .iter()
-                    .map(|c| format!("{} at {}", c.witness, utc(c.time)))
-                    .collect();
-                r.ok(
-                    "witnesses",
-                    &format!(
-                        "{} of {} required: {}",
-                        w.cosigned.len(),
-                        threshold,
-                        names.join("; ")
-                    ),
-                );
-                r.evidence.push(TimeEvidence::Witnesses(w.seen_by()));
-            }
-            Err(e) => r.fail("witnesses", &e.to_string()),
-        }
-    }
-
+    check_witnesses(f, &note, &log, &mut r)?;
     if let Some(wal) = f.one("--wal") {
-        let leaves = wal_leaves(wal, hmac_key(f)?.as_deref())?;
-        let n = cp.size() as usize;
-        if leaves.len() < n {
-            r.fail(
-                "WAL",
-                &format!("has {} entries, the checkpoint {n}", leaves.len()),
-            );
-        } else if root_of(&leaves[..n]) != *cp.root() {
-            r.fail(
-                "WAL",
-                "its first entries do not reproduce the checkpoint root",
-            );
-        } else {
-            r.ok(
-                "WAL",
-                &format!(
-                    "its first {n} entries reproduce the root ({} entries in total)",
-                    leaves.len()
-                ),
-            );
-        }
+        check_wal(f, wal, &cp, &mut r)?;
     }
-
     if let Some(prev) = f.one("--prev") {
-        let (_, prev_cp) = open_note(prev)?;
-        let expected = prev_line(&prev_cp.body());
-        if cp.extensions().contains(&expected) {
-            r.ok(
-                "prev link",
-                &format!("names checkpoint of size {}", prev_cp.size()),
-            );
-        } else {
-            r.fail("prev link", "the checkpoint does not name --prev");
-        }
-        if prev_cp.size() > cp.size() {
-            r.fail("prev link", "--prev is larger than this checkpoint");
-        }
+        check_prev(prev, &cp, &mut r)?;
     }
-
     if let Some(ots_path) = f.one("--ots") {
-        let raw = std::fs::read(ots_path).map_err(|e| format!("cannot read {ots_path}: {e}"))?;
-        match DetachedTimestamp::parse(&raw) {
-            Err(e) => r.fail("OpenTimestamps", &e.to_string()),
-            Ok(p) if p.digest() != cp.digest() => r.fail("OpenTimestamps", "the proof is for another digest"),
-            Ok(p) => match (f.one("--block-height"), f.one("--block-header")) {
-                (Some(h), Some(hdr)) => {
-                    let height: u64 = h.parse().map_err(|_| "--block-height must be a number")?;
-                    let header: [u8; 80] = unhex(hdr)?
-                        .try_into()
-                        .map_err(|_| "--block-header must be 80 bytes of hex")?;
-                    match p.verify_bitcoin(height, &header) {
-                        Ok(v) => {
-                            r.ok(
-                                "OpenTimestamps",
-                                &format!(
-                                    "VERIFIED in Bitcoin block {} ({}) at {}; confirm that hash is block {} on your own node",
-                                    v.height,
-                                    v.block_hash,
-                                    utc(v.block_time),
-                                    v.height
-                                ),
-                            );
-                            r.evidence.push(TimeEvidence::Bitcoin(v.block_time));
-                        }
-                        Err(e) => r.fail("OpenTimestamps", &e.to_string()),
-                    }
-                }
-                (None, None) => match p.status() {
-                    Status::Pending { calendars } => r.pending(
-                        "OpenTimestamps",
-                        &format!("calendars {} have not committed it to Bitcoin yet", calendars.join(", ")),
-                    ),
-                    Status::Anchored { heights } => r.pending(
-                        "OpenTimestamps",
-                        &format!("anchored at block {heights:?}; give --block-height and --block-header to verify"),
-                    ),
-                    Status::Verified(_) => unreachable!("status() never verifies"),
-                },
-                _ => return Err("--block-height and --block-header go together".into()),
-            },
-        }
+        check_ots(f, ots_path, &cp, &mut r)?;
     }
-
     if let Some(tsr) = f.one("--tsr") {
         verify_tsr(f, tsr, &cp, &mut r)?;
     }
 
-    let when = existed_by(&r.evidence);
-    match when {
+    match existed_by(&r.evidence) {
         Some(t) => println!("  existed by {} (earliest independent evidence)", utc(t)),
         None => println!("  existed by: no independent time evidence"),
     }
@@ -669,6 +560,155 @@ fn verify(f: &Flags) -> Result<ExitCode, Fail> {
         println!("CHECKPOINT VERIFIED");
         ExitCode::SUCCESS
     })
+}
+
+fn check_witnesses(
+    f: &Flags,
+    note: &SignedNote,
+    log: &NoteVerifier,
+    r: &mut Report,
+) -> Result<(), Fail> {
+    let witness_files = f.all("--witness");
+    if witness_files.is_empty() {
+        return Ok(());
+    }
+    let keys = witness_files
+        .iter()
+        .map(|p| NoteVerifier::parse(&read_key_text(p)?).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let threshold: usize = f
+        .one("--threshold")
+        .map_or(Ok(keys.len()), str::parse)
+        .map_err(|_| "--threshold must be a number")?;
+    let policy = WitnessPolicy::new(keys, threshold).map_err(|e| e.to_string())?;
+    match calybris_core::audit::verify_checkpoint(&note.render(), log, &policy) {
+        Ok(w) => {
+            let names: Vec<String> = w
+                .cosigned
+                .iter()
+                .map(|c| format!("{} at {}", c.witness, utc(c.time)))
+                .collect();
+            r.ok(
+                "witnesses",
+                &format!(
+                    "{} of {} required: {}",
+                    w.cosigned.len(),
+                    threshold,
+                    names.join("; ")
+                ),
+            );
+            r.evidence.push(TimeEvidence::Witnesses(w.seen_by()));
+        }
+        Err(e) => r.fail("witnesses", &e.to_string()),
+    }
+    Ok(())
+}
+
+fn check_wal(f: &Flags, wal: &str, cp: &Checkpoint, r: &mut Report) -> Result<(), Fail> {
+    let leaves = wal_leaves(wal, hmac_key(f)?.as_deref())?;
+    let n = cp.size() as usize;
+    if leaves.len() < n {
+        r.fail(
+            "WAL",
+            &format!("has {} entries, the checkpoint {n}", leaves.len()),
+        );
+    } else if root_of(&leaves[..n]) != *cp.root() {
+        r.fail(
+            "WAL",
+            "its first entries do not reproduce the checkpoint root",
+        );
+    } else {
+        r.ok(
+            "WAL",
+            &format!(
+                "its first {n} entries reproduce the root ({} entries in total)",
+                leaves.len()
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn check_prev(prev: &str, cp: &Checkpoint, r: &mut Report) -> Result<(), Fail> {
+    let (_, prev_cp) = open_note(prev)?;
+    let expected = prev_line(&prev_cp.body());
+    if cp.extensions().contains(&expected) {
+        r.ok(
+            "prev link",
+            &format!("names checkpoint of size {}", prev_cp.size()),
+        );
+    } else {
+        r.fail("prev link", "the checkpoint does not name --prev");
+    }
+    if prev_cp.size() > cp.size() {
+        r.fail("prev link", "--prev is larger than this checkpoint");
+    }
+    Ok(())
+}
+
+fn check_ots(f: &Flags, ots_path: &str, cp: &Checkpoint, r: &mut Report) -> Result<(), Fail> {
+    let raw = std::fs::read(ots_path).map_err(|e| format!("cannot read {ots_path}: {e}"))?;
+    let proof = match DetachedTimestamp::parse(&raw) {
+        Err(e) => {
+            r.fail("OpenTimestamps", &e.to_string());
+            return Ok(());
+        }
+        Ok(p) if p.digest() != cp.digest() => {
+            r.fail("OpenTimestamps", "the proof is for another digest");
+            return Ok(());
+        }
+        Ok(p) => p,
+    };
+    let (height, header) = match (f.one("--block-height"), f.one("--block-header")) {
+        (Some(h), Some(hdr)) => (h, hdr),
+        (None, None) => {
+            report_ots_status(&proof.status(), r);
+            return Ok(());
+        }
+        _ => return Err("--block-height and --block-header go together".into()),
+    };
+    let height: u64 = height
+        .parse()
+        .map_err(|_| "--block-height must be a number")?;
+    let header: [u8; 80] = unhex(header)?
+        .try_into()
+        .map_err(|_| "--block-header must be 80 bytes of hex")?;
+    match proof.verify_bitcoin(height, &header) {
+        Ok(v) => {
+            r.ok(
+                "OpenTimestamps",
+                &format!(
+                    "VERIFIED in Bitcoin block {} ({}) at {}; confirm that hash is block {} on your own node",
+                    v.height,
+                    v.block_hash,
+                    utc(v.block_time),
+                    v.height
+                ),
+            );
+            r.evidence.push(TimeEvidence::Bitcoin(v.block_time));
+        }
+        Err(e) => r.fail("OpenTimestamps", &e.to_string()),
+    }
+    Ok(())
+}
+
+fn report_ots_status(status: &Status, r: &mut Report) {
+    match status {
+        Status::Pending { calendars } => r.pending(
+            "OpenTimestamps",
+            &format!(
+                "calendars {} have not committed it to Bitcoin yet",
+                calendars.join(", ")
+            ),
+        ),
+        Status::Anchored { heights } => r.pending(
+            "OpenTimestamps",
+            &format!(
+                "anchored at block {heights:?}; give --block-height and --block-header to verify"
+            ),
+        ),
+        Status::Verified(_) => unreachable!("status() never verifies"),
+    }
 }
 
 #[cfg(feature = "preview-tsa")]

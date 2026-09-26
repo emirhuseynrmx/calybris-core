@@ -179,6 +179,9 @@ impl Checkpoint {
         let text = body
             .strip_suffix('\n')
             .ok_or(err("body must end in a newline"))?;
+        // Not `lines()`: it would also strip a trailing `\r`, so a CRLF copy
+        // would parse as the same value. The format is LF only.
+        // skipcq: RS-W1217
         let mut lines = text.split('\n');
         let origin = lines.next().ok_or(err("missing origin"))?;
         let size = lines.next().ok_or(err("missing tree size"))?;
@@ -303,6 +306,9 @@ impl SignedNote {
             return Err(err("note has no signatures"));
         }
         let mut signatures = Vec::new();
+        // Not `lines()`: it would also strip a trailing `\r`, so a CRLF copy
+        // would parse as the same value. The format is LF only.
+        // skipcq: RS-W1217
         for line in block.split('\n') {
             if signatures.len() == MAX_SIGNATURES {
                 return Err(CheckpointError::TooManySignatures);
@@ -413,6 +419,9 @@ impl SignedNote {
 }
 
 fn cosignature_message(timestamp: u64, text: &str) -> Result<String, CheckpointError> {
+    // Not `lines()`: it would also strip a trailing `\r`, so a CRLF copy
+    // would parse as the same value. The format is LF only.
+    // skipcq: RS-W1217
     if text.split('\n').count() < 4 {
         return Err(CheckpointError::MalformedNote(
             "a cosigned note has at least three lines",
@@ -837,7 +846,7 @@ mod tests {
             format!("{good}{sig}")
         };
         for bad in [
-            String::new(),
+            String::default(),
             "no blank line\n".to_owned(),
             good.trim_end().to_owned(),
             good.replace('\u{2014}', "-"),

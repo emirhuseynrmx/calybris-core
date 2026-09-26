@@ -68,6 +68,9 @@ impl AddCheckpoint {
         let (head, note) = body
             .split_once("\n\n")
             .ok_or(bad("request has no blank line before the checkpoint"))?;
+        // Not `lines()`: it would also strip a trailing `\r`, so a CRLF copy
+        // would parse as the same value. The format is LF only.
+        // skipcq: RS-W1217
         let mut lines = head.split('\n');
         let old = lines
             .next()
@@ -445,6 +448,9 @@ pub fn parse_cosignatures(body: &str) -> Result<Vec<NoteSignature>, WitnessError
     let body = body
         .strip_suffix('\n')
         .ok_or(WitnessError::Malformed("response must end in a newline"))?;
+    // Not `lines()`: it would also strip a trailing `\r`, so a CRLF copy
+    // would parse as the same value. The format is LF only.
+    // skipcq: RS-W1217
     body.split('\n')
         .map(|line| NoteSignature::parse_line(line).map_err(WitnessError::BadCheckpoint))
         .collect()
@@ -479,7 +485,7 @@ mod tests {
     fn witness() -> Witness<MemoryStore> {
         let mut w = Witness::new(
             WitnessSigner::from_seed("witness.example", &[9; 32]).unwrap(),
-            MemoryStore::new(),
+            MemoryStore::default(),
         );
         w.add_log(ORIGIN, log().verifier().clone());
         w
@@ -665,7 +671,7 @@ mod tests {
         let mut w = Witness::new(
             WitnessSigner::from_seed("w", &[9; 32]).unwrap(),
             Racing {
-                inner: MemoryStore::new(),
+                inner: MemoryStore::default(),
                 interloper: Some(TreeHead {
                     size: 7,
                     root: root_of(&d[..7]),
