@@ -22,7 +22,9 @@ four questions it answers, are in `docs/TRUST.md`.
   cosigns a checkpoint only with a consistency proof from the last one it
   cosigned, records its state through a compare-and-swap before signing, and
   maps each refusal to the protocol's HTTP status. `FileStore` keeps that
-  state durably for a witness process.
+  state durably for a witness process and fails closed: `FileStore::create`
+  never overwrites a state, and `FileStore::open` refuses a missing or
+  unreadable one instead of starting the witness again from nothing.
 - **`audit`** — witness quorums (`WitnessPolicy`), an auditor that follows one
   log and refuses forks, transferable split-view evidence, record inclusion
   against a witnessed checkpoint, time evidence from witnesses, RFC 3161 and
@@ -42,14 +44,42 @@ four questions it answers, are in `docs/TRUST.md`.
 - **`hybrid`** — `HybridSigner::sign_batch`, `verify_batch`: one hybrid
   signature over the Merkle root of many digests (tag `calyhbt1`), each with an
   inclusion proof.
-- **`merkle`** — `all_inclusion_proofs`, every leaf's proof in `O(n log n)`.
+- **`merkle`** — `all_inclusion_proofs`, every leaf's proof in `O(n log n)`;
+  `MerkleTree`, which keeps every complete subtree's hash so that a root or
+  proof for any size costs `O(log² n)`: about 2 µs at ten million records,
+  where recomputing takes over a second.
+- **`ope`**, **`exploration`** — exact propensities end to end.
+  `ExplorationRecord::propensity` returns the exact fraction, and
+  `ope::evaluate_exact` estimates from it; the basis points an `Outcome`
+  records can be 22 times off at low exploration rates. `estimate` refuses a
+  clip that is not a positive, finite weight, both estimators exclude outcomes
+  that do not validate, and `Estimate::warnings` flags few records, a low
+  effective sample size, no matches, unsupported choices and clipping.
+  **Preview API change:** `LoggedChoice::propensity_bps: u16` is now
+  `propensity: Propensity`, and `estimate` / `evaluate` return
+  `Result<Estimate, OpeError>` instead of `Option<Estimate>`.
+
+### Fixed before release
+
+- `ots`: a proof whose fork branches arrived out of canonical order parsed to
+  a value that differed from the one its own serialization parsed to. CI's
+  `ots_decode` fuzz target found it. Nodes now keep attestations and
+  operations in the reference client's order however they arrive; the input
+  is kept as a fuzz seed and checked on every platform by
+  `tests/fuzz_seeds.rs`, and the canonical bytes match the reference
+  `python-opentimestamps` library's for every proof in the repository.
 
 ### Command line
 
 - `calybris-verify checkpoint keygen | create | request | stamp | upgrade |
-  tsa-request | verify` and `calybris-verify witness cosign`, built with
+  tsa-request | verify` and `calybris-verify witness init | cosign`, built with
   `preview`. `stamp` and `upgrade` reach OpenTimestamps calendars through the
   system `curl`; `verify` is offline and exits 3 while a timestamp is pending.
+- `scripts/verify_bundle.py` checks a checkpoint bundle with nothing but
+  Python's standard library, written from the specifications and sharing no
+  code with the crate: Ed25519 (RFC 8032), C2SP notes and cosignatures, the
+  WAL hash chain and the RFC 9162 root. `tests/fixtures/bundle` is checked by
+  it and by `calybris-verify`.
 
 ### Checks
 
@@ -62,6 +92,26 @@ four questions it answers, are in `docs/TRUST.md`.
 - `tests/rfc3161.rs`, `tests/opentimestamps.rs`: tokens from OpenSSL, FreeTSA
   and DigiCert; reference-client proofs and Bitcoin block 358391.
 - Fuzz targets `note_decode`, `ots_decode`, `tsa_decode`.
+- `tests/trust_operations.rs`: a witness's state corrupted, lost and restored
+  from a stale backup, witnesses running at once, and a log key rotated
+  through a checkpoint both keys sign. `tests/trust_edges.rs`: the layer's
+  refusals at its edges. The command line's every refusal, stamping and
+  upgrading against stand-in calendars, and a real Bitcoin proof through
+  `verify`.
+- `tests/ope_reference.rs`: the estimators against a reference computed from
+  their definitions, across propensity regimes and reward distributions.
+
+### Documentation
+
+- `docs/KEY_MANAGEMENT.md`: checkpoint log keys (generation, rotation,
+  compromise), witness keys and state, and pinned TSA certificates.
+- `docs/TRUST.md`: exactly what `FULL VERIFICATION COMPLETE` establishes, and
+  what it does not (it does not replay decisions).
+- `docs/BENCHMARKS.md`: what the headline figure covers, the cost of a logged
+  decision, and the trust layer measured at up to ten million records
+  (`examples/trust_costs.rs`).
+- `PolicySnapshot::try_new`, `verify::audit_bundle` and the examples point new
+  code at `try_new_trusted` and the fail-closed `verified_audit_bundle`.
 
 ### Dependencies
 

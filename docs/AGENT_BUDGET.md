@@ -17,7 +17,7 @@ run = AgentBudget(100_000_000)  # 1 USD = 100 cents * 1,000,000 microcents
 For an immediately runnable example without credentials:
 
 ```console
-pip install calybris==1.0.0
+pip install calybris==1.3.0
 python examples/agent_budget.py
 ```
 

@@ -67,7 +67,7 @@ your inputs.
 
 ```toml
 [dependencies]
-calybris-core = "1.0"
+calybris-core = "1.3"
 ```
 
 ```rust
@@ -100,7 +100,8 @@ let models = vec![
         output_cost_microunits_per_million_tokens: 125,
     },
 ];
-let snapshot = PolicySnapshot::try_new(1, 1, 9600, 5500, 3500, 2, models)?;
+// `try_new_trusted` for new code; `try_new` exists to replay older policies.
+let snapshot = PolicySnapshot::try_new_trusted(1, 1, 9600, 5500, 3500, 2, models)?;
 
 let input = KernelInput {
     request_sequence: 1,

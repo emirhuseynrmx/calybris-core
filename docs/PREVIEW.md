@@ -72,7 +72,11 @@ tree commits to what the hash chain already commits to.
 
 The tree is the standard one, checked against the Certificate Transparency
 reference vectors, so any RFC 9162 verifier can check these proofs without this
-crate. `TreeHead::digest` (`calymth1`) is the 32 bytes a signer or an
+crate. The free functions recompute every subtree a proof needs, so a proof
+costs time linear in the log. `MerkleTree` (1.3.0) keeps each complete
+subtree's hash as records arrive: a root or proof for any size then takes
+`O(log² n)`, about two microseconds at ten million records, for 64 bytes of
+memory per record ([BENCHMARKS.md](BENCHMARKS.md)). `TreeHead::digest` (`calymth1`) is the 32 bytes a signer or an
 independent witness signs.
 
 What it does not claim: publication or witnessing. It produces and checks the
@@ -91,8 +95,10 @@ takes an alternative on `rate_bps` of requests. The draw is
 `HMAC-SHA256(key, "calyexp1" ‖ policy digest ‖ input digest)`: fixed by the
 policy, the request and the key, unpredictable without the key, and replayed
 exactly by `verify`. The record carries the exact probability of the choice as
-a fraction, and `ExplorationRecord::selection()` turns it into the `Selection`
-an `Outcome` already records.
+a fraction (`ExplorationRecord::propensity`), and
+`ExplorationRecord::selection()` turns it into the `Selection` an `Outcome`
+already records, in whole basis points. Keep the fraction: below a basis point
+the rounding is not small (see `ope`).
 
 What it does not claim: public verifiability. Only a holder of the key can
 replay the draw. A draw anyone can check needs a verifiable random function
@@ -107,8 +113,26 @@ propensities — Li et al., [arXiv:1003.0146](https://arxiv.org/abs/1003.0146).
 `evaluate(target, logs, reward, clip)` estimates a target policy's mean reward
 from `(request, Outcome)` pairs, using the propensity each outcome recorded:
 IPS with an approximate 95% interval, self-normalised IPS, and the effective
-sample size. Outcomes with no propensity (a person chose) or paired with the
-wrong request are excluded and counted.
+sample size. Outcomes that do not validate, carry no propensity (a person
+chose) or are paired with the wrong request are excluded and counted; a clip
+that is not a positive, finite weight is refused (`OpeError::InvalidClip`).
+
+**Exact propensities (1.3.0).** An `Outcome` records its propensity in whole
+basis points, rounded and never below one. At an exploration rate of 1 bp over
+22 near-best candidates an alternative's true probability is 0.045 bp, so the
+rounded weight is 22 times too small. `evaluate_exact` takes the exact
+`ope::Propensity` from each `ExplorationRecord` and excludes a record whose
+fraction does not round to what its outcome recorded. `tests/preview.rs`
+checks, on a population drawn exactly as the mechanism draws, that the exact
+estimate equals the true value and the rounded one does not;
+`tests/ope_reference.rs` holds the estimators against a reference written from
+their definitions. `Estimate::warnings` names the conditions under which an
+estimate or its interval should not be taken at face value: few records, a
+low effective sample size, no matches, unsupported choices, clipping.
+
+In 1.3.0 this module's API changed, as preview APIs may: `LoggedChoice` holds
+a `Propensity` in place of `propensity_bps`, and `estimate` and `evaluate`
+return `Result<Estimate, OpeError>` in place of `Option<Estimate>`.
 
 What it does not claim, stated in the result: a log written only by the kernel's
 own ranking cannot speak for choices it never made. Those records are counted in
@@ -169,6 +193,13 @@ C2SP tlog-witness. `audit` counts a quorum of trusted witnesses, follows one
 log through time, turns two conflicting checkpoints into transferable proof of a
 split view, proves a record's inclusion, and decides whether a signature by a
 revoked key predates its revocation.
+
+A witness's state fails closed: `FileStore::create` (`calybris-verify witness
+init`) starts one and never overwrites an existing state, and
+`FileStore::open` refuses a missing or unreadable one rather than start from
+nothing. `tests/trust_operations.rs` covers corrupted, lost and rolled-back
+state, witnesses running at once, and a log key rotated through a checkpoint
+both keys sign.
 
 What it does not claim: that witnesses are independent of each other or of the
 operator; choosing them is the deployment's decision.

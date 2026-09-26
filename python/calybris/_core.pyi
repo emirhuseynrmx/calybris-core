@@ -203,7 +203,11 @@ class PolicySnapshot:
     def decision_margin(self, input: KernelInput) -> dict[str, Any] | None: ...
     def audit_bundle(
         self, input: KernelInput, decision: KernelDecision
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Not fail-closed: a decision that does not replay still gets a bundle,
+        with ``replay_valid`` false. Use ``verified_audit_bundle`` at a trust
+        boundary."""
+        ...
     def verified_audit_bundle(
         self, input: KernelInput, decision: KernelDecision
     ) -> dict[str, Any]:
