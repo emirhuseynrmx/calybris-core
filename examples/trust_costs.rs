@@ -77,7 +77,7 @@ fn spread(i: usize, n: u64) -> u64 {
 fn merkle(n: usize) {
     let leaves: Vec<Hash> = (0..n as u64).map(|i| leaf_hash(&i.to_be_bytes())).collect();
     let size = n as u64;
-    let mut tree = MerkleTree::new();
+    let mut tree = MerkleTree::default();
     let build = once(|| {
         for h in &leaves {
             tree.push(*h);
@@ -211,7 +211,7 @@ fn trust() {
         })
         .collect();
     let signer = || WitnessSigner::from_seed("w.example", &[2; 32]).unwrap();
-    let mut w = Witness::new(signer(), MemoryStore::new());
+    let mut w = Witness::new(signer(), MemoryStore::default());
     w.add_log(ORIGIN, log.verifier().clone());
     let mut k = 0;
     let memory = median(199, |_| {

@@ -175,7 +175,8 @@ def merkle_root(leaves: list[bytes]) -> bytes:
 
 def wal_leaves(path: Path, hmac_key: bytes | None) -> tuple[list[bytes], str | None]:
     """The Merkle leaves of a WAL, or the first place its hash chain breaks."""
-    previous, leaves = "genesis", []
+    previous = "genesis"
+    leaves: list[bytes] = []
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         entry = json.loads(line)
         # The chain hashes the data exactly as written, and "data" is the
@@ -200,15 +201,67 @@ OTS_MAGIC = b"\x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x9
 
 
 class Report:
+    """Counts what passed and what failed, printing each as it is decided."""
+
     def __init__(self) -> None:
+        self.passed = 0
         self.failures = 0
 
     def ok(self, what: str, detail: str) -> None:
+        self.passed += 1
         print(f"  ok      {what}: {detail}")
 
     def fail(self, what: str, detail: str) -> None:
         self.failures += 1
         print(f"  FAILED  {what}: {detail}")
+
+
+def check_log(r: Report, body: str, signatures: list, log: Key) -> tuple[bytes, str] | None:
+    """The log's own signature line, if it verifies."""
+    found = signature_by(signatures, log)
+    if found and log.algorithm == 0x01 and ed25519_verify(log.public, body.encode(), found[0]):
+        r.ok("log signature", f"{log.name} (the operator's own)")
+        return found
+    r.fail("log signature", f"no valid signature by {log.name}")
+    return None
+
+
+def check_witness(r: Report, body: str, signatures: list, w: Key) -> None:
+    cosig = signature_by(signatures, w)
+    when = cosigned_at(body, cosig[0], w) if cosig and w.algorithm == 0x04 else None
+    if when is None:
+        r.fail("witness", f"no valid cosignature by {w.name}")
+    else:
+        r.ok("witness", f"{w.name} cosigned at Unix time {when}")
+
+
+def check_stamped(r: Report, signed_path: Path, expected: bytes) -> None:
+    """The bytes that were timestamped, and the OpenTimestamps file over them."""
+    signed = signed_path.read_bytes()
+    if signed == expected:
+        r.ok("stamped bytes", f"{signed_path.name} is the note with the log's signature")
+    else:
+        r.fail("stamped bytes", f"{signed_path.name} is not the log-signed note")
+    ots = signed_path.with_name(f"{signed_path.name}.ots")
+    if not ots.exists():
+        return
+    proof, digest = ots.read_bytes(), hashlib.sha256(signed).digest()
+    start = len(OTS_MAGIC) + 2  # the major version and the SHA-256 tag
+    if proof.startswith(OTS_MAGIC) and proof[start : start + 32] == digest:
+        r.ok("OpenTimestamps file", f"is a proof of SHA-256 {digest.hex()}")
+    else:
+        r.fail("OpenTimestamps file", "is not a proof of the stamped bytes")
+
+
+def check_wal(r: Report, wal_path: Path, hmac_key: bytes | None, size: int, root: bytes) -> None:
+    leaves, broken = wal_leaves(wal_path, hmac_key)
+    if broken:
+        r.fail("WAL", broken)
+    elif len(leaves) < size or merkle_root(leaves[:size]) != root:
+        r.fail("Merkle root", "the WAL does not reproduce the checkpoint root")
+    else:
+        r.ok("WAL chain", f"{len(leaves)} entries, each hashing its predecessor")
+        r.ok("Merkle root", f"the first {size} entries reproduce it (RFC 9162)")
 
 
 def verify(
@@ -225,55 +278,24 @@ def verify(
     origin, size, root = lines[0], int(lines[1]), base64.b64decode(lines[2], validate=True)
     print(f"checkpoint {origin}, {size} records, root {root.hex()}")
 
-    log = Key((bundle / log_key).read_text(encoding="utf-8"))
-    found = signature_by(signatures, log)
-    if found and log.algorithm == 0x01 and ed25519_verify(log.public, body.encode(), found[0]):
-        r.ok("log signature", f"{log.name} (the operator's own)")
-    else:
-        r.fail("log signature", f"no valid signature by {log.name}")
-
+    found = check_log(r, body, signatures, Key((bundle / log_key).read_text(encoding="utf-8")))
     for path in witness_keys:
-        w = Key((bundle / path).read_text(encoding="utf-8"))
-        cosig = signature_by(signatures, w)
-        when = cosigned_at(body, cosig[0], w) if cosig and w.algorithm == 0x04 else None
-        if when is None:
-            r.fail("witness", f"no valid cosignature by {w.name}")
-        else:
-            r.ok("witness", f"{w.name} cosigned at Unix time {when}")
-
+        check_witness(r, body, signatures, Key((bundle / path).read_text(encoding="utf-8")))
     signed_path = bundle / f"{note_name}.signed"
     if signed_path.exists() and found:
-        signed = signed_path.read_bytes()
-        if signed == f"{body}\n{found[1]}\n".encode():
-            r.ok("stamped bytes", f"{signed_path.name} is the note with the log's signature")
-        else:
-            r.fail("stamped bytes", f"{signed_path.name} is not the log-signed note")
-        ots = bundle / f"{note_name}.signed.ots"
-        if ots.exists():
-            proof, digest = ots.read_bytes(), hashlib.sha256(signed).digest()
-            start = len(OTS_MAGIC) + 2  # the major version and the SHA-256 tag
-            if proof.startswith(OTS_MAGIC) and proof[start : start + 32] == digest:
-                r.ok("OpenTimestamps file", f"is a proof of SHA-256 {digest.hex()}")
-            else:
-                r.fail("OpenTimestamps file", "is not a proof of the stamped bytes")
-
-    wal_path = bundle / wal
-    if wal_path.exists():
-        leaves, broken = wal_leaves(wal_path, hmac_key)
-        if broken:
-            r.fail("WAL", broken)
-        elif len(leaves) < size or merkle_root(leaves[:size]) != root:
-            r.fail("Merkle root", "the WAL does not reproduce the checkpoint root")
-        else:
-            r.ok("WAL chain", f"{len(leaves)} entries, each hashing its predecessor")
-            r.ok("Merkle root", f"the first {size} entries reproduce it (RFC 9162)")
+        check_stamped(r, signed_path, f"{body}\n{found[1]}\n".encode())
+    if (bundle / wal).exists():
+        check_wal(r, bundle / wal, hmac_key, size, root)
 
     print("\nTimestamps, with their own tools:")
     print(f"  openssl ts -verify -data {note_name}.signed -in {note_name}.signed.tsr \\")
     print("      -CAfile CA.pem")
     print(f"  ots verify {note_name}.signed.ots   (or both files on https://opentimestamps.org)")
-    print("\nRESULT:", "FAILED" if r.failures else "verified without Calybris")
-    return 1 if r.failures else 0
+    if r.failures:
+        print(f"\nRESULT: FAILED ({r.failures} of {r.passed + r.failures} checks)")
+        return 1
+    print(f"\nRESULT: verified without Calybris ({r.passed} checks)")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

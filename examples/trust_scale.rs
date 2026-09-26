@@ -5,7 +5,7 @@ use std::time::Instant;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("leaves,build_ms,root_us,inclusion_us,consistency_us,allocated_hash_bytes");
     for size in [100_000_u64, 1_000_000, 10_000_000] {
-        let mut tree = MerkleTree::new();
+        let mut tree = MerkleTree::default();
         let start = Instant::now();
         for i in 0..size {
             tree.push(leaf_hash(&i.to_le_bytes()));

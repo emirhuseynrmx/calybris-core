@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn a_tree_grown_leaf_by_leaf_equals_one_built_at_once() {
         let d = leaves(33);
-        let mut grown = MerkleTree::new();
+        let mut grown = MerkleTree::default();
         assert!(grown.is_empty());
         for (i, h) in d.iter().enumerate() {
             grown.push(*h);

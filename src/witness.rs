@@ -874,7 +874,7 @@ mod tests {
     fn a_state_write_failure_returns_no_signature() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("state-dir");
-        std::fs::create_dir(&parent).unwrap();
+        std::fs::create_dir_all(&parent).unwrap();
         let path = parent.join("state.json");
         let log = log();
         let store = FileStore::create(&path).unwrap();

@@ -1389,12 +1389,12 @@ mod tests {
             for stream in listener.incoming().take(3) {
                 let mut stream = stream.unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
+                let mut line = String::default();
                 reader.read_line(&mut line).unwrap();
                 let path = line.split(' ').nth(1).unwrap().to_owned();
                 let mut length = 0;
                 loop {
-                    let mut h = String::new();
+                    let mut h = String::default();
                     reader.read_line(&mut h).unwrap();
                     if h.trim().is_empty() {
                         break;
