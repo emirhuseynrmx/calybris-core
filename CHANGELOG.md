@@ -85,13 +85,16 @@ four questions it answers, are in `docs/TRUST.md`.
   usual umask it was readable by other users, and a second run replaced an
   existing key. It now creates the `.skey` with mode `0600` (on Windows,
   restricted to its owner with `icacls` before the secret is written),
-  never replaces a `.skey` or `.vkey`, and removes the `.skey` if the
-  `.vkey` cannot be written.
+  never replaces a `.skey` or `.vkey`, and if either cannot be written
+  removes whatever it had created, a partly written `.vkey` included.
 - `witness cosign --append-to` appended to whatever note it was given. It now
   refuses, before signing and with the witness state untouched, a note that
   is not the checkpoint in the request or already carries this witness's
-  signature; it replaces the note through a rename, and leaves it as it is
-  if it changed while the witness was signing.
+  signature. Witnesses appending to one note at once no longer lose each
+  other's lines: each reads the note again under an exclusive lock on
+  `<note>.lock`, adds its cosignature to what is there, and replaces the note
+  through a rename. A note that became another checkpoint meanwhile is left
+  as it is.
 - A `cosignature/v1` time of zero, which C2SP tlog-witness forbids, or above
   `2^63 - 1`, which tlog-cosignature forbids, is neither made
   (`WitnessSigner::cosign`) nor accepted (`SignedNote::cosignature_time`,
@@ -112,6 +115,14 @@ four questions it answers, are in `docs/TRUST.md`.
   it and by `calybris-verify`.
 
 ### Checks
+
+- The 10,000-case property run took half an hour, almost all of it in
+  `tests/split_view.rs` signing with unoptimized curve arithmetic. The
+  test profile now optimizes `curve25519-dalek`, `ed25519-dalek` and `sha2`
+  (this crate itself is unchanged), and the run takes about a minute and a
+  half. A newer push to a pull request cancels the CI, Security and Kani
+  runs it supersedes, and the long jobs have time limits, so a hang fails
+  instead of holding a runner for six hours.
 
 - `tests/acvp_ml_dsa.rs`: NIST ACVP ML-DSA-65 vectors for key generation,
   deterministic signing with a context, and verification, through the calls

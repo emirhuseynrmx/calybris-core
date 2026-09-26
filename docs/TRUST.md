@@ -205,9 +205,11 @@ refuses to cosign with a clock reading zero (C2SP tlog-witness forbids a
 cosignature without a time), and `verify` does not count such a
 cosignature. `--append-to` is checked before anything is signed: the note
 must be the checkpoint in the request and carry no signature from this
-witness yet. The note is then replaced in one rename, and left alone if it
-changed while the witness was signing; the cosignature is on standard output
-either way. A witness
+witness yet. Witnesses may append to one note at the same time: each reads
+the note again under an exclusive lock on `<note>.lock` (kept beside it),
+adds its line to whatever the others wrote, and replaces the note in one
+rename, so no cosignature is lost. A note that meanwhile became another
+checkpoint is left alone; the cosignature is on standard output either way. A witness
 restored from an older backup would cosign a fork of what it forgot; see
 [KEY_MANAGEMENT.md](KEY_MANAGEMENT.md) §5 for backups, and for retiring a
 witness whose state is lost.

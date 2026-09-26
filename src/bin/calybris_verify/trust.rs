@@ -130,23 +130,48 @@ fn write_new_secret(path: &str, bytes: &[u8]) -> Result<(), Fail> {
     let file = open
         .open(path)
         .map_err(|e| format!("cannot create {path}: {e}"))?;
-    // `fill_secret` owns the file, so it is closed before it is removed.
-    let filled = fill_secret(file, path, bytes);
+    fill_or_remove(path, file, |file| fill_secret(file, path, bytes))
+}
+
+/// Creates `path`, which must not exist yet, and writes `bytes` to it; a
+/// file this call created is removed again if the write fails.
+fn write_new_public(path: &str, bytes: &[u8]) -> Result<(), Fail> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("cannot create {path}: {e}"))?;
+    fill_or_remove(path, file, |file| write_and_sync(file, path, bytes))
+}
+
+/// Runs `fill` on `file`, which this process has just created at `path`,
+/// and removes `path` if it fails, so no partial file is left behind. `fill`
+/// owns the file, so it is closed before the removal.
+fn fill_or_remove(
+    path: &str,
+    file: std::fs::File,
+    fill: impl FnOnce(std::fs::File) -> Result<(), Fail>,
+) -> Result<(), Fail> {
+    let filled = fill(file);
     if filled.is_err() {
         let _ = std::fs::remove_file(path);
     }
     filled
 }
 
-/// Restricts the new, still empty `file` to its owner where the platform
-/// needs a separate step for that, then writes the secret and syncs.
-fn fill_secret(mut file: std::fs::File, path: &str, bytes: &[u8]) -> Result<(), Fail> {
+fn write_and_sync(mut file: std::fs::File, path: &str, bytes: &[u8]) -> Result<(), Fail> {
     use std::io::Write as _;
-    #[cfg(windows)]
-    restrict_to_owner(path)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(|e| format!("cannot write {path}: {e}"))
+}
+
+/// Restricts the new, still empty `file` to its owner where the platform
+/// needs a separate step for that, then writes the secret and syncs.
+fn fill_secret(file: std::fs::File, path: &str, bytes: &[u8]) -> Result<(), Fail> {
+    #[cfg(windows)]
+    restrict_to_owner(path)?;
+    write_and_sync(file, path, bytes)
 }
 
 /// Replaces the access list of `path` with a single entry giving its owner
@@ -172,9 +197,9 @@ fn restrict_to_owner(path: &str) -> Result<(), Fail> {
 }
 
 /// Writes a new key pair: the secret through [`write_new_secret`], the public
-/// key with `create_new` too. Neither file may exist; an existing key is
-/// never replaced. If the public key cannot be written, the secret just
-/// written is removed, so a failed keygen leaves neither file behind.
+/// key through [`write_new_public`]. Neither file may exist; an existing key
+/// is never replaced. If either cannot be written, whatever this call created
+/// is removed, so a failed keygen leaves neither file behind.
 fn write_key_pair(skey_path: &str, skey: &str, vkey_path: &str, vkey: &str) -> Result<(), Fail> {
     for path in [skey_path, vkey_path] {
         if std::fs::symlink_metadata(path).is_ok() {
@@ -184,21 +209,11 @@ fn write_key_pair(skey_path: &str, skey: &str, vkey_path: &str, vkey: &str) -> R
         }
     }
     write_new_secret(skey_path, format!("{skey}\n").as_bytes())?;
-    let public = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(vkey_path)
-        .and_then(|mut file| {
-            use std::io::Write as _;
-            file.write_all(format!("{vkey}\n").as_bytes())?;
-            file.sync_all()
-        });
-    if let Err(e) = public {
-        let removed = std::fs::remove_file(skey_path);
-        return Err(match removed {
-            Ok(()) => format!("cannot write {vkey_path}: {e}; removed {skey_path}"),
+    if let Err(e) = write_new_public(vkey_path, format!("{vkey}\n").as_bytes()) {
+        return Err(match std::fs::remove_file(skey_path) {
+            Ok(()) => format!("{e}; removed {skey_path}"),
             Err(r) => format!(
-                "cannot write {vkey_path}: {e}; and cannot remove {skey_path}: {r}. \
+                "{e}; and cannot remove {skey_path}: {r}. \
                  Delete it: its public key was never written"
             ),
         });
@@ -374,12 +389,11 @@ fn init(f: &Flags) -> Result<ExitCode, Fail> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The note `--append-to` names, as read before the witness signs: the path,
-/// its bytes, and the note they hold.
+/// The note `--append-to` names, checked before the witness signs: its path
+/// and the checkpoint text the cosignature will be over.
 struct AppendTarget<'a> {
     path: &'a str,
-    read: String,
-    note: SignedNote,
+    text: String,
 }
 
 /// Reads the `--append-to` note and checks it can take this witness's
@@ -391,8 +405,7 @@ fn append_target<'a>(
     req: &AddCheckpoint,
     signer: &WitnessSigner,
 ) -> Result<AppendTarget<'a>, Fail> {
-    let read = read_text(path)?;
-    let note = SignedNote::parse(&read).map_err(|e| format!("{path}: {e}"))?;
+    let note = SignedNote::parse(&read_text(path)?).map_err(|e| format!("{path}: {e}"))?;
     let requested = SignedNote::parse(&req.note).map_err(|e| format!("the request: {e}"))?;
     if note.text() != requested.text() {
         return Err(format!(
@@ -415,28 +428,52 @@ fn append_target<'a>(
             "{path} has no room for another signature; nothing was signed"
         ));
     }
-    Ok(AppendTarget { path, read, note })
+    Ok(AppendTarget {
+        path,
+        text: note.text().to_owned(),
+    })
 }
 
-/// Adds `sig` to the target note and replaces the file in one rename, but
-/// only if the file still holds what [`append_target`] read: a note changed
-/// meanwhile is left as it is, and the cosignature (already on standard
-/// output) is not written anywhere else.
+/// Adds `sig` to the note at the target's path.
+///
+/// Several witnesses may append to one note at once, so the read, the check
+/// and the replacement happen under an exclusive lock on `<note>.lock`: the
+/// note is read again under the lock, must still be the checkpoint that was
+/// signed, and takes the cosignature beside whatever lines others added
+/// meanwhile. Nobody's cosignature is lost to a later writer. A note that
+/// now holds another checkpoint is left as it is; the cosignature is on
+/// standard output either way.
 fn append_cosignature(target: AppendTarget<'_>, sig: NoteSignature) -> Result<(), Fail> {
-    let AppendTarget {
-        path,
-        read,
-        mut note,
-    } = target;
-    if read_text(path)? != read {
+    let path = target.path;
+    let _lock = lock_beside(path)?;
+    let mut note = SignedNote::parse(&read_text(path)?).map_err(|e| format!("{path}: {e}"))?;
+    if note.text() != target.text {
         return Err(format!(
-            "{path} changed while the witness was signing, so it was left as it is; \
-             the cosignature is on standard output"
+            "{path} was changed to another checkpoint while the witness was signing, \
+             so it was left as it is; the cosignature is on standard output"
         ));
     }
     note.add_signature(sig)
         .map_err(|e| format!("{path}: {e}"))?;
     replace_file(path, note.render().as_bytes())
+}
+
+/// Takes an exclusive lock on `<path>.lock`, created if missing and never
+/// removed (removing it would let two writers lock two different files). The
+/// lock is released when the returned file is dropped.
+fn lock_beside(path: &str) -> Result<std::fs::File, Fail> {
+    use fs2::FileExt as _;
+    let lock_path = format!("{path}.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open {lock_path}: {e}"))?;
+    lock.lock_exclusive()
+        .map_err(|e| format!("cannot lock {lock_path}: {e}"))?;
+    Ok(lock)
 }
 
 /// Replaces `path` with `bytes` through a new file beside it and a rename, so
@@ -1289,16 +1326,27 @@ mod tests {
         assert!(err.starts_with("cannot write"), "{err}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 
+        // A file this call created and then could not write is removed: here
+        // the handle is read-only, so the write fails after the creation.
+        let partial = dir.path().join("k.vkey");
+        std::fs::write(&partial, b"").unwrap();
+        let read_only = std::fs::File::open(&partial).unwrap();
+        let p = partial.to_str().unwrap();
+        let err = fill_or_remove(p, read_only, |f| write_and_sync(f, p, b"k.example+1+AA\n"))
+            .unwrap_err();
+        assert!(err.starts_with("cannot write"), "{err}");
+        assert!(!partial.exists());
+
         // A secret that cannot be created leaves nothing either.
         let nowhere = dir.path().join("missing").join("k.skey");
         assert!(write_new_secret(nowhere.to_str().unwrap(), b"secret").is_err());
         assert!(!nowhere.exists());
     }
 
-    /// A note that changes between the check before signing and the write
-    /// after it is left as the other writer made it.
+    /// Another witness's line added while this one signs is kept beside it;
+    /// a note turned into another checkpoint meanwhile is left alone.
     #[test]
-    fn a_note_changed_while_the_witness_signs_is_not_overwritten() {
+    fn a_note_changed_while_the_witness_signs_keeps_every_cosignature() {
         let dir = tempfile::tempdir().unwrap();
         let (note, _) = note_in(dir.path());
         let text = std::fs::read_to_string(&note).unwrap();
@@ -1317,24 +1365,82 @@ mod tests {
             .add_signature(other.cosign(&body, 1).unwrap())
             .unwrap();
         std::fs::write(&note, changed.render()).unwrap();
-        let err = append_cosignature(target, w.cosign(&body, 2).unwrap()).unwrap_err();
-        assert!(
-            err.contains("changed while the witness was signing"),
-            "{err}"
-        );
-        assert_eq!(std::fs::read_to_string(&note).unwrap(), changed.render());
-
-        // Read again, it takes the cosignature beside the other one.
-        let target = append_target(&note, &req, &w).unwrap();
         append_cosignature(target, w.cosign(&body, 2).unwrap()).unwrap();
         let done = SignedNote::parse(&std::fs::read_to_string(&note).unwrap()).unwrap();
         assert_eq!(done.cosignature_time(w.verifier()), Ok(2));
         assert_eq!(done.cosignature_time(other.verifier()), Ok(1));
+
+        // Replaced by a checkpoint of another size, it is not touched.
+        let dup = append_target(&note, &req, &other).err().unwrap();
+        assert!(dup.contains("already carries"), "{dup}");
+        let third = WitnessSigner::from_seed("third.example", &[7; 32]).unwrap();
+        let target = append_target(&note, &req, &third).unwrap();
+        let log = LogSigner::from_seed("decisions.example/log", &[1; 32]).unwrap();
+        let bigger = Checkpoint::new(
+            "decisions.example/log",
+            TreeHead {
+                size: 4,
+                root: [8; 32],
+            },
+        )
+        .unwrap();
+        let replaced = log.sign(&bigger).render();
+        std::fs::write(&note, &replaced).unwrap();
+        let err = append_cosignature(target, third.cosign(&body, 3).unwrap()).unwrap_err();
+        assert!(err.contains("changed to another checkpoint"), "{err}");
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), replaced);
+
         let names: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    }
+
+    /// Witnesses that all pass the check before signing and then append at
+    /// the same moment each end up in the note: the lock makes every
+    /// read-and-replace see the lines written before it.
+    #[test]
+    fn witnesses_appending_at_once_each_keep_their_cosignature() {
+        const N: usize = 12;
+        let dir = tempfile::tempdir().unwrap();
+        let (note, _) = note_in(dir.path());
+        let text = std::fs::read_to_string(&note).unwrap();
+        let body = SignedNote::parse(&text).unwrap().text().to_owned();
+        let req = AddCheckpoint {
+            old_size: 0,
+            proof: Vec::new(),
+            note: text,
+        };
+        let signers: Vec<WitnessSigner> = (0..N)
+            .map(|i| {
+                let seed = [u8::try_from(60 + i).unwrap(); 32];
+                WitnessSigner::from_seed(&format!("w{i}.example"), &seed).unwrap()
+            })
+            .collect();
+        let start = std::sync::Barrier::new(N);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = signers
+                .iter()
+                .map(|w| {
+                    let (note, req, body, start) = (&note, &req, &body, &start);
+                    scope.spawn(move || {
+                        let target = append_target(note, req, w).unwrap();
+                        let sig = w.cosign(body, 5).unwrap();
+                        start.wait();
+                        append_cosignature(target, sig)
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
+        });
+        let done = SignedNote::parse(&std::fs::read_to_string(&note).unwrap()).unwrap();
+        assert_eq!(done.signatures().len(), N + 1);
+        for w in &signers {
+            assert_eq!(done.cosignature_time(w.verifier()), Ok(5));
+        }
     }
 
     #[test]

@@ -10,6 +10,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same pull request supersedes a run still in progress;
+# pushes to main and scheduled runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   msrv:
     name: MSRV (1.85.0)
@@ -253,6 +259,8 @@ jobs:
   fuzz:
     name: Fuzz targets (nightly)
     runs-on: ubuntu-latest
+    # About ten minutes; a hang fails here instead of after six hours.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 

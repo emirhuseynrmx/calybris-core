@@ -228,3 +228,18 @@ required-features = ["wal", "provenance"]
 [profile.release]
 lto = true
 codegen-units = 1
+
+# The property tests sign and verify tens of thousands of times, and CI runs
+# them at 10,000 cases in the test profile. Unoptimized curve arithmetic and
+# hashing made that step take half an hour. Only these dependencies are
+# optimized; this crate keeps the test profile, so coverage and debug
+# assertions are unchanged, and nothing here reaches a crate that depends on
+# calybris-core.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

@@ -642,6 +642,83 @@ fn a_cosignature_is_appended_only_to_the_checkpoint_it_signs() {
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
+/// Separate witness processes appending to one note at the same moment: each
+/// cosignature ends up in it, none replaced by a later writer.
+#[test]
+fn witness_processes_appending_at_once_each_keep_their_cosignature() {
+    const N: usize = 6;
+    let s = Setup::new();
+    let wal = s.p("decisions.wal.jsonl");
+    append(Path::new(&wal), 1, 3, 100_000);
+    s.checkpoint(&wal, "c.checkpoint", None);
+    let names: Vec<String> = (1..=N).map(|i| format!("p{i}")).collect();
+    for w in &names {
+        ok(&[
+            "checkpoint",
+            "keygen",
+            "--name",
+            &format!("{w}.example"),
+            "--kind",
+            "witness",
+            "--out",
+            &s.p(w),
+        ]);
+        ok(&[
+            "witness",
+            "init",
+            "--state",
+            &s.p(&format!("{w}.state.json")),
+        ]);
+    }
+    let req = ok(&[
+        "checkpoint",
+        "request",
+        &wal,
+        "--note",
+        &s.p("c.checkpoint"),
+        "--old",
+        "0",
+    ]);
+    let req_path = s.p("c.req");
+    std::fs::write(&req_path, req).unwrap();
+    let children: Vec<_> = names
+        .iter()
+        .map(|w| {
+            Command::new(env!("CARGO_BIN_EXE_calybris-verify"))
+                .args([
+                    "witness",
+                    "cosign",
+                    &req_path,
+                    "--key",
+                    &s.p(&format!("{w}.skey")),
+                    "--log",
+                    &format!("{ORIGIN}={}", s.p("log.vkey")),
+                    "--state",
+                    &s.p(&format!("{w}.state.json")),
+                    "--now",
+                    "1000",
+                    "--append-to",
+                    &s.p("c.checkpoint"),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("start calybris-verify")
+        })
+        .collect();
+    // Every process is started before any is waited for.
+    for child in children {
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let note = SignedNote::parse(&std::fs::read_to_string(s.p("c.checkpoint")).unwrap()).unwrap();
+    assert_eq!(note.signatures().len(), N + 1, "{}", note.render());
+}
+
 /// A witness whose clock reads zero refuses, as C2SP tlog-witness requires,
 /// and does so before recording the checkpoint.
 #[test]
