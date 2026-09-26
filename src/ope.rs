@@ -315,6 +315,12 @@ fn target_choice(target: &PolicySnapshot, input: KernelInput) -> u32 {
     }
 }
 
+/// Whether an outcome may be estimated from: it validates, and it names the
+/// request it is paired with.
+fn usable(input: &KernelInput, outcome: &Outcome) -> bool {
+    outcome.validate().is_ok() && outcome.identity.input_digest == input_digest(input)
+}
+
 /// Estimates `target`'s mean reward from logged `(request, outcome)` pairs,
 /// using the propensity each outcome recorded in basis points.
 ///
@@ -322,8 +328,9 @@ fn target_choice(target: &PolicySnapshot, input: KernelInput) -> u32 {
 /// which holds for the kernel's own choices; for exploration logs use
 /// [`evaluate_exact`] (see the module documentation). The target's choice is
 /// whatever `target.prescribe(request)` selects. An outcome is used only if
-/// its recorded input digest matches the request it is paired with, it has a
-/// propensity (a person's choice has none), and `reward` returns a value.
+/// it validates ([`Outcome::validate`]), its recorded input digest matches the
+/// request it is paired with, it has a propensity (a person's choice has
+/// none), and `reward` returns a value.
 pub fn evaluate(
     target: &PolicySnapshot,
     logs: &[(KernelInput, Outcome)],
@@ -341,7 +348,7 @@ pub fn evaluate(
             excluded += 1;
             continue;
         };
-        if outcome.identity.input_digest != input_digest(input) {
+        if !usable(input, outcome) {
             excluded += 1;
             continue;
         }
@@ -379,9 +386,7 @@ pub fn evaluate_exact(
             excluded += 1;
             continue;
         };
-        if recorded != Some(propensity.to_bps())
-            || outcome.identity.input_digest != input_digest(input)
-        {
+        if recorded != Some(propensity.to_bps()) || !usable(input, outcome) {
             excluded += 1;
             continue;
         }

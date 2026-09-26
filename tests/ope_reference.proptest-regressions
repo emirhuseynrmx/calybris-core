@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5802c0f487c42165f562a41716cfa4f052997f5db5fccb564d60baf1c5bb5a1a # shrinks to p = Propensity { numerator: 1, denominator: 20000 }
+cc 0ed9e25a628081e90972bb50a7adbe9b27210229376e7d0dbee9f2a97c85009e # shrinks to records = [LoggedChoice { acted_model_id: 1, propensity: Propensity { numerator: 1, denominator: 20000 }, reward: 1.0, target_model_id: 1 }], clip = None

@@ -957,6 +957,114 @@ mod tests {
         assert!(d.merge_calendar_response(&[0; 32], &body).is_err());
     }
 
+    /// Every operation the format has, in one proof: each is read, applied
+    /// where this module evaluates it, carried where it does not, and written
+    /// back byte for byte; branches that share an operation are merged.
+    #[test]
+    fn every_operation_round_trips_and_shared_branches_merge() {
+        let att = |out: &mut Vec<u8>, height: u8| {
+            out.push(TAG_ATTESTATION);
+            write_attestation(
+                out,
+                &Attestation::Bitcoin {
+                    height: height.into(),
+                },
+            );
+        };
+        let mut body = Vec::new();
+        for (tag, arg) in [
+            (TAG_SHA1, None),
+            (TAG_RIPEMD160, None),
+            (TAG_KECCAK256, None),
+            (TAG_REVERSE, None),
+            (TAG_HEXLIFY, None),
+            (TAG_PREPEND, Some(b"pre".as_slice())),
+        ] {
+            body.push(TAG_FORK);
+            body.push(tag);
+            if let Some(a) = arg {
+                write_varbytes(&mut body, a);
+            }
+            att(&mut body, tag);
+        }
+        body.push(TAG_SHA256);
+        att(&mut body, 1);
+        let msg = b"message".to_vec();
+        let t = Timestamp::deserialize(&body, &msg).unwrap();
+        assert_eq!(t.msg(), msg.as_slice());
+        let again = Timestamp::deserialize(&t.serialize(), &msg).unwrap();
+        assert_eq!(again, t);
+        let messages: Vec<Vec<u8>> = t.attestations().into_iter().map(|(m, _)| m).collect();
+        assert!(messages.contains(&b"egassem".to_vec()));
+        assert!(messages.contains(&b"6d657373616765".to_vec()));
+        assert!(messages.contains(&b"premessage".to_vec()));
+        assert!(messages.contains(&Ripemd160::digest(&msg).to_vec()));
+        // SHA-1 and Keccak branches are carried, but their messages unknown.
+        assert_eq!(messages.len(), 5);
+
+        // Two answers that share their first operation become one branch.
+        let mut merged = Timestamp::new(msg.clone());
+        for height in [7, 8] {
+            let mut b = vec![TAG_SHA256];
+            att(&mut b, height);
+            merged.merge(Timestamp::deserialize(&b, &msg).unwrap());
+        }
+        assert_eq!(merged.ops.len(), 1);
+        assert_eq!(merged.attestations().len(), 2);
+        assert!(Op::Append(vec![0; MAX_MSG]).apply(&msg).is_none());
+    }
+
+    #[test]
+    fn malformed_parts_are_refused_with_a_reason() {
+        let msg = [0_u8; 32];
+        let too_long_varuint = [0xff_u8; 11];
+        let mut r = Reader {
+            bytes: &too_long_varuint,
+            at: 0,
+        };
+        assert!(r.varuint().is_err());
+        for bad in [
+            vec![TAG_APPEND, 0],
+            vec![0x42],
+            vec![TAG_SHA256, TAG_ATTESTATION],
+        ] {
+            assert!(Timestamp::deserialize(&bad, &msg).is_err(), "{bad:?}");
+        }
+        let pending = |uri: &[u8]| {
+            let mut payload = Vec::new();
+            write_varbytes(&mut payload, uri);
+            let mut b = vec![TAG_ATTESTATION];
+            b.extend_from_slice(&PENDING);
+            write_varbytes(&mut b, &payload);
+            b
+        };
+        assert!(Timestamp::deserialize(&pending(b"https://ok.example"), &msg).is_ok());
+        assert!(Timestamp::deserialize(&pending(b"https://bad example"), &msg).is_err());
+        assert!(Timestamp::deserialize(&pending(b"\xff\xfe"), &msg).is_err());
+        let mut trailing = vec![TAG_ATTESTATION];
+        trailing.extend_from_slice(&BITCOIN);
+        write_varbytes(&mut trailing, &[5, 0]);
+        assert!(Timestamp::deserialize(&trailing, &msg).is_err());
+        let mut extra = pending(b"https://ok.example");
+        extra.push(0);
+        assert!(Timestamp::deserialize(&extra, &msg).is_err());
+
+        let huge = vec![0_u8; MAX_PROOF_BYTES + 1];
+        assert!(Timestamp::deserialize(&huge, &msg).is_err());
+        assert!(DetachedTimestamp::parse(&huge).is_err());
+
+        // `pending` lists calendars only, not blocks.
+        let mut d = DetachedTimestamp::new([1; 32]);
+        let c = d.prepare_submission([2; 16]);
+        let mut b = pending(b"https://ok.example");
+        b[0] = TAG_FORK;
+        b.insert(1, TAG_ATTESTATION);
+        b.push(TAG_ATTESTATION);
+        write_attestation(&mut b, &Attestation::Bitcoin { height: 9 });
+        d.merge_calendar_response(&c, &b).unwrap();
+        assert_eq!(d.pending().len(), 1);
+    }
+
     #[test]
     fn malformed_proofs_are_refused_not_panicked_on() {
         let good = {
