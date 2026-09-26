@@ -6,9 +6,11 @@
 //! calybris-verify chain  decisions.wal.jsonl [--anchor anchor.json] [--hmac-key-hex HEX]
 //! calybris-verify audit  decisions.wal.jsonl [--policy policy.json ...] [--anchor anchor.json] [--hmac-key-hex HEX]
 //! calybris-verify policy policy.json
+//! calybris-verify checkpoint …   (feature `preview`: signed checkpoints, OpenTimestamps, RFC 3161)
+//! calybris-verify witness cosign …
 //! ```
 //!
-//! - `chain`  — hash-chain integrity; with `--anchor`, clean suffix-truncation detection.
+//! - `chain` — hash-chain integrity; with `--anchor`, clean suffix-truncation detection.
 //! - `audit`  — chain + per-entry digest checks on audited records; with
 //!   one or more `--policy` artifacts, additionally resolves each record's
 //!   exact policy and replays every decision through the kernel.
@@ -26,6 +28,10 @@
 //!   "models": [ { "model_id": 1, "provider_id": 0, ... } ]
 //! }
 //! ```
+
+#[cfg(feature = "preview")]
+#[path = "calybris_verify/trust.rs"]
+mod trust;
 
 use std::io::Read;
 use std::path::Path;
@@ -213,6 +219,8 @@ fn usage() {
          Exit codes: 0 verified, 1 verification failure, 2 usage error.\n\
          Spec: docs/CALY_PROOF.md"
     );
+    #[cfg(feature = "preview")]
+    eprintln!("\nCheckpoints (docs/TRUST.md):\n{}", trust::USAGE);
 }
 
 fn cmd_chain(path: &Path, key: Option<&[u8]>, anchor: Option<&WalAnchor>, json: bool) -> ExitCode {
@@ -383,6 +391,17 @@ fn cmd_policy(path: &str, json: bool) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // argv[0] is intentionally discarded and never used for a security decision.
+    let raw: Vec<String> = std::env::args().skip(1).collect(); // nosemgrep: rust.lang.security.args.args
+    if let Some(command @ ("checkpoint" | "witness")) = raw.first().map(String::as_str) {
+        #[cfg(feature = "preview")]
+        return trust::run(command, &raw[1..]);
+        #[cfg(not(feature = "preview"))]
+        {
+            eprintln!("error: `{command}` needs calybris-verify built with the preview feature");
+            return ExitCode::from(2);
+        }
+    }
     let args = match parse_args() {
         Ok(args) => args,
         Err(error) => {

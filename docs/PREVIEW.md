@@ -1,7 +1,9 @@
 # Preview features
 
-Released in 1.2.0, behind the `preview` and `preview-pq` feature flags, and
-**not yet covered by the 1.x stability promise**. Their APIs may change in a
+Released in 1.2.0, behind the `preview`, `preview-pq` and (unreleased)
+`preview-tsa` feature flags, and **not yet covered by the 1.x stability
+promise**. Modules marked *unreleased* are on `main` but in no published
+version yet. Their APIs may change in a
 minor release. Each one graduates to a stable feature in a later 1.x release
 after review; graduating is an addition, so code that did not turn a preview
 flag on is unaffected either way.
@@ -13,6 +15,7 @@ features below read decisions, or add new artifacts under new digest tags.
 ```toml
 calybris-core = { version = "1.2", features = ["preview"] }      # everything below except hybrid signatures
 calybris-core = { version = "1.2", features = ["preview-pq"] }   # adds Ed25519 + ML-DSA-65 hybrid signatures
+calybris-core = { version = "1.2", features = ["preview-tsa"] }  # adds RFC 3161 token verification (unreleased)
 ```
 
 | Module | Question it answers | New digest tag |
@@ -22,7 +25,16 @@ calybris-core = { version = "1.2", features = ["preview-pq"] }   # adds Ed25519 
 | `exploration` | Take a small, keyed, replayable share of near-best alternatives, and record exactly how likely each choice was | `calyexp1` |
 | `ope` | What would a *different* policy have achieved, estimated from outcomes that were observed? | — |
 | `budget::Reservation` | A reservation that can be settled once, by the code that owns it | — |
-| `hybrid` (`preview-pq`) | A signature that stays convincing if either Ed25519 or ML-DSA is broken | `calyhyb1` |
+| `hybrid` (`preview-pq`) | A signature that stays convincing if either Ed25519 or ML-DSA is broken; one signature for a whole batch (unreleased) | `calyhyb1`, `calyhbt1` |
+| `checkpoint` (unreleased) | The log's state as C2SP checkpoint text, signed by the log and cosigned by witnesses | — |
+| `witness` (unreleased) | Will an independent party cosign this checkpoint? Only if it extends everything it cosigned before | — |
+| `audit` (unreleased) | Did enough witnesses see it? Was I shown the same log as everyone else? Did this signature predate its key's revocation? | — |
+| `ots` (unreleased) | Is this checkpoint committed in a Bitcoin block, and which one? | — |
+| `tsa` (`preview-tsa`, unreleased) | Did a timestamping authority sign this checkpoint's digest, and when? | — |
+
+The trust layer (`checkpoint`, `witness`, `audit`, `ots`, `tsa`) is described
+end to end, with the questions it answers and a command-line walkthrough, in
+[TRUST.md](TRUST.md).
 
 ## `counterfactual`
 
@@ -132,12 +144,59 @@ Khan, [arXiv:2606.04056](https://arxiv.org/abs/2606.04056).
 (FIPS 204, context `calybris`); `hybrid::verify` accepts only when **both**
 halves verify. Signing is deterministic and keys come from caller-held seeds.
 
+*Unreleased:* `HybridSigner::sign_batch` signs many digests with one hybrid
+signature over the RFC 9162 root of a tree of them (tag `calyhbt1`), and gives
+each an inclusion proof; `verify_batch` checks the signature once and
+`VerifiedBatch::verify_item` each item in `log₂ n` hashes.
+`tests/acvp_ml_dsa.rs` runs NIST's ACVP ML-DSA-65 vectors through the calls
+this module makes.
+
 What it does not claim: an audited post-quantum implementation. The ML-DSA
 implementation used (RustCrypto `ml-dsa`) has **not been independently
-audited**, which is why this has its own flag.
+audited**, which is why this has its own flag. Passing the ACVP vectors shows
+conformance on those paths, not the absence of side channels.
+[AUDIT_SCOPE.md](AUDIT_SCOPE.md) is the scope for an audit.
 
 Research: post-quantum audit evidence — Kao,
 [arXiv:2512.00110](https://arxiv.org/abs/2512.00110).
+
+## `checkpoint`, `witness`, `audit` (unreleased)
+
+`checkpoint` writes a tree head as a C2SP checkpoint, signs it as a C2SP note,
+and adds witness cosignatures (`cosignature/v1`), byte-compatible with the Go
+reference implementation. `witness` is a witness: it cosigns a checkpoint only
+with a consistency proof from the last one it cosigned for that log, and speaks
+C2SP tlog-witness. `audit` counts a quorum of trusted witnesses, follows one
+log through time, turns two conflicting checkpoints into transferable proof of a
+split view, proves a record's inclusion, and decides whether a signature by a
+revoked key predates its revocation.
+
+What it does not claim: that witnesses are independent of each other or of the
+operator; choosing them is the deployment's decision.
+
+Research: witness cosigning — Syta et al.,
+[arXiv:1503.08768](https://arxiv.org/abs/1503.08768).
+
+## `ots` (unreleased)
+
+OpenTimestamps proofs in the reference client's `.ots` format: parse, write,
+submit a checkpoint digest to public calendars, fold in their upgrades, and
+verify a proof against a Bitcoin block header. A proof is Pending, Anchored or
+Verified, and only a header the verifier supplies, with the height it was
+fetched at, makes it Verified.
+
+What it does not claim: that a header is on the main chain. Compare the block
+hash with a node you trust.
+
+## `tsa` (feature `preview-tsa`, unreleased)
+
+Builds an RFC 3161 request for a checkpoint digest and verifies the response:
+the imprint, the nonce, the CMS signed attributes and signature (RSA PKCS#1
+v1.5, ECDSA P-256/P-384), and a pinned signing certificate with the
+`timeStamping` key usage, valid at `genTime`.
+
+What it does not claim: chain building or revocation checking. The caller pins
+the TSA certificates it trusts.
 
 ## Formal checks
 

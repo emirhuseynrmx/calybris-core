@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A trust layer that stops the operator from being the only party vouching for
+which log is the log and when each record was written. Every addition is a
+preview feature; no decision, digest or stable API changes. The design, and the
+four questions it answers, are in `docs/TRUST.md`.
+
+### Preview features
+
+- **`checkpoint`** — tree heads as C2SP tlog-checkpoint text, signed as C2SP
+  notes by the log and cosigned by witnesses (`cosignature/v1`). Keys use the Go
+  `note` verifier-key format. Byte-for-byte agreement with the Go reference
+  packages is pinned by `tests/c2sp_interop.rs`.
+- **`witness`** — an independent witness speaking C2SP tlog-witness: it
+  cosigns a checkpoint only with a consistency proof from the last one it
+  cosigned, records its state through a compare-and-swap before signing, and
+  maps each refusal to the protocol's HTTP status. `FileStore` keeps that
+  state durably for a witness process.
+- **`audit`** — witness quorums (`WitnessPolicy`), an auditor that follows one
+  log and refuses forks, transferable split-view evidence, record inclusion
+  against a witnessed checkpoint, time evidence from witnesses, RFC 3161 and
+  Bitcoin, and `KeyStatus`, under which a revoked key counts only for what is
+  proven to predate its revocation.
+- **`ots`** — OpenTimestamps: the reference `.ots` format read and written in
+  canonical order, calendar submission and upgrade, and verification against a
+  Bitcoin block header at a verifier-supplied height, with an explicit Pending,
+  Anchored or Verified status.
+- **`tsa`** (new feature `preview-tsa`) — RFC 3161 requests and verification
+  of responses against pinned TSA certificates: imprint, nonce, CMS signed
+  attributes, RSA PKCS#1 v1.5 and ECDSA P-256/P-384 signatures, timeStamping key
+  usage and validity at `genTime`.
+- **`hybrid`** — `HybridSigner::sign_batch`, `verify_batch`: one hybrid
+  signature over the Merkle root of many digests (tag `calyhbt1`), each with an
+  inclusion proof.
+- **`merkle`** — `all_inclusion_proofs`, every leaf's proof in `O(n log n)`.
+
+### Command line
+
+- `calybris-verify checkpoint keygen | create | request | stamp | upgrade |
+  tsa-request | verify` and `calybris-verify witness cosign`, built with
+  `preview`. `stamp` and `upgrade` reach OpenTimestamps calendars through the
+  system `curl`; `verify` is offline and exits 3 while a timestamp is pending.
+
+### Checks
+
+- `tests/acvp_ml_dsa.rs`: NIST ACVP ML-DSA-65 vectors for key generation,
+  deterministic signing with a context, and verification, through the calls
+  `hybrid` makes. Conformance, not an audit; `docs/AUDIT_SCOPE.md` is the scope
+  for one.
+- `tests/split_view.rs`: property test of forks shown to real witnesses in
+  every order.
+- `tests/rfc3161.rs`, `tests/opentimestamps.rs`: tokens from OpenSSL, FreeTSA
+  and DigiCert; reference-client proofs and Bitcoin block 358391.
+- Fuzz targets `note_decode`, `ots_decode`, `tsa_decode`.
+
+### Dependencies
+
+- `preview` now also enables `provenance` and pulls in `base64`, `ripemd` and,
+  for the binary's key generation and nonces, `getrandom` (not on wasm32).
+- `preview-tsa` pulls in the RustCrypto `der`, `x509-cert`, `cms`, `x509-tsp`,
+  `spki`, `rsa`, `p256` and `p384` crates. RUSTSEC-2023-0071 (`rsa`, private-key
+  timing) is recorded as not applicable in `deny.toml` and `.cargo/audit.toml`:
+  only public-key verification is used.
+
 ## [1.2.0] - 2026-09-25
 
 1.2.0 answers the questions a decision raises after it is made — what would it

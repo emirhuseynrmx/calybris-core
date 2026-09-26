@@ -148,3 +148,43 @@ fn every_kernel_seed_is_long_enough_to_reach_the_kernel() {
         );
     }
 }
+
+#[cfg(feature = "preview")]
+#[test]
+fn every_note_seed_parses_as_a_note_or_a_witness_request() {
+    use calybris_core::checkpoint::SignedNote;
+    use calybris_core::witness::AddCheckpoint;
+    for (name, bytes) in seeds_for("note_decode") {
+        let text = String::from_utf8(bytes).expect("note seeds are text");
+        assert!(
+            SignedNote::parse(&text).is_ok() || AddCheckpoint::parse(&text).is_ok(),
+            "note_decode/{name} is neither a signed note nor an add-checkpoint request",
+        );
+    }
+}
+
+#[cfg(feature = "preview")]
+#[test]
+fn every_ots_seed_parses_as_a_proof() {
+    for (name, bytes) in seeds_for("ots_decode") {
+        calybris_core::ots::DetachedTimestamp::parse(&bytes)
+            .unwrap_or_else(|e| panic!("ots_decode/{name} is not an OpenTimestamps proof: {e}"));
+    }
+}
+
+/// The target pins the RSA and P-256 fixture certificates and asks about a
+/// fixed digest, so a seed cannot verify there; what matters is that it
+/// reaches past the DER envelope, which a granted response does.
+#[cfg(feature = "preview-tsa")]
+#[test]
+fn every_tsa_seed_is_a_granted_timestamp_response() {
+    use der::Decode as _;
+    for (name, bytes) in seeds_for("tsa_decode") {
+        let resp = x509_tsp::TimeStampResp::from_der(&bytes)
+            .unwrap_or_else(|e| panic!("tsa_decode/{name} is not a TimeStampResp: {e}"));
+        assert!(
+            resp.time_stamp_token.is_some(),
+            "tsa_decode/{name} carries no token"
+        );
+    }
+}

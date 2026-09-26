@@ -18,7 +18,7 @@ serde_json = "1"
 
 [dependencies.calybris-core]
 path = ".."
-features = ["full"]
+features = ["full", "preview-tsa"]
 
 # Fuzzing an unoptimised build finds the same defects far more slowly, and
 # overflow checks stay on so that an arithmetic bug is a crash rather than a
@@ -65,6 +65,27 @@ bench = false
 [[bin]]
 name = "kernel_decide"
 path = "fuzz_targets/kernel_decide.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "note_decode"
+path = "fuzz_targets/note_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ots_decode"
+path = "fuzz_targets/ots_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tsa_decode"
+path = "fuzz_targets/tsa_decode.rs"
 test = false
 doc = false
 bench = false

@@ -93,8 +93,9 @@ inserting/dropping a state transition (state-digest chain).
 5. **Key custody is entirely the caller's** — HMAC and Ed25519 keys are never
    managed here; a leaked key forges chains/signatures. Use HSM/KMS, rotate.
 6. **Timestamps are caller-supplied.** The core is clock-free; `signed_at` is
-   asserted, not proven — a signer can backdate. Use an external TSA if time
-   non-repudiation matters.
+   asserted, not proven — a signer can backdate. The preview trust layer
+   (witness cosignatures, RFC 3161, OpenTimestamps) dates checkpoints
+   independently; see [TRUST.md](TRUST.md).
 7. **The verifier trusts its own build.** `calybris-verify` re-derives digests
    with the same code that made them; the fixed golden/conformance vectors
    exist so a *second, independent* implementation is the real cross-check.
@@ -120,7 +121,8 @@ inserting/dropping a state transition (state-digest chain).
 
 - Side-channel resistance beyond HMAC compare (`subtle::ConstantTimeEq`)
 - Byzantine consensus across replicas
-- Cryptographic timestamps / TSA
+- Cryptographic timestamps / TSA in the stable surface (they are preview
+  features: [TRUST.md](TRUST.md))
 - Post-quantum hash algorithms
 
 ## Recommended production controls

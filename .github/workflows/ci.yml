@@ -263,7 +263,8 @@ jobs:
       - name: Build every target
         run: |
           for target in snapshot_decode receipt_decode wal_decode \
-                        outcome_decode policy_decode kernel_decide; do
+                        outcome_decode policy_decode kernel_decide \
+                        note_decode ots_decode tsa_decode; do
             cargo fuzz build "$target"
           done
 
@@ -281,7 +282,8 @@ jobs:
       - name: Run each target
         run: |
           for target in snapshot_decode receipt_decode wal_decode \
-                        outcome_decode policy_decode kernel_decide; do
+                        outcome_decode policy_decode kernel_decide \
+                        note_decode ots_decode tsa_decode; do
             cargo fuzz run "$target" -- -max_total_time=60 -print_final_stats=1
           done
 

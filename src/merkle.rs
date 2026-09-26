@@ -164,6 +164,33 @@ fn path(m: usize, d: &[Hash]) -> Vec<Hash> {
     }
 }
 
+/// Every leaf's inclusion proof at once, in leaf order, each identical to
+/// what [`inclusion_proof`] gives for that leaf. Each subtree root is
+/// computed once, so this is `O(n log n)` rather than `O(n²)`.
+#[must_use]
+pub fn all_inclusion_proofs(leaf_hashes: &[Hash]) -> Vec<Vec<Hash>> {
+    fn go(d: &[Hash]) -> (Hash, Vec<Vec<Hash>>) {
+        if d.len() == 1 {
+            return (d[0], vec![Vec::new()]);
+        }
+        let k = split(d.len() as u64) as usize;
+        let (left_root, mut left) = go(&d[..k]);
+        let (right_root, right) = go(&d[k..]);
+        for p in &mut left {
+            p.push(right_root);
+        }
+        left.extend(right.into_iter().map(|mut p| {
+            p.push(left_root);
+            p
+        }));
+        (node_hash(&left_root, &right_root), left)
+    }
+    if leaf_hashes.is_empty() {
+        return Vec::new();
+    }
+    go(leaf_hashes).1
+}
+
 /// Checks that `leaf_hash` is leaf `index` of the tree `head` (RFC 9162 §2.1.3.2).
 pub fn verify_inclusion(
     head: &TreeHead,
@@ -441,6 +468,19 @@ mod tests {
                 let mut long = p.clone();
                 long.push([7; 32]);
                 assert!(verify_inclusion(&h, i, &d[i as usize], &long).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn all_inclusion_proofs_match_the_one_at_a_time_proofs() {
+        assert!(all_inclusion_proofs(&[]).is_empty());
+        for n in 1..=70 {
+            let d = leaves(n);
+            let all = all_inclusion_proofs(&d);
+            assert_eq!(all.len(), n);
+            for (i, p) in all.iter().enumerate() {
+                assert_eq!(*p, inclusion_proof(&d, i as u64).unwrap(), "n={n} i={i}");
             }
         }
     }

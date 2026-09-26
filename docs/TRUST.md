@@ -1,0 +1,223 @@
+# Trust beyond the operator
+
+Everything else in Calybris proves that a decision followed its policy, and
+that the log of decisions has not been edited since its head was anchored. All
+of it assumes one party is honest about which log is *the* log, and when each
+record was written: the operator. This page is about removing that assumption.
+
+It covers the `preview` modules `checkpoint`, `witness`, `audit` and `ots`, the
+`preview-tsa` module `tsa`, and batch signing in `hybrid` (`preview-pq`). None
+of them changes a decision or an existing digest. Like every preview feature,
+their API may change in a minor release ([PREVIEW.md](PREVIEW.md)).
+
+```text
+ WAL entries ──► Merkle tree ──► checkpoint ──► log signature
+                  (RFC 9162)     (C2SP text)          │
+                                                      ▼
+                                  witnesses cosign it only if it extends
+                                  everything they cosigned before
+                                                      │
+                   ┌──────────────────────────────────┼─────────────────────┐
+                   ▼                                  ▼                     ▼
+          RFC 3161 token (TSA)           OpenTimestamps → Bitcoin      auditors compare
+                   └──────────────► time evidence ◄───┘                  their views
+```
+
+One checkpoint covers every record before it, so one witness round and one
+timestamp per checkpoint date millions of decisions. Nothing here runs on the
+decision path.
+
+## The four questions
+
+### 1. How does an independent witness notice it is being shown a false history?
+
+By remembering. A witness keeps, for each log, the last tree head it cosigned,
+and cosigns a new checkpoint only with a consistency proof (RFC 9162 §2.1.4)
+that the new tree extends that head. It never cosigns a smaller tree, or a
+different root at the same size. A log that rewrote a record, or that shows one
+history to some parties and another to others, cannot produce the proof, and
+the witness refuses (`witness::Witness::add_checkpoint`, HTTP 422).
+
+One witness only knows what it was shown. Two things close the rest:
+
+- **Quorum.** A verifier requires *k* of *n* witnesses it trusts
+  (`audit::WitnessPolicy`). With *k* greater than *n*/2, two histories that do
+  not extend each other cannot both reach the quorum unless the witnesses that
+  signed both are dishonest, because an honest witness signs one history.
+  `tests/split_view.rs` checks this against real witness state machines, with
+  forks presented in every order.
+- **Comparing notes.** An auditor holding one checkpoint checks any other it
+  is shown (`audit::Auditor::compare`). Two checkpoints of the same size with
+  different roots, both signed by the log, are proof anyone can verify
+  (`audit::SplitView`). For different sizes, the log must supply a consistency
+  proof, and a forked history cannot.
+
+The witness writes its state before it returns a cosignature, through an atomic
+compare-and-swap (`witness::FileStore` for a process on disk), so a crash or a
+race cannot make it sign two inconsistent checkpoints. The state file is what
+stops rollback: keep it with the witness key.
+
+The formats are C2SP [tlog-checkpoint](https://c2sp.org/tlog-checkpoint),
+[signed-note](https://c2sp.org/signed-note),
+[tlog-cosignature](https://c2sp.org/tlog-cosignature) and
+[tlog-witness](https://c2sp.org/tlog-witness), so the witnesses already running
+for Go's checksum database and Sigsum can witness a Calybris log, and this
+witness can serve their logs. `tests/c2sp_interop.rs` pins vectors made by the Go
+reference packages: this crate verifies what Go signs, and reproduces Go's
+output byte for byte.
+
+### 2. Who confirms that a decision was recorded when it says it was?
+
+Not the operator: every timestamp the operator writes is an assertion. Three
+independent sources, each covering a whole checkpoint:
+
+| Source | What it proves | Who you trust |
+|---|---|---|
+| Witness cosignatures | At least *k* witnesses had seen the checkpoint by the *k*-th earliest cosignature time (`audit::Witnessed::seen_by`) | The quorum |
+| RFC 3161 token | A timestamping authority signed the checkpoint digest at `genTime` (`tsa::verify_response`) | The TSA certificate you pinned |
+| OpenTimestamps | The checkpoint digest is committed in a Bitcoin block; its header time bounds when it existed (`ots::DetachedTimestamp::verify_bitcoin`) | Bitcoin's proof of work, and your source for the header |
+
+`audit::existed_by` takes the earliest. What is timestamped is
+`Checkpoint::digest`, SHA-256 of the checkpoint body; every record in the tree
+existed no later than that.
+
+The RFC 3161 check pins the TSA's signing certificate, requires its critical
+`timeStamping` key usage and a `genTime` inside its validity, and verifies the
+CMS signature over signed attributes that bind the token's content (RSA
+PKCS#1 v1.5, ECDSA P-256 and P-384). It does not build a chain to a root or
+check revocation: you name the certificate you trust. `tests/rfc3161.rs` uses
+tokens from a local OpenSSL TSA of each key type and from FreeTSA and DigiCert,
+each accepted by `openssl ts -verify` before it was pinned.
+
+An OpenTimestamps proof is **Pending** until a calendar commits it to a Bitcoin
+transaction, a few hours after submission:
+
+| State | Meaning | Dates the checkpoint? |
+|---|---|---|
+| Pending | Calendars accepted the digest and promised to commit it | No |
+| Anchored | The proof reaches a Bitcoin block attestation, not yet checked | No |
+| Verified | The path ends in the Merkle root of the header of the block at that height, and the header's hash meets its own target | Yes: the block's time |
+
+`ots::DetachedTimestamp::status` can only return Pending or Anchored; Verified
+needs a block header, and the height the verifier fetched it at. The height is
+an input because nothing in a proof authenticates the height it claims.
+Compare the reported block hash with a node you run.
+
+### 3. What if an administrator also gets the signing keys?
+
+Then they can sign anything as the log. What they cannot do:
+
+- **Rewrite what witnesses saw.** Honest witnesses already cosigned the real
+  history and refuse anything that does not extend it, so a rewritten past
+  never reaches the quorum.
+- **Show different histories to different people unnoticed.** See question 1.
+- **Backdate.** A record appended now is in a checkpoint that witnesses,
+  a TSA and Bitcoin date to now.
+- **Freeze the log by going quiet** without it showing:
+  `audit::Auditor::with_max_age` refuses a checkpoint whose quorum's newest
+  cosignatures are too old.
+
+What is left is signing new, correctly dated records. `audit::KeyStatus`
+handles the key itself: once a key is marked revoked at time *t*, something it
+signed counts only if independent evidence shows it existed before *t*. The
+signer's own timestamp is not an input. Keeping keys in an HSM, rotating them,
+and choosing witnesses run by other organisations remain operational decisions
+([KEY_MANAGEMENT.md](KEY_MANAGEMENT.md)); a witness run by the same
+administrator adds nothing.
+
+### 4. Has the hybrid signature implementation been independently audited?
+
+**No.** Writing code cannot change that answer; an independent auditor can.
+What has been done:
+
+- A hybrid signature is valid only if **both** Ed25519 and ML-DSA-65 verify, so
+  a flaw in the ML-DSA implementation does not weaken what Ed25519 gives today.
+- `tests/acvp_ml_dsa.rs` runs NIST's ACVP vectors for ML-DSA-65 through the
+  exact calls `hybrid` makes: all 25 key generations from a seed, 8
+  deterministic signatures with a context, and 15 verifications, 12 of them
+  forgeries that must be rejected. This shows conformance to FIPS 204 on those
+  paths. It does not show resistance to side channels.
+- Batches (`hybrid::HybridSigner::sign_batch`) sign one Merkle root for many
+  digests, so there is less ML-DSA signing to go wrong, and one 3,309-byte
+  signature instead of thousands.
+- `preview-pq` stays a separate feature, labelled unaudited.
+
+[AUDIT_SCOPE.md](AUDIT_SCOPE.md) is written for an auditor: the code in scope,
+the claims to test, and what is out of scope.
+
+## Running it
+
+`calybris-verify` built with `preview` (and `preview-tsa` for tokens) runs the
+whole flow. The operator:
+
+```sh
+calybris-verify checkpoint keygen --name decisions.example.com/log --kind log --out log
+calybris-verify checkpoint create decisions.wal.jsonl --origin decisions.example.com/log \
+    --key log.skey --prev checkpoints/000001.checkpoint --out checkpoints/000002.checkpoint
+calybris-verify checkpoint request decisions.wal.jsonl --note checkpoints/000002.checkpoint --old 1000 > req.txt
+```
+
+Each witness, holding its own key and state:
+
+```sh
+calybris-verify witness cosign req.txt --key w1.skey --log decisions.example.com/log=log.vkey \
+    --state w1.state.json --append-to checkpoints/000002.checkpoint
+```
+
+`req.txt` is a C2SP tlog-witness request body, so it can equally be sent to a
+witness that speaks the protocol over HTTP.
+
+Timestamps:
+
+```sh
+calybris-verify checkpoint stamp checkpoints/000002.checkpoint        # OpenTimestamps, Pending
+calybris-verify checkpoint upgrade checkpoints/000002.checkpoint.ots  # hours later: Anchored
+calybris-verify checkpoint tsa-request checkpoints/000002.checkpoint  # prints the nonce
+curl -H "Content-Type: application/timestamp-query" --data-binary @checkpoints/000002.checkpoint.tsq \
+    -o checkpoints/000002.checkpoint.tsr https://freetsa.org/tsr
+```
+
+An auditor, with only public material:
+
+```sh
+calybris-verify checkpoint verify checkpoints/000002.checkpoint --log-key log.vkey \
+    --witness w1.vkey --witness w2.vkey --witness w3.vkey --threshold 2 \
+    --wal decisions.wal.jsonl --prev checkpoints/000001.checkpoint \
+    --ots checkpoints/000002.checkpoint.ots --block-height H --block-header HEX \
+    --tsr checkpoints/000002.checkpoint.tsr --tsa-cert freetsa.crt --nonce N
+```
+
+Exit codes: 0 everything asked for verified; 1 a check failed; 2 usage; 3 no
+check failed but a timestamp is still Pending or Anchored without a header. A
+Pending proof is never reported as verified.
+
+What to keep, per checkpoint:
+
+```text
+checkpoints/
+  000001.checkpoint       signed note; cosignature lines are appended to it
+  000001.checkpoint.ots   OpenTimestamps proof of SHA-256(body)
+  000001.checkpoint.tsq   RFC 3161 request (holds the nonce)
+  000001.checkpoint.tsr   RFC 3161 response
+```
+
+A checkpoint may name the previous one in an extension line
+`prev <SHA-256 of its body>`; `verify --prev` checks it. The consistency proof a
+witness checks is the stronger link, since it covers every record rather than
+one digest.
+
+`stamp` and `upgrade` reach the calendars through the system `curl`; the
+library has no HTTP stack. They write the reference client's `.ots` format in
+its canonical order, so `ots` reads these files and `calybris-verify` reads
+its. On Windows the reference client currently fails at start-up
+(python-bitcoinlib cannot load OpenSSL), which `calybris-verify` avoids.
+
+## What this does not claim
+
+- That records are true. It proves which records were written and when, not
+  that their inputs were right ([THREAT_MODEL.md](THREAT_MODEL.md)).
+- That witnesses are independent. A policy of witnesses run by one party is a
+  policy of one witness.
+- That a TSA is honest beyond its certificate, or that a Bitcoin header came
+  from the main chain unless you checked it against a node you trust.
+- An audited post-quantum implementation (question 4).

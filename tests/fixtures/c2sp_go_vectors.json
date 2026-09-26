@@ -1,0 +1,7 @@
+{
+  "log_skey": "PRIVATE+KEY+calybris.example/interop+34f7ffcf+ARERERERERERERERERERERERERERERERERERERERERER",
+  "log_vkey": "calybris.example/interop+34f7ffcf+AdBKsjJ0K7SrOhNovUYV5ObQIkq3GgFrr4UgozLJd4c3",
+  "note": "calybris.example/interop\n5\n3Swq2NXIapzVKasWJTtJufv5DtCBb5te8OyYWZbqZ0A=\nprev deadbeef\n\n— calybris.example/interop NPf/z7/XReyYuA77iHGHhb4SbYFJpobnocuiH4cN6Gnh7q0r0KNrO7Km6CFFss9P+rxNFUH9e8PHgum4PDK0HqIz9g4=\n— witness.example LmsD5QAAAABqt38df5mzex72Y6x/GpcF85ujkWVwM2nTTPlC80H+95ztWxUmXyy6kUdLRuQqcP5H9FjIaH/D0cppeXcb4GH0iemwAw==\n",
+  "witness_skey": "PRIVATE+KEY+witness.example+2e6b03e5+BCIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi",
+  "witness_vkey": "witness.example+2e6b03e5+BKCapfR6Z1mAL/lV+NwtKhSlyZ0jvpf4ZBJ/+Tg0VaTw"
+}

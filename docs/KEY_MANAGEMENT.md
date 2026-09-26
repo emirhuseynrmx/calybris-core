@@ -125,8 +125,10 @@ the public key embedded in an untrusted receipt.
 ## 4. Caveats the keys do not remove
 
 - Timestamps are **caller-asserted** — a holder of the signing key can backdate
-  `signed_at_epoch_ms`. For non-repudiation of *time*, co-sign with an external
-  timestamping authority (RFC 3161).
+  `signed_at_epoch_ms`. For non-repudiation of *time*, date checkpoints with
+  witnesses, an RFC 3161 authority or OpenTimestamps, and treat a revoked key
+  as valid only for what that evidence places before its revocation
+  (`audit::KeyStatus`, [TRUST.md](TRUST.md)).
 - Keys protect integrity/attribution, **not confidentiality** — payloads are in
   the clear. Encrypt at rest/in transit separately.
 - A leaked key defeats its guarantee entirely. Rotation cadence and HSM custody
