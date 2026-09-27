@@ -137,7 +137,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.11.0",
- "spki 0.7.3",
+ "spki 0.8.0",
  "subtle",
  "tempfile",
  "thiserror",
